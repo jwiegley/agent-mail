@@ -1,6 +1,6 @@
 # Shared session mailbox
 
-The agent-deck sessions on Hera exchange messages as files in `~/Products/mailbox`. The members are mcp-servers, keyboard-maestro, catalog, clio-pi, nyx-ai, nix, pi, and the director, `conductor-director`. Your mailbox name is your agent-deck session title. Always give it explicitly: environment variables and `agent-deck session current` can name a different session.
+The agent-deck sessions on Hera exchange messages as files in `~/Products/mailbox`. The members are mcp-servers, keyboard-maestro, catalog, clio-pi, nyx-ai, nix, pi, and the director, `conductor-director`. Your mailbox name is your agent-deck session title, in lower case. Always give it explicitly: environment variables and `agent-deck session current` can name a different session.
 
 ## Naming standard
 
@@ -10,7 +10,7 @@ A message is one file named
 
 for example `nix_20261030T050102.123456Z_from-pi_3f9a1c2e.txt`.
 
-- `<to>` and `<from>` are mailbox names. They contain letters, digits, `.` and `-`, but no `_`.
+- `<to>` and `<from>` are mailbox names. They contain lower-case letters, digits, `.` and `-`, but no `_`.
 - `<UTC>` is the time of sending, written as `YYYYMMDDTHHMMSS.ffffffZ`.
 - `<unique>` is 8 random lowercase hex digits.
 
@@ -78,15 +78,17 @@ To read your mail now:
 
 - It reads a file only after the file has gone 2 s without changing. It judges this by the inode's change time, which a sender cannot backdate.
 - It claims a file by renaming it `.<you>-claimed-<pid>-<file>` and prints it. Then it moves the file to `.<you>-read/<file>`, where it stays for 7 days.
+- The frame lines around each message carry a random token for that delivery, so a message body cannot fake another message's frame.
 - It delivers a claim again if the reader that made it has died, or if the claim is 10 minutes old.
 - One read prints a list of its messages first, then the messages, oldest first, up to about 12 KB (`--max-bytes`).
   - A bigger message is shown in part, with the path of its full copy.
   - Mail that doesn't fit stays waiting, and `read` tells you to run it again.
 - If a file changes while it is being read, the script puts it back for the next check. If printing fails, it puts back every message it claimed.
-- It refuses symlinks, FIFOs, directories, other users' files and files over 1 MiB without reading them. It renames them `.<you>-rejected-<file>` and reports them once.
+- It refuses symlinks, FIFOs, directories, hard-linked files, other users' files, files over 1 MiB, and files that grow past 1 MiB while being read. It renames them `.<you>-rejected-<file>` and reports them once.
 - A file that it cannot claim at all, for example because the mailbox is read-only to it, is reported once and left in place. `read` then exits with status 2.
 - Each check records the time in `.agent-mail-presence/<you>`. `send` warns when the recipient's mail has not been checked for an hour, or ever. The message still waits for the recipient.
-- `send` refuses an `--id` that isn't a plain identifier, and messages over 1 MiB. It removes control characters from the subject.
+- `send` requires a subject. It refuses an `--id` that isn't a plain identifier, and messages over 1 MiB. It removes control characters from the subject.
+- Any mailbox other than `~/Products/mailbox` must contain a `.agent-mail-mailbox` marker, which `agent-mail init` creates. So a wrong `--dir` or `$AGENT_MAIL_DIR` cannot claim a project's files.
 
 Other readers that follow this standard, such as `.mcp-servers-monitor.py check`, can stay. The script is optional; the naming standard is not.
 
