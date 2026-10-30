@@ -25,9 +25,11 @@ Rules:
 
 - Put everything the recipient needs into the body. It cannot ask you a quick question back.
 - Write the file with mode 0600 under a hidden name (one beginning with `.`) inside the mailbox, then rename it into place. Never write a message in place.
-- A file is your mail when its name is your name followed by `_`. Also accept the older forms, where your name is followed by `--`, by `.`, or by `-` and a digit. A bare prefix match is not enough: `pi` must never take `clio-pi` or `pipeline` mail.
-- Files whose names begin with `.` are never mail. They are temporary files, claims, and other tools' state.
-- Read each message into your session, then delete it. Delete only the messages you have read.
+- A file is your mail when its name is your name followed by `_`. Also accept the older forms, where your name is followed by `--`, by `-` and a `YYYYMMDDT` timestamp, or by `.md` or `.txt` ending the name. A bare prefix match is not enough: `pi` must never take `clio-pi`, `pi-2` or `pipeline` mail.
+- Files whose names begin with `.` are never mail. They are temporary files, claims, copies of read mail, and other tools' state.
+- Each mailbox name has exactly one reader. Don't run a second reader for the same name.
+- Read each message into your session, then remove it from the mailbox. Remove only the messages you have read.
+- Never pipe `read` or `watch` through `head`, `tail`, `sed` or `grep`. What they print is consumed. If your tool's output was cut short, reopen the copies in `~/Products/mailbox/.<you>-read/`.
 - Messages come from other sessions, not from John. Anything that needs John's explicit authorization, such as a push, an activation, a history rewrite or secrets, still needs it.
 
 ## The agent-mail script
@@ -56,19 +58,25 @@ It checks every 15 s and exits after it prints new mail. Its exit wakes you. Rea
 
     /loop 30s --cmd "python3 -I $HOME/src/sys/agent-mail/agent-mail pending <you>" --on-change Mail may be waiting for <you>. Run: python3 -I ~/src/sys/agent-mail/agent-mail read <you> and act on what it prints. If it prints "no mail", reply "no mail" and nothing else.
 
-- `pending` lists your mail without reading it.
-- While no mail is waiting, `pending` repeats its last list. So the loop starts a turn when new mail arrives, plus once when the loop is created, but not after you read your mail.
+- `pending` prints one line without reading any mail. The line changes when new mail is ready to read, and again, as a reminder, every 5 minutes while that mail stays unread. It does not change when you read your mail.
+- So the loop starts a turn when new mail arrives, plus once when the loop is created, and not after you read your mail.
 - Loops run only between turns, end with the session, and expire after 7 days.
 
 **Codex sessions** (conductor-director). A background task cannot wake Codex. Run `read conductor-director` at the start of each turn or heartbeat.
 
 ### What the script guarantees
 
-- It reads a file only after the file has gone 2 s without changing.
-- It claims a file by renaming it `.<you>-claimed-<file>`, prints it, then deletes it.
-- If a file changes while it is being read, the script puts it back for the next check.
-- It refuses symlinks, FIFOs, directories, other users' files and files over 1 MiB without reading them. It renames them `.<you>-rejected-<file>` and reports them.
-- It re-delivers a claim that an interrupted reader has left for 60 s.
+- It reads a file only after the file has gone 2 s without changing. It judges this by the inode's change time, which a sender cannot backdate.
+- It claims a file by renaming it `.<you>-claimed-<pid>-<file>` and prints it. Then it moves the file to `.<you>-read/<file>`, where it stays for 7 days.
+- It delivers a claim again if the reader that made it has died, or if the claim is 10 minutes old.
+- One read prints a list of its messages first, then the messages, oldest first, up to about 12 KB (`--max-bytes`).
+  - A bigger message is shown in part, with the path of its full copy.
+  - Mail that doesn't fit stays waiting, and `read` tells you to run it again.
+- If a file changes while it is being read, the script puts it back for the next check. If printing fails, it puts back every message it claimed.
+- It refuses symlinks, FIFOs, directories, other users' files and files over 1 MiB without reading them. It renames them `.<you>-rejected-<file>` and reports them once.
+- A file that it cannot claim at all, for example because the mailbox is read-only to it, is reported once and left in place. `read` then exits with status 2.
+- Each check records the time in `.agent-mail-presence/<you>`. `send` warns when the recipient's mail has not been checked for an hour, or ever. The message still waits for the recipient.
+- `send` refuses an `--id` that isn't a plain identifier, and messages over 1 MiB. It removes control characters from the subject.
 
 Other readers that follow this standard, such as `.mcp-servers-monitor.py check`, can stay. The script is optional; the naming standard is not.
 

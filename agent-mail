@@ -5,42 +5,62 @@ Mailbox: a directory, by default ~/Products/mailbox ($AGENT_MAIL_DIR or --dir ov
 
 Name: a session's mailbox name is its agent-deck title: letters, digits, "." and "-",
 starting with a letter or digit, with no "_" and no "--". Always pass it explicitly;
-inherited environment variables can name another session.
+inherited environment variables can name another session. Each mailbox name should have
+exactly one reader.
 
 Message: a regular file named TO_UTC_from-FROM_UNIQUE.txt, for example
 nix_20261030T050102.123456Z_from-pi_3f9a1c2e.txt, owned by you and mode 0600. It begins
 with From, To, UTC and Subject header lines, then a blank line, then the body. A sender
 writes it to a hidden file in the mailbox and renames it into place.
 
-Ownership: a file is NAME's mail when its name starts with NAME followed by "_", or by the
-older "--", ".", or "-" and a digit. "pi" never takes "clio-pi", "pi-x" or "pipeline" mail.
-Names starting with "." are never mail.
+Ownership: a file is NAME's mail when its name is NAME followed by "_", or by one of the
+older forms: "--", "-" and a YYYYMMDDT timestamp, or ".md"/".txt" ending the name. So
+"pi" never takes "clio-pi", "pi-2", "pi.v2" or "pipeline" mail. Names starting with "."
+are never mail.
 
-Receiving claims a file by renaming it to .NAME-claimed-FILE, prints it, then deletes it.
-A file changed in the last 2 seconds waits for a later poll, and a file that changes while
-being read is put back. Symlinks, FIFOs, directories, files owned by another user and
-files over 1 MiB are not read: they become .NAME-rejected-FILE and are reported. A claim
-left for 60 seconds by an interrupted reader is delivered by the next one.
+Receiving:
+- A file is read once its inode has gone 2 seconds unchanged (ctime, which a sender cannot
+  backdate), so a message still being written waits.
+- It is claimed by renaming it to .NAME-claimed-PID-FILE, then printed. Afterwards it is
+  moved to .NAME-read/FILE and kept for 7 days, so a reader whose output was cut can
+  reopen it. A claim whose reader has died, or that is 10 minutes old, is delivered again.
+- One read prints a list of its messages first, then the messages, oldest first, up to
+  about 12 KB (--max-bytes). A bigger message is shown in part, with the path of its
+  copy. Mail not delivered stays waiting, and read says so.
+- A file that changes while being read is put back for later.
+- Symlinks, FIFOs, directories, other users' files and files over 1 MiB are not read:
+  they become .NAME-rejected-FILE and are reported once.
+- A file that cannot be claimed at all (for example, the mailbox is read-only to this
+  reader) is reported once and left where it is; read exits with status 2.
+- If printing fails, the claimed messages are put back.
+- Every read, watch poll and pending run records that NAME's mail was checked, in
+  .agent-mail-presence/NAME. send warns when the recipient's mail has not been checked
+  for an hour, or ever; the message still waits for it.
+
+Never pipe read or watch through head, tail, sed or grep: what they print is consumed.
 
 Commands:
   send --from NAME --to NAME [--subject TEXT] [--id SESSION_ID] [FILE]
       Send FILE, or standard input when FILE is "-" or omitted.
-  read NAME
-      Deliver NAME's mail once and exit; prints "agent-mail: no mail for NAME" when empty.
-  watch NAME [--interval SECONDS] [--forever]
+  read NAME [--max-bytes N]
+      Deliver NAME's waiting mail once; prints "agent-mail: no mail for NAME" when empty.
+  watch NAME [--interval SECONDS] [--forever] [--max-bytes N]
       Poll (default every 15 s). Exit after the first delivery, so a background task
       wakes its session once per batch; with --forever keep printing batches, for a
       streaming monitor.
   pending NAME
-      Print the names of NAME's waiting mail. While none is waiting, repeat the last
-      non-empty list, so pi-loop's --on-change starts a turn when mail arrives but not
-      after it has been read.
+      One line for pi-loop's --cmd --on-change. It changes when new mail is ready to
+      read, and again as a reminder while that mail stays unread. It does not change
+      when mail is read.
   self-test
       Run the built-in checks in a temporary directory.
 """
 import argparse
+import contextlib
 import datetime
 import hashlib
+import io
+import json
 import os
 import re
 import secrets
@@ -49,11 +69,21 @@ import stat
 import sys
 import tempfile
 import time
+import unicodedata
 
 SETTLE = 2.0
-CLAIM_STALE = 60.0
+CLAIM_STALE = 600.0
 LIMIT = 1 << 20
+MAX_BYTES = 12000
+EXCERPT = 8000
+KEEP_DAYS = 7
+NAME_MAX = 255
+REMIND_AFTER = 120.0
+REMIND_EVERY = 300.0
+PRESENCE_STALE = 3600.0
 NAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.]|-(?!-))*")
+IDENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+STAMP = re.compile(r"(\d{8}T\d{6})(?:\.(\d{6}))?Z")
 
 
 def default_dir():
@@ -68,12 +98,77 @@ def check_name(name):
 
 
 def owns(name):
-    return re.compile(re.escape(name) + r"(?:_|--|\.|-[0-9]|$)", re.IGNORECASE)
+    return re.compile(re.escape(name) + r"(?:_|--|-\d{8}T|\.(?:md|txt)$|$)", re.IGNORECASE)
+
+
+def claim_re(name):
+    return re.compile(re.escape(f".{name}-claimed-") + r"(\d+)-(.+)", re.DOTALL)
+
+
+def legacy_claim_re(name):
+    # Claims made by agent-mail before claims carried the reader's PID.
+    return re.compile(re.escape(f".{name}-claimed-") + r"(?!\d+-)(.+)", re.DOTALL)
 
 
 def utc(ts=None, micro=False):
     t = datetime.datetime.fromtimestamp(time.time() if ts is None else ts, datetime.timezone.utc)
     return t.strftime("%Y%m%dT%H%M%S.%fZ" if micro else "%Y%m%dT%H%M%SZ")
+
+
+def sort_key(entry, st):
+    m = STAMP.search(entry)
+    stamp = f"{m.group(1)}.{m.group(2) or '000000'}" if m else utc(st.st_mtime, micro=True)[:-1]
+    return (stamp, entry)
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def too_long(name):
+    return len(os.fsencode(name)) > NAME_MAX
+
+
+def state_path(d, name, kind):
+    key = hashlib.sha256(os.path.realpath(d).encode()).hexdigest()[:12]
+    return os.path.join(os.path.expanduser("~/.cache/agent-mail"), f"{key}-{name}.{kind}")
+
+
+def save_json(path, data):
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    os.replace(tmp, path)
+
+
+def load_json(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def presence_path(d, name):
+    return os.path.join(d, ".agent-mail-presence", name)
+
+
+def touch_presence(d, name):
+    p = presence_path(d, name)
+    try:
+        os.makedirs(os.path.dirname(p), mode=0o700, exist_ok=True)
+        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        os.close(fd)
+        os.utime(p, None)
+    except OSError:
+        pass
 
 
 class Rejected(Exception):
@@ -114,128 +209,295 @@ def read_file(path):
         os.close(fd)
 
 
-def poll(name, d):
-    """Claim and read NAME's mail. Return (printable blocks, claimed paths to delete, waiting count)."""
-    pattern = owns(name)
-    claimed_prefix = f".{name}-claimed-"
-    now = time.time()
-    blocks, done, waiting = [], [], 0
-    for entry in sorted(os.listdir(d)):
-        recovering = entry.startswith(claimed_prefix)
-        if not recovering and (entry.startswith(".") or not pattern.match(entry)):
+def candidates(name, d, now):
+    """NAME's deliverable entries, oldest first: settled mail and abandoned claims.
+
+    Returns (entries, waiting, busy): entries are (sort key, entry, original, lstat);
+    waiting counts mail still being written, busy counts claims a live reader holds.
+    """
+    pattern, claims, legacy = owns(name), claim_re(name), legacy_claim_re(name)
+    found, waiting, busy = [], 0, 0
+    for entry in os.listdir(d):
+        m = claims.fullmatch(entry)
+        old = None if m else legacy.fullmatch(entry)
+        if m:
+            original = m.group(2)
+        elif old:
+            original = old.group(1)
+        elif entry.startswith(".") or not pattern.match(entry):
             continue
-        original = entry[len(claimed_prefix):] if recovering else entry
-        path = os.path.join(d, entry)
-        hold = path if recovering else os.path.join(d, claimed_prefix + entry)
+        else:
+            original = entry
         try:
-            st = os.lstat(path)
-            if recovering:
-                if now - st.st_ctime < CLAIM_STALE:
-                    continue
-            else:
-                if now - st.st_mtime < SETTLE:
-                    waiting += 1
-                    continue
-                os.rename(path, hold)
-            text, st = read_file(hold)
+            st = os.lstat(os.path.join(d, entry))
+        except FileNotFoundError:
+            continue
+        if m:
+            pid = int(m.group(1))
+            if pid == os.getpid():
+                continue
+            if alive(pid) and now - st.st_ctime < CLAIM_STALE:
+                busy += 1
+                continue
+        elif old:
+            if now - st.st_ctime < CLAIM_STALE:
+                busy += 1
+                continue
+        elif 0 <= now - st.st_ctime < SETTLE:
+            waiting += 1
+            continue
+        found.append((sort_key(original, st), entry, original, st))
+    found.sort()
+    return found, waiting, busy
+
+
+def poll(name, d, max_bytes=MAX_BYTES):
+    """Claim and read NAME's mail, oldest first, up to about max_bytes.
+
+    Returns a dict: deliveries [(original, hold, text, fstat)]; notices [str] for files
+    moved aside; stuck [(key, str)] for files that could not be claimed; waiting (still
+    being written, or changed while read); busy (held by a live reader); more (ready but
+    left for the next read).
+    """
+    now = time.time()
+    found, waiting, busy = candidates(name, d, now)
+    out = {"deliveries": [], "notices": [], "stuck": [], "waiting": waiting, "busy": busy, "more": 0}
+    size = 0
+    for i, (_, entry, original, st) in enumerate(found):
+        # Only a message that will be printed counts against the cap, and a big one only
+        # as the part of it that is shown.
+        cost = min(st.st_size, EXCERPT) if stat.S_ISREG(st.st_mode) and st.st_size <= LIMIT else 0
+        if out["deliveries"] and cost and size + cost > max_bytes:
+            out["more"] = len(found) - i
+            break
+        path = os.path.join(d, entry)
+        hold = os.path.join(d, f".{name}-claimed-{os.getpid()}-{original}")
+        if too_long(os.path.basename(hold)):
+            out["stuck"].append((f"{st.st_ino}:{entry}:name", f"agent-mail: cannot claim {entry}: its name is too long; it is still at {path}"))
+            continue
+        try:
+            os.rename(path, hold)
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            out["stuck"].append((f"{st.st_ino}:{entry}:{e.errno}", f"agent-mail: cannot claim {entry} ({e.strerror}); it is still at {path}"))
+            continue
+        try:
+            text, fst = read_file(hold)
         except FileNotFoundError:
             continue
         except Changed:
             back = os.path.join(d, original)
             if not os.path.lexists(back):
                 os.rename(hold, back)
-            waiting += 1
+            out["waiting"] += 1
             continue
         except Exception as e:
             rejected = os.path.join(d, f".{name}-rejected-{original}")
             try:
                 os.rename(hold, rejected)
+                where = rejected
             except OSError:
-                rejected = hold
-            blocks.append(f"--- agent-mail: {original} was not read: {e}; it is now {rejected}")
+                where = hold if os.path.lexists(hold) else path
+            out["notices"].append(f"--- agent-mail: {original} was not read: {e}; it is now {where}")
             continue
-        blocks.append(
-            f"=== agent-mail: message for {name}: {original} ({st.st_size} bytes, written {utc(st.st_mtime)}) ===\n"
-            f"{text.rstrip()}\n=== end of {original} ==="
-        )
-        done.append(hold)
-    return blocks, done, waiting
+        out["deliveries"].append((original, hold, text, fst))
+        size += min(fst.st_size, EXCERPT)
+    return out
 
 
-def deliver(blocks, done):
-    print("\n\n".join(blocks), flush=True)
-    for hold in done:
+def archive_dir(d, name):
+    return os.path.join(d, f".{name}-read")
+
+
+def prune(d, name, now):
+    a = archive_dir(d, name)
+    try:
+        entries = os.listdir(a)
+    except FileNotFoundError:
+        return
+    for entry in entries:
+        p = os.path.join(a, entry)
         try:
-            os.unlink(hold)
+            if now - os.lstat(p).st_ctime > KEEP_DAYS * 86400:
+                os.unlink(p)
+        except OSError:
+            pass
+
+
+def render(name, d, result, max_bytes):
+    """The text one delivery prints: a list first, then each message, then notices."""
+    deliveries = result["deliveries"]
+    a = archive_dir(d, name)
+    lines = []
+    if deliveries:
+        head = f"agent-mail: {len(deliveries)} message(s) for {name}: " + ", ".join(o for o, *_ in deliveries)
+        if result["more"]:
+            head += f"; {result['more']} more waiting, so run read again"
+        lines.append(head)
+    for original, _, text, fst in deliveries:
+        copy = os.path.join(a, original)
+        body = text.rstrip()
+        if len(body.encode("utf-8")) > max_bytes:
+            cut = body.encode("utf-8")[:EXCERPT].decode("utf-8", errors="ignore")
+            body = f"{cut}\n[... {fst.st_size} bytes in all; the whole message is at {copy}]"
+        lines.append(
+            f"=== agent-mail: message for {name}: {original} ({fst.st_size} bytes, written {utc(fst.st_mtime)}; copy kept at {copy}) ===\n"
+            f"{body}\n=== end of {original} ==="
+        )
+    lines.extend(result["notices"])
+    if deliveries and result["more"]:
+        lines.append(f"agent-mail: {result['more']} more message(s) for {name} waiting; run read again")
+    return "\n\n".join(lines)
+
+
+def deliver(name, d, result, max_bytes):
+    """Print a batch, then archive what was printed. Put the claims back if printing fails."""
+    text = render(name, d, result, max_bytes)
+    try:
+        if text:
+            print(text, flush=True)
+    except (BrokenPipeError, OSError):
+        for original, hold, *_ in result["deliveries"]:
+            back = os.path.join(d, original)
+            try:
+                if not os.path.lexists(back):
+                    os.rename(hold, back)
+            except OSError:
+                pass
+        try:
+            sys.stdout = open(os.devnull, "w")
+        except OSError:
+            pass
+        raise SystemExit(3)
+    a = archive_dir(d, name)
+    if result["deliveries"]:
+        os.makedirs(a, mode=0o700, exist_ok=True)
+    for original, hold, *_ in result["deliveries"]:
+        dest = os.path.join(a, original)
+        if os.path.lexists(dest):
+            dest = f"{dest}.{secrets.token_hex(3)}"
+        try:
+            os.rename(hold, dest)
         except FileNotFoundError:
             pass
 
 
-def cmd_read(name, d):
-    blocks, done, waiting = poll(name, d)
-    if blocks:
-        deliver(blocks, done)
-    else:
-        print(f"agent-mail: no mail for {name}", flush=True)
-    if waiting:
-        print(f"agent-mail: {waiting} message(s) for {name} still being written; read again shortly", flush=True)
-    return 0
+def remember_stuck(d, name, stuck):
+    """Return the stuck notices not reported before by any reader, and remember them."""
+    path = state_path(d, name, "stuck")
+    seen = set(load_json(path) or [])
+    fresh = [(k, msg) for k, msg in stuck if k not in seen]
+    if fresh:
+        save_json(path, sorted(seen | {k for k, _ in fresh})[-200:])
+    return fresh
 
 
-def cmd_watch(name, d, interval, forever):
+def cmd_read(name, d, max_bytes):
+    touch_presence(d, name)
+    prune(d, name, time.time())
+    result = poll(name, d, max_bytes)
+    if not (result["deliveries"] or result["notices"]) and result["waiting"]:
+        time.sleep(SETTLE + 0.2)
+        result = poll(name, d, max_bytes)
+    deliver(name, d, result, max_bytes)
+    if not (result["deliveries"] or result["notices"]):
+        if result["waiting"]:
+            print(f"agent-mail: nothing ready for {name} yet: {result['waiting']} message(s) still being written; read again shortly", flush=True)
+        elif result["busy"]:
+            print(f"agent-mail: nothing ready for {name}: {result['busy']} message(s) are being read by another reader of {name}", flush=True)
+        elif not result["stuck"]:
+            print(f"agent-mail: no mail for {name}", flush=True)
+    remember_stuck(d, name, result["stuck"])
+    for _, msg in result["stuck"]:
+        print(msg, flush=True)
+    return 2 if result["stuck"] else 0
+
+
+def cmd_watch(name, d, interval, forever, max_bytes, max_polls=None):
+    polls = 0
     while True:
         if not os.path.isdir(d):
             print(f"agent-mail: mailbox {d} is missing; the watcher for {name} has stopped", flush=True)
             return 1
-        blocks, done, _ = poll(name, d)
-        if blocks:
-            deliver(blocks, done)
+        touch_presence(d, name)
+        prune(d, name, time.time())
+        result = poll(name, d, max_bytes)
+        fresh = remember_stuck(d, name, result["stuck"])
+        if result["deliveries"] or result["notices"] or fresh:
+            deliver(name, d, result, max_bytes)
+            for _, msg in fresh:
+                print(msg, flush=True)
             if not forever:
                 print(f"agent-mail: the watcher for {name} has exited after this delivery; start it again", flush=True)
                 return 0
+        polls += 1
+        if max_polls is not None and polls >= max_polls:
+            return None
         time.sleep(interval)
 
 
 def cmd_pending(name, d):
-    pattern = owns(name)
-    pending = sorted(e for e in os.listdir(d) if not e.startswith(".") and pattern.match(e))
-    key = hashlib.sha256(os.path.realpath(d).encode()).hexdigest()[:12]
-    state = os.path.join(os.path.expanduser("~/.cache/agent-mail"), f"{key}-{name}.last")
-    if pending:
-        os.makedirs(os.path.dirname(state), mode=0o700, exist_ok=True)
-        tmp = f"{state}.{os.getpid()}.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write("\n".join(pending) + "\n")
-        os.replace(tmp, state)
-        print("\n".join(pending))
-    else:
+    touch_presence(d, name)
+    now = time.time()
+    found, _, _ = candidates(name, d, now)
+    ident = [f"{e}:{st.st_ino}:{st.st_mtime_ns}:{st.st_ctime_ns}" for _, e, _, st in found]
+    digest = hashlib.sha256("\n".join(sorted(ident)).encode()).hexdigest()[:12] if ident else None
+    path = state_path(d, name, "pending")
+    state = load_json(path)
+    if state is None:
         try:
-            with open(state, encoding="utf-8") as f:
-                print(f.read().rstrip())
+            with open(state_path(d, name, "last"), encoding="utf-8") as f:
+                line = f.read().rstrip()
         except FileNotFoundError:
-            pass
+            line = ""
+        state = {"line": line, "digest": None, "announced": 0, "changed": 0, "reminders": 0}
+    if digest and digest != state["digest"]:
+        names = ", ".join(original for _, _, original, _ in found)
+        state.update(digest=digest, announced=now, changed=now, reminders=0,
+                     line=f"agent-mail: mail for {name} announced {utc(now)} [{digest}]: {names}")
+        save_json(path, state)
+    elif digest and now - state["announced"] > REMIND_AFTER and now - state["changed"] > REMIND_EVERY:
+        state["reminders"] += 1
+        state["changed"] = now
+        state["line"] = re.sub(r" \(still unread; reminder \d+\)$", "", state["line"]) + f" (still unread; reminder {state['reminders']})"
+        save_json(path, state)
+    if state["line"]:
+        print(state["line"])
     return 0
+
+
+def clean_line(text):
+    return " ".join("".join(" " if unicodedata.category(ch)[0] == "C" else ch for ch in text).split())
 
 
 def cmd_send(sender, to, subject, ident, src, d):
     if not os.path.isdir(d):
         raise SystemExit(f"agent-mail: mailbox {d} does not exist")
-    if src in (None, "-"):
-        body = sys.stdin.read()
-    else:
-        with open(src, encoding="utf-8") as f:
-            body = f.read()
+    if ident is not None and not IDENT.fullmatch(ident):
+        raise SystemExit(f"agent-mail: invalid --id {ident!r}")
+    try:
+        if src in (None, "-"):
+            body = sys.stdin.read()
+        else:
+            with open(src, encoding="utf-8") as f:
+                body = f.read()
+    except (OSError, UnicodeDecodeError) as e:
+        raise SystemExit(f"agent-mail: cannot read the message body: {e}")
     stamp = utc(micro=True)
     final = os.path.join(d, f"{to}_{stamp}_from-{sender}_{secrets.token_hex(4)}.txt")
     host = socket.gethostname().split(".")[0].lower()
     header = f"From: {sender}@{host}" + (f" (agent-deck {ident})" if ident else "") + f"\nTo: {to}\nUTC: {stamp}\n"
-    if subject:
-        header += "Subject: " + " ".join(subject.split()) + "\n"
+    if subject and clean_line(subject):
+        header += f"Subject: {clean_line(subject)}\n"
+    data = f"{header}\n{body.rstrip()}\n".encode("utf-8")
+    if len(data) > LIMIT:
+        raise SystemExit(f"agent-mail: the message is {len(data)} bytes, over the 1 MiB limit; send a file path instead")
     tmp = os.path.join(d, "." + os.path.basename(final) + ".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(f"{header}\n{body.rstrip()}\n")
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
         if os.path.lexists(final):
             raise SystemExit(f"agent-mail: {final} already exists")
         os.rename(tmp, final)
@@ -246,11 +508,17 @@ def cmd_send(sender, to, subject, ident, src, d):
             pass
         raise
     print(final)
+    try:
+        age = time.time() - os.stat(presence_path(d, to)).st_mtime
+        if age > PRESENCE_STALE:
+            print(f"agent-mail: warning: {to}'s mail was last checked {int(age // 60)} minutes ago; the message waits until it is read", file=sys.stderr)
+    except FileNotFoundError:
+        print(f"agent-mail: warning: no reader has checked {to}'s mail yet; the message waits until one does", file=sys.stderr)
     return 0
 
 
 def self_test():
-    global CLAIM_STALE
+    global SETTLE, CLAIM_STALE
     checks = 0
 
     def ok(cond, what):
@@ -260,97 +528,176 @@ def self_test():
         checks += 1
 
     def capture(fn, *args):
-        import io
-        import contextlib
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            fn(*args)
-        return out.getvalue()
+        out, err = io.StringIO(), io.StringIO()
+        code = None
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = fn(*args)
+            except SystemExit as e:
+                code = e.code
+        return out.getvalue(), code, err.getvalue()
 
+    home = os.environ.get("HOME")
+    saved = SETTLE, CLAIM_STALE
     with tempfile.TemporaryDirectory() as root:
-        d = os.path.join(root, "mailbox")
-        os.mkdir(d, 0o700)
-        old = time.time() - 120
-
-        def mk(n, text, t=old):
-            p = os.path.join(d, n)
-            with open(p, "w") as f:
-                f.write(text)
-            os.utime(p, (t, t))
-            return p
-
-        mine = ["pi_20261030T000000.000001Z_from-nix_aaaaaaaa.txt", "pi--20261030T000002Z--from-catalog.md",
-                "pi.md", "pi-20261030T000003Z-from-x.md", "PI_20261030T000004.000000Z_from-nyx-ai_bbbbbbbb.txt"]
-        others = ["clio-pi_20261030T000000.000000Z_from-nix_cccccccc.txt", "pi-foo--20261030T000000Z--from-x.md",
-                  "pipeline.md", ".pi_hidden.txt", "nyx-ai_20261030T000000.000000Z_from-pi_dddddddd.txt", "secret.txt"]
-        for n in mine:
-            mk(n, f"body of {n}\n")
-        for n in others:
-            mk(n, "SECRET\n" if n == "secret.txt" else f"not for pi: {n}\n")
-        fresh = mk("pi_20261030T000005.000000Z_from-nix_eeeeeeee.txt", "fresh\n", time.time() + 60)
-        os.symlink(os.path.join(d, "secret.txt"), os.path.join(d, "pi_link.txt"))
-        os.utime(os.path.join(d, "pi_link.txt"), (old, old), follow_symlinks=False)
-        os.mkdir(os.path.join(d, "pi_dir"))
-        os.utime(os.path.join(d, "pi_dir"), (old, old))
-        os.mkfifo(os.path.join(d, "pi_fifo"))
-        os.utime(os.path.join(d, "pi_fifo"), (old, old))
-        mk("pi_big.txt", "x" * (LIMIT + 1))
-
-        out = capture(cmd_read, "pi", d)
-        for n in mine:
-            ok(f"body of {n}" in out and not os.path.lexists(os.path.join(d, n)), f"delivers and deletes {n}")
-        for n in others:
-            ok(os.path.exists(os.path.join(d, n)) and f"not for pi: {n}" not in out, f"leaves {n} alone")
-        ok("SECRET" not in out, "never reads through a symlink")
-        for n in ("pi_link.txt", "pi_dir", "pi_fifo", "pi_big.txt"):
-            ok(f"{n} was not read" in out and os.path.lexists(os.path.join(d, f".pi-rejected-{n}")), f"rejects {n}")
-        ok(os.path.exists(fresh) and "1 message(s) for pi still being written" in out, "waits for a file still being written")
-        os.utime(fresh, (old, old))
-        ok("fresh" in capture(cmd_read, "pi", d) and not os.path.exists(fresh), "delivers it once settled")
-        ok("no mail for pi" in capture(cmd_read, "pi", d), "reports an empty mailbox")
-
-        stale = mk(".pi-claimed-pi_20261029T235959.000000Z_from-nix_ffffffff.txt", "left by a crash\n")
-        ok("left by a crash" not in capture(cmd_read, "pi", d), "leaves a recent claim to its reader")
-        CLAIM_STALE = 0
-        ok("left by a crash" in capture(cmd_read, "pi", d) and not os.path.exists(stale), "recovers a stale claim")
-        CLAIM_STALE = 60.0
-
-        body = os.path.join(root, "body.txt")
-        with open(body, "w") as f:
-            f.write("hello nix\n")
-        sent = capture(cmd_send, "pi", "nix", "Test\nsubject", "34f513aa-1793309640", body, d).strip()
-        base = os.path.basename(sent)
-        ok(re.fullmatch(r"nix_\d{8}T\d{6}\.\d{6}Z_from-pi_[0-9a-f]{8}\.txt", base) is not None, "names a sent file by the standard")
-        ok(stat.S_IMODE(os.stat(sent).st_mode) == 0o600, "writes mode 0600")
-        with open(sent) as f:
-            text = f.read()
-        ok(re.match(r"From: pi@\S+ \(agent-deck 34f513aa-1793309640\)\nTo: nix\nUTC: \S+\nSubject: Test subject\n\nhello nix\n$", text) is not None,
-           "writes the header lines")
-        ok(not [e for e in os.listdir(d) if e.endswith(".tmp")], "leaves no temporary file")
-
-        home = os.environ.get("HOME")
         os.environ["HOME"] = root
         try:
-            ok(capture(cmd_pending, "nix", d).strip() == base, "pending lists waiting mail")
-            os.utime(sent, (old, old))
-            ok("hello nix" in capture(cmd_read, "nix", d), "the recipient reads it")
-            ok(capture(cmd_pending, "nix", d).strip() == base, "pending repeats the last list after reading")
-            mk("nix_20261030T000009.000000Z_from-pi_99999999.txt", "next\n")
-            ok(capture(cmd_pending, "nix", d).strip() == "nix_20261030T000009.000000Z_from-pi_99999999.txt", "pending changes on new mail")
+            d = os.path.join(root, "mailbox")
+            os.mkdir(d, 0o700)
+            SETTLE = 0.0
+
+            def mk(n, text):
+                p = os.path.join(d, n)
+                with open(p, "w") as f:
+                    f.write(text)
+                return p
+
+            mine = ["pi_20261030T000000.000001Z_from-nix_aaaaaaaa.txt", "pi--20261030T000002Z--from-catalog.md",
+                    "pi-20261030T000003Z-from-x.md", "pi.md", "PI_20261030T000004.000000Z_from-nyx-ai_bbbbbbbb.txt"]
+            others = ["clio-pi_20261030T000000.000000Z_from-nix_cccccccc.txt", "pi-2_20261030T000000.000000Z_from-x_dddddddd.txt",
+                      "pi.v2_20261030T000000.000000Z_from-x_eeeeeeee.txt", "pi-foo--20261030T000000Z--from-x.md",
+                      "pipeline.md", ".pi_hidden.txt", "nyx-ai_20261030T000000.000000Z_from-pi_ffffffff.txt", "secret.txt"]
+            for n in mine:
+                mk(n, f"body of {n}\n")
+            for n in others:
+                mk(n, "SECRET\n" if n == "secret.txt" else f"not for pi: {n}\n")
+            os.symlink(os.path.join(d, "secret.txt"), os.path.join(d, "pi_link.txt"))
+            os.mkdir(os.path.join(d, "pi_dir"))
+            os.mkfifo(os.path.join(d, "pi_fifo"))
+            mk("pi_big.txt", "x" * (LIMIT + 1))
+
+            out, code, _ = capture(cmd_read, "pi", d, 100000)
+            for n in mine:
+                ok(f"body of {n}" in out and not os.path.lexists(os.path.join(d, n)), f"delivers {n}")
+                ok(os.path.exists(os.path.join(d, ".pi-read", n)), f"keeps a copy of {n}")
+            for n in others:
+                ok(os.path.exists(os.path.join(d, n)) and f"not for pi: {n}" not in out, f"leaves {n} alone")
+            ok(out.startswith("agent-mail: 5 message(s) for pi: "), "lists the batch first")
+            ok(out.index("body of pi--20261030T000002Z") < out.index("body of pi-20261030T000003Z"), "delivers oldest first")
+            ok("SECRET" not in out, "never reads through a symlink")
+            for n in ("pi_link.txt", "pi_dir", "pi_fifo", "pi_big.txt"):
+                ok(f"{n} was not read" in out and os.path.lexists(os.path.join(d, f".pi-rejected-{n}")), f"rejects {n}")
+            ok(capture(cmd_read, "pi", d, 100000)[0].strip() == "agent-mail: no mail for pi", "reports an empty mailbox")
+            ok(os.path.exists(presence_path(d, "pi")), "records that pi's mail was checked")
+
+            for i in range(3):
+                mk(f"pi_20261030T00010{i}.000000Z_from-nix_1111111{i}.txt", f"part {i} " + "y" * 5000 + "\n")
+            out = capture(cmd_read, "pi", d, MAX_BYTES)[0]
+            ok("part 0" in out and "part 1" in out and "part 2" not in out, "caps one read")
+            ok("1 more waiting" in out and "run read again" in out, "says that more is waiting")
+            ok(os.path.exists(os.path.join(d, "pi_20261030T000102.000000Z_from-nix_11111112.txt")), "leaves the rest unclaimed")
+            ok("part 2" in capture(cmd_read, "pi", d, MAX_BYTES)[0], "delivers the rest next time")
+            mk("pi_20261030T000200.000000Z_from-nix_22222222.txt", "head " + "z" * 30000 + " tail\n")
+            out = capture(cmd_read, "pi", d, MAX_BYTES)[0]
+            ok("head" in out and " tail" not in out and ".pi-read/pi_20261030T000200" in out, "shows part of a big message and where the rest is")
+
+            mk("pi_20261030T000300.000000Z_from-nix_33333333.txt", "lost if not restored\n")
+            real_print = print
+
+            def broken(*a, **k):
+                raise BrokenPipeError()
+
+            globals()["print"] = broken
+            try:
+                _, code, _ = capture(cmd_read, "pi", d, MAX_BYTES)
+            finally:
+                globals()["print"] = real_print
+            ok(code == 3 and os.path.exists(os.path.join(d, "pi_20261030T000300.000000Z_from-nix_33333333.txt")),
+               "puts the claim back when printing fails")
+            ok("lost if not restored" in capture(cmd_read, "pi", d, MAX_BYTES)[0], "delivers it afterwards")
+
+            fresh = mk("pi_20261030T000400.000000Z_from-nix_44444444.txt", "fresh\n")
+            SETTLE = 60.0
+            ok(not poll("pi", d)["deliveries"] and os.path.exists(fresh), "waits for a file still being written")
+            SETTLE = 0.0
+            ok("fresh" in capture(cmd_read, "pi", d, MAX_BYTES)[0], "delivers it once settled")
+            future = mk("pi_20261030T000401.000000Z_from-nix_44444445.txt", "from the future\n")
+            os.utime(future, (time.time() + 86400, time.time() + 86400))
+            ok("from the future" in capture(cmd_read, "pi", d, MAX_BYTES)[0], "a future mtime does not hold mail back")
+
+            dead = mk(".pi-claimed-999999-pi_20261029T235959.000000Z_from-nix_55555555.txt", "left by a dead reader\n")
+            live = mk(f".pi-claimed-{os.getppid()}-pi_20261029T235958.000000Z_from-nix_66666666.txt", "held by a live reader\n")
+            out = capture(cmd_read, "pi", d, MAX_BYTES)[0]
+            ok("left by a dead reader" in out and not os.path.exists(dead), "recovers a dead reader's claim")
+            ok("held by a live reader" not in out and os.path.exists(live), "leaves a live reader's claim")
+            ok("being read by another reader" in capture(cmd_read, "pi", d, MAX_BYTES)[0], "says when another reader holds mail")
+            legacy = mk(".pi-claimed-pi_20261029T235957.000000Z_from-nix_88888888.txt", "claimed by an older agent-mail\n")
+            ok("claimed by an older agent-mail" not in capture(cmd_read, "pi", d, MAX_BYTES)[0] and os.path.exists(legacy),
+               "leaves a recent claim made by an older agent-mail")
+            CLAIM_STALE = 0.0
+            out = capture(cmd_read, "pi", d, MAX_BYTES)[0]
+            ok("held by a live reader" in out, "recovers an abandoned claim")
+            ok("claimed by an older agent-mail" in out and not os.path.exists(legacy), "recovers an abandoned claim made by an older agent-mail")
+            CLAIM_STALE = 600.0
+
+            long_name = "pi_" + "x" * (NAME_MAX - 3)
+            mk(long_name, "long\n")
+            out, code, _ = capture(cmd_read, "pi", d, MAX_BYTES)
+            ok(code == 2 and "its name is too long" in out and os.path.exists(os.path.join(d, long_name)), "reports a name too long to claim")
+            os.unlink(os.path.join(d, long_name))
+            stuck = mk("pi_20261030T000500.000000Z_from-nix_77777777.txt", "stuck\n")
+            os.chmod(d, 0o500)
+            try:
+                out, code, _ = capture(cmd_read, "pi", d, MAX_BYTES)
+                ok(code == 2 and "cannot claim" in out and os.path.exists(stuck), "reports a file it cannot claim")
+                out, code, _ = capture(cmd_watch, "pi", d, 0.01, False, MAX_BYTES, 3)
+                ok(code is None and out == "", "a stuck file reported once does not end a watch again")
+            finally:
+                os.chmod(d, 0o700)
+            out, code, _ = capture(cmd_watch, "pi", d, 0.01, False, MAX_BYTES, 3)
+            ok(code == 0 and "stuck" in out, "a watch delivers the file once it can be claimed")
+
+            body = os.path.join(root, "body.txt")
+            with open(body, "w") as f:
+                f.write("hello nix\n")
+            sent, code, err = capture(cmd_send, "pi", "nix", "Test\nsub\x1bject", "34f513aa-1793309640", body, d)
+            sent = sent.strip()
+            base = os.path.basename(sent)
+            ok(re.fullmatch(r"nix_\d{8}T\d{6}\.\d{6}Z_from-pi_[0-9a-f]{8}\.txt", base) is not None, "names a sent file by the standard")
+            ok(stat.S_IMODE(os.stat(sent).st_mode) == 0o600, "writes mode 0600")
+            with open(sent) as f:
+                text = f.read()
+            ok(re.match(r"From: pi@\S+ \(agent-deck 34f513aa-1793309640\)\nTo: nix\nUTC: \S+\nSubject: Test sub ject\n\nhello nix\n$", text) is not None,
+               "writes clean header lines")
+            ok("no reader has checked nix's mail yet" in err, "warns when nobody reads the recipient's mail")
+            ok(not [e for e in os.listdir(d) if e.endswith(".tmp")], "leaves no temporary file")
+            ok(capture(cmd_send, "pi", "nix", None, "bad\nid", body, d)[1] not in (0, None), "refuses a bad --id")
+            big = os.path.join(root, "big.txt")
+            with open(big, "w") as f:
+                f.write("b" * LIMIT)
+            ok(capture(cmd_send, "pi", "nix", None, None, big, d)[1] not in (0, None), "refuses a body over the limit")
+            ok("cannot read" in str(capture(cmd_send, "pi", "nix", None, None, os.path.join(root, "missing"), d)[1]), "explains an unreadable body")
+
+            line1 = capture(cmd_pending, "nix", d)[0]
+            ok(line1.startswith("agent-mail: mail for nix announced ") and base in line1, "pending announces new mail")
+            ok(capture(cmd_pending, "nix", d)[0] == line1, "pending repeats itself while nothing changes")
+            ok("hello nix" in capture(cmd_read, "nix", d, MAX_BYTES)[0], "the recipient reads it")
+            ok(capture(cmd_pending, "nix", d)[0] == line1, "pending does not change when mail is read")
+            ok(not capture(cmd_send, "pi", "nix", None, None, body, d)[2], "no warning once the recipient reads")
+            line2 = capture(cmd_pending, "nix", d)[0]
+            ok(line2 != line1 and "announced" in line2, "pending changes on new mail")
+            st = load_json(state_path(d, "nix", "pending"))
+            st["announced"] -= 1000
+            st["changed"] -= 1000
+            save_json(state_path(d, "nix", "pending"), st)
+            line3 = capture(cmd_pending, "nix", d)[0]
+            ok(line3 != line2 and "reminder 1" in line3, "pending reminds about unread mail")
+            ok(capture(cmd_pending, "nix", d)[0] == line3, "and does not repeat the reminder at once")
+
+            for bad in ("a_b", "pi@clio", "../x", "", "x--y", "-x", "x-"):
+                try:
+                    check_name(bad)
+                    ok(False, f"rejects the name {bad!r}")
+                except SystemExit:
+                    ok(True, "")
+            for good in ("pi", "clio-pi", "mcp-servers", "conductor-director", "keyboard-maestro", "nyx-ai"):
+                ok(check_name(good) == good, f"accepts the name {good!r}")
         finally:
+            SETTLE, CLAIM_STALE = saved
             if home is None:
                 del os.environ["HOME"]
             else:
                 os.environ["HOME"] = home
-
-        for bad in ("a_b", "pi@clio", "../x", "", "x--y", "-x", "x-"):
-            try:
-                check_name(bad)
-                ok(False, f"rejects the name {bad!r}")
-            except SystemExit:
-                ok(True, "")
-        for good in ("pi", "clio-pi", "mcp-servers", "conductor-director", "keyboard-maestro", "nyx-ai"):
-            ok(check_name(good) == good, f"accepts the name {good!r}")
     print(f"agent-mail self-test: {checks} checks passed")
     return 0
 
@@ -365,12 +712,15 @@ def main(argv):
     s.add_argument("--subject")
     s.add_argument("--id")
     s.add_argument("file", nargs="?")
-    for c in ("read", "pending"):
-        sub.add_parser(c).add_argument("name")
+    r = sub.add_parser("read")
+    r.add_argument("name")
+    r.add_argument("--max-bytes", type=int, default=MAX_BYTES)
+    sub.add_parser("pending").add_argument("name")
     w = sub.add_parser("watch")
     w.add_argument("name")
     w.add_argument("--interval", type=float, default=15.0)
     w.add_argument("--forever", action="store_true")
+    w.add_argument("--max-bytes", type=int, default=MAX_BYTES)
     sub.add_parser("self-test")
     a = p.parse_args(argv)
     os.umask(0o077)
@@ -383,10 +733,10 @@ def main(argv):
     if not os.path.isdir(d):
         raise SystemExit(f"agent-mail: mailbox {d} does not exist")
     if a.cmd == "read":
-        return cmd_read(name, d)
+        return cmd_read(name, d, max(1000, a.max_bytes))
     if a.cmd == "pending":
         return cmd_pending(name, d)
-    return cmd_watch(name, d, max(1.0, a.interval), a.forever)
+    return cmd_watch(name, d, max(1.0, a.interval), a.forever, max(1000, a.max_bytes))
 
 
 if __name__ == "__main__":
