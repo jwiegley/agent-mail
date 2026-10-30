@@ -1,0 +1,393 @@
+#!/usr/bin/env -S python3 -I
+"""agent-mail: a file mailbox between agent-deck sessions on one host.
+
+Mailbox: a directory, by default ~/Products/mailbox ($AGENT_MAIL_DIR or --dir overrides it).
+
+Name: a session's mailbox name is its agent-deck title: letters, digits, "." and "-",
+starting with a letter or digit, with no "_" and no "--". Always pass it explicitly;
+inherited environment variables can name another session.
+
+Message: a regular file named TO_UTC_from-FROM_UNIQUE.txt, for example
+nix_20261030T050102.123456Z_from-pi_3f9a1c2e.txt, owned by you and mode 0600. It begins
+with From, To, UTC and Subject header lines, then a blank line, then the body. A sender
+writes it to a hidden file in the mailbox and renames it into place.
+
+Ownership: a file is NAME's mail when its name starts with NAME followed by "_", or by the
+older "--", ".", or "-" and a digit. "pi" never takes "clio-pi", "pi-x" or "pipeline" mail.
+Names starting with "." are never mail.
+
+Receiving claims a file by renaming it to .NAME-claimed-FILE, prints it, then deletes it.
+A file changed in the last 2 seconds waits for a later poll, and a file that changes while
+being read is put back. Symlinks, FIFOs, directories, files owned by another user and
+files over 1 MiB are not read: they become .NAME-rejected-FILE and are reported. A claim
+left for 60 seconds by an interrupted reader is delivered by the next one.
+
+Commands:
+  send --from NAME --to NAME [--subject TEXT] [--id SESSION_ID] [FILE]
+      Send FILE, or standard input when FILE is "-" or omitted.
+  read NAME
+      Deliver NAME's mail once and exit; prints "agent-mail: no mail for NAME" when empty.
+  watch NAME [--interval SECONDS] [--forever]
+      Poll (default every 15 s). Exit after the first delivery, so a background task
+      wakes its session once per batch; with --forever keep printing batches, for a
+      streaming monitor.
+  pending NAME
+      Print the names of NAME's waiting mail. While none is waiting, repeat the last
+      non-empty list, so pi-loop's --on-change starts a turn when mail arrives but not
+      after it has been read.
+  self-test
+      Run the built-in checks in a temporary directory.
+"""
+import argparse
+import datetime
+import hashlib
+import os
+import re
+import secrets
+import socket
+import stat
+import sys
+import tempfile
+import time
+
+SETTLE = 2.0
+CLAIM_STALE = 60.0
+LIMIT = 1 << 20
+NAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.]|-(?!-))*")
+
+
+def default_dir():
+    return os.environ.get("AGENT_MAIL_DIR") or os.path.expanduser("~/Products/mailbox")
+
+
+def check_name(name):
+    if not NAME.fullmatch(name) or len(name) > 64 or name.endswith("-"):
+        hint = " (delivery to another host is not supported yet)" if "@" in name else ""
+        raise SystemExit(f"agent-mail: invalid mailbox name {name!r}{hint}")
+    return name
+
+
+def owns(name):
+    return re.compile(re.escape(name) + r"(?:_|--|\.|-[0-9]|$)", re.IGNORECASE)
+
+
+def utc(ts=None, micro=False):
+    t = datetime.datetime.fromtimestamp(time.time() if ts is None else ts, datetime.timezone.utc)
+    return t.strftime("%Y%m%dT%H%M%S.%fZ" if micro else "%Y%m%dT%H%M%SZ")
+
+
+class Rejected(Exception):
+    pass
+
+
+class Changed(Exception):
+    pass
+
+
+def read_file(path):
+    # O_NONBLOCK keeps a FIFO from blocking the open; O_NOFOLLOW refuses a symlink.
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        raise
+    except OSError as e:
+        raise Rejected(f"cannot open it ({e.strerror}); symlinks are refused") from e
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise Rejected("not a regular file")
+        if before.st_uid != os.getuid():
+            raise Rejected("owned by another user")
+        if before.st_size > LIMIT:
+            raise Rejected(f"{before.st_size} bytes, over the 1 MiB limit")
+        chunks = []
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        after = os.fstat(fd)
+        if (after.st_size, after.st_mtime_ns) != (before.st_size, before.st_mtime_ns):
+            raise Changed()
+        return b"".join(chunks).decode("utf-8", errors="replace"), before
+    finally:
+        os.close(fd)
+
+
+def poll(name, d):
+    """Claim and read NAME's mail. Return (printable blocks, claimed paths to delete, waiting count)."""
+    pattern = owns(name)
+    claimed_prefix = f".{name}-claimed-"
+    now = time.time()
+    blocks, done, waiting = [], [], 0
+    for entry in sorted(os.listdir(d)):
+        recovering = entry.startswith(claimed_prefix)
+        if not recovering and (entry.startswith(".") or not pattern.match(entry)):
+            continue
+        original = entry[len(claimed_prefix):] if recovering else entry
+        path = os.path.join(d, entry)
+        hold = path if recovering else os.path.join(d, claimed_prefix + entry)
+        try:
+            st = os.lstat(path)
+            if recovering:
+                if now - st.st_ctime < CLAIM_STALE:
+                    continue
+            else:
+                if now - st.st_mtime < SETTLE:
+                    waiting += 1
+                    continue
+                os.rename(path, hold)
+            text, st = read_file(hold)
+        except FileNotFoundError:
+            continue
+        except Changed:
+            back = os.path.join(d, original)
+            if not os.path.lexists(back):
+                os.rename(hold, back)
+            waiting += 1
+            continue
+        except Exception as e:
+            rejected = os.path.join(d, f".{name}-rejected-{original}")
+            try:
+                os.rename(hold, rejected)
+            except OSError:
+                rejected = hold
+            blocks.append(f"--- agent-mail: {original} was not read: {e}; it is now {rejected}")
+            continue
+        blocks.append(
+            f"=== agent-mail: message for {name}: {original} ({st.st_size} bytes, written {utc(st.st_mtime)}) ===\n"
+            f"{text.rstrip()}\n=== end of {original} ==="
+        )
+        done.append(hold)
+    return blocks, done, waiting
+
+
+def deliver(blocks, done):
+    print("\n\n".join(blocks), flush=True)
+    for hold in done:
+        try:
+            os.unlink(hold)
+        except FileNotFoundError:
+            pass
+
+
+def cmd_read(name, d):
+    blocks, done, waiting = poll(name, d)
+    if blocks:
+        deliver(blocks, done)
+    else:
+        print(f"agent-mail: no mail for {name}", flush=True)
+    if waiting:
+        print(f"agent-mail: {waiting} message(s) for {name} still being written; read again shortly", flush=True)
+    return 0
+
+
+def cmd_watch(name, d, interval, forever):
+    while True:
+        if not os.path.isdir(d):
+            print(f"agent-mail: mailbox {d} is missing; the watcher for {name} has stopped", flush=True)
+            return 1
+        blocks, done, _ = poll(name, d)
+        if blocks:
+            deliver(blocks, done)
+            if not forever:
+                print(f"agent-mail: the watcher for {name} has exited after this delivery; start it again", flush=True)
+                return 0
+        time.sleep(interval)
+
+
+def cmd_pending(name, d):
+    pattern = owns(name)
+    pending = sorted(e for e in os.listdir(d) if not e.startswith(".") and pattern.match(e))
+    key = hashlib.sha256(os.path.realpath(d).encode()).hexdigest()[:12]
+    state = os.path.join(os.path.expanduser("~/.cache/agent-mail"), f"{key}-{name}.last")
+    if pending:
+        os.makedirs(os.path.dirname(state), mode=0o700, exist_ok=True)
+        tmp = f"{state}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("\n".join(pending) + "\n")
+        os.replace(tmp, state)
+        print("\n".join(pending))
+    else:
+        try:
+            with open(state, encoding="utf-8") as f:
+                print(f.read().rstrip())
+        except FileNotFoundError:
+            pass
+    return 0
+
+
+def cmd_send(sender, to, subject, ident, src, d):
+    if not os.path.isdir(d):
+        raise SystemExit(f"agent-mail: mailbox {d} does not exist")
+    if src in (None, "-"):
+        body = sys.stdin.read()
+    else:
+        with open(src, encoding="utf-8") as f:
+            body = f.read()
+    stamp = utc(micro=True)
+    final = os.path.join(d, f"{to}_{stamp}_from-{sender}_{secrets.token_hex(4)}.txt")
+    host = socket.gethostname().split(".")[0].lower()
+    header = f"From: {sender}@{host}" + (f" (agent-deck {ident})" if ident else "") + f"\nTo: {to}\nUTC: {stamp}\n"
+    if subject:
+        header += "Subject: " + " ".join(subject.split()) + "\n"
+    tmp = os.path.join(d, "." + os.path.basename(final) + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(f"{header}\n{body.rstrip()}\n")
+        if os.path.lexists(final):
+            raise SystemExit(f"agent-mail: {final} already exists")
+        os.rename(tmp, final)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+    print(final)
+    return 0
+
+
+def self_test():
+    global CLAIM_STALE
+    checks = 0
+
+    def ok(cond, what):
+        nonlocal checks
+        if not cond:
+            raise SystemExit(f"agent-mail self-test FAILED: {what}")
+        checks += 1
+
+    def capture(fn, *args):
+        import io
+        import contextlib
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            fn(*args)
+        return out.getvalue()
+
+    with tempfile.TemporaryDirectory() as root:
+        d = os.path.join(root, "mailbox")
+        os.mkdir(d, 0o700)
+        old = time.time() - 120
+
+        def mk(n, text, t=old):
+            p = os.path.join(d, n)
+            with open(p, "w") as f:
+                f.write(text)
+            os.utime(p, (t, t))
+            return p
+
+        mine = ["pi_20261030T000000.000001Z_from-nix_aaaaaaaa.txt", "pi--20261030T000002Z--from-catalog.md",
+                "pi.md", "pi-20261030T000003Z-from-x.md", "PI_20261030T000004.000000Z_from-nyx-ai_bbbbbbbb.txt"]
+        others = ["clio-pi_20261030T000000.000000Z_from-nix_cccccccc.txt", "pi-foo--20261030T000000Z--from-x.md",
+                  "pipeline.md", ".pi_hidden.txt", "nyx-ai_20261030T000000.000000Z_from-pi_dddddddd.txt", "secret.txt"]
+        for n in mine:
+            mk(n, f"body of {n}\n")
+        for n in others:
+            mk(n, "SECRET\n" if n == "secret.txt" else f"not for pi: {n}\n")
+        fresh = mk("pi_20261030T000005.000000Z_from-nix_eeeeeeee.txt", "fresh\n", time.time() + 60)
+        os.symlink(os.path.join(d, "secret.txt"), os.path.join(d, "pi_link.txt"))
+        os.utime(os.path.join(d, "pi_link.txt"), (old, old), follow_symlinks=False)
+        os.mkdir(os.path.join(d, "pi_dir"))
+        os.utime(os.path.join(d, "pi_dir"), (old, old))
+        os.mkfifo(os.path.join(d, "pi_fifo"))
+        os.utime(os.path.join(d, "pi_fifo"), (old, old))
+        mk("pi_big.txt", "x" * (LIMIT + 1))
+
+        out = capture(cmd_read, "pi", d)
+        for n in mine:
+            ok(f"body of {n}" in out and not os.path.lexists(os.path.join(d, n)), f"delivers and deletes {n}")
+        for n in others:
+            ok(os.path.exists(os.path.join(d, n)) and f"not for pi: {n}" not in out, f"leaves {n} alone")
+        ok("SECRET" not in out, "never reads through a symlink")
+        for n in ("pi_link.txt", "pi_dir", "pi_fifo", "pi_big.txt"):
+            ok(f"{n} was not read" in out and os.path.lexists(os.path.join(d, f".pi-rejected-{n}")), f"rejects {n}")
+        ok(os.path.exists(fresh) and "1 message(s) for pi still being written" in out, "waits for a file still being written")
+        os.utime(fresh, (old, old))
+        ok("fresh" in capture(cmd_read, "pi", d) and not os.path.exists(fresh), "delivers it once settled")
+        ok("no mail for pi" in capture(cmd_read, "pi", d), "reports an empty mailbox")
+
+        stale = mk(".pi-claimed-pi_20261029T235959.000000Z_from-nix_ffffffff.txt", "left by a crash\n")
+        ok("left by a crash" not in capture(cmd_read, "pi", d), "leaves a recent claim to its reader")
+        CLAIM_STALE = 0
+        ok("left by a crash" in capture(cmd_read, "pi", d) and not os.path.exists(stale), "recovers a stale claim")
+        CLAIM_STALE = 60.0
+
+        body = os.path.join(root, "body.txt")
+        with open(body, "w") as f:
+            f.write("hello nix\n")
+        sent = capture(cmd_send, "pi", "nix", "Test\nsubject", "34f513aa-1793309640", body, d).strip()
+        base = os.path.basename(sent)
+        ok(re.fullmatch(r"nix_\d{8}T\d{6}\.\d{6}Z_from-pi_[0-9a-f]{8}\.txt", base) is not None, "names a sent file by the standard")
+        ok(stat.S_IMODE(os.stat(sent).st_mode) == 0o600, "writes mode 0600")
+        with open(sent) as f:
+            text = f.read()
+        ok(re.match(r"From: pi@\S+ \(agent-deck 34f513aa-1793309640\)\nTo: nix\nUTC: \S+\nSubject: Test subject\n\nhello nix\n$", text) is not None,
+           "writes the header lines")
+        ok(not [e for e in os.listdir(d) if e.endswith(".tmp")], "leaves no temporary file")
+
+        home = os.environ.get("HOME")
+        os.environ["HOME"] = root
+        try:
+            ok(capture(cmd_pending, "nix", d).strip() == base, "pending lists waiting mail")
+            os.utime(sent, (old, old))
+            ok("hello nix" in capture(cmd_read, "nix", d), "the recipient reads it")
+            ok(capture(cmd_pending, "nix", d).strip() == base, "pending repeats the last list after reading")
+            mk("nix_20261030T000009.000000Z_from-pi_99999999.txt", "next\n")
+            ok(capture(cmd_pending, "nix", d).strip() == "nix_20261030T000009.000000Z_from-pi_99999999.txt", "pending changes on new mail")
+        finally:
+            if home is None:
+                del os.environ["HOME"]
+            else:
+                os.environ["HOME"] = home
+
+        for bad in ("a_b", "pi@clio", "../x", "", "x--y", "-x", "x-"):
+            try:
+                check_name(bad)
+                ok(False, f"rejects the name {bad!r}")
+            except SystemExit:
+                ok(True, "")
+        for good in ("pi", "clio-pi", "mcp-servers", "conductor-director", "keyboard-maestro", "nyx-ai"):
+            ok(check_name(good) == good, f"accepts the name {good!r}")
+    print(f"agent-mail self-test: {checks} checks passed")
+    return 0
+
+
+def main(argv):
+    p = argparse.ArgumentParser(prog="agent-mail", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--dir", default=None, help="mailbox directory (default $AGENT_MAIL_DIR or ~/Products/mailbox)")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("send")
+    s.add_argument("--from", dest="sender", required=True)
+    s.add_argument("--to", required=True)
+    s.add_argument("--subject")
+    s.add_argument("--id")
+    s.add_argument("file", nargs="?")
+    for c in ("read", "pending"):
+        sub.add_parser(c).add_argument("name")
+    w = sub.add_parser("watch")
+    w.add_argument("name")
+    w.add_argument("--interval", type=float, default=15.0)
+    w.add_argument("--forever", action="store_true")
+    sub.add_parser("self-test")
+    a = p.parse_args(argv)
+    os.umask(0o077)
+    if a.cmd == "self-test":
+        return self_test()
+    d = a.dir or default_dir()
+    if a.cmd == "send":
+        return cmd_send(check_name(a.sender), check_name(a.to), a.subject, a.id, a.file, d)
+    name = check_name(a.name)
+    if not os.path.isdir(d):
+        raise SystemExit(f"agent-mail: mailbox {d} does not exist")
+    if a.cmd == "read":
+        return cmd_read(name, d)
+    if a.cmd == "pending":
+        return cmd_pending(name, d)
+    return cmd_watch(name, d, max(1.0, a.interval), a.forever)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
