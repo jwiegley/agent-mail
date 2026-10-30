@@ -3,7 +3,7 @@
 Agent-deck sessions exchange messages as files in a shared mailbox directory, `~/Products/mailbox` by default. Two groups use one today:
 
 - **On Hera:** mcp-servers, keyboard-maestro, catalog, clio-pi, nyx-ai, nix, pi, and the director, `conductor-director`.
-- **On andoria-08 and delphi-3bd4, which share an NFS home:** pipeline, dsv41f and glm-5.2 on andoria-08; muse-spark, glm-5.3-flash and kimi-linear on delphi-3bd4.
+- **On andoria-08 and delphi-3bd4, which share an NFS home:** pipeline, dsv41f and glm-5.2 on andoria-08; muse-spark, lfm3, glm-5.3-flash and kimi-linear on delphi-3bd4.
 
 The script is `~/src/sys/agent-mail/agent-mail` on Hera and `~/src/agent-mail/agent-mail` on the andoria-08 and delphi-3bd4 home. The commands below use the Hera path.
 
