@@ -77,19 +77,27 @@ To read your mail now:
 ### What the script guarantees
 
 - It reads a file only after the file has gone 2 s without changing. It judges this by the inode's change time, which a sender cannot backdate.
-- It claims a file by renaming it `.<you>-claimed-<pid>-<file>` and prints it. Then it moves the file to `.<you>-read/<file>`, where it stays for 7 days.
+- It claims a file by renaming it `.<you>-claimed-<pid>-<host tag>-<file>` and prints it. Then it moves the file to `.<you>-read/<file>`, where it stays for 7 days.
 - The frame lines around each message carry a random token for that delivery, so a message body cannot fake another message's frame.
-- It delivers a claim again if the reader that made it has died, or if the claim is 10 minutes old.
+- It delivers a claim again if the reader on this host that made it has died, or if the claim is 10 minutes old.
 - One read prints a list of its messages first, then the messages, oldest first, up to about 12 KB (`--max-bytes`).
   - A bigger message is shown in part, with the path of its full copy.
   - Mail that doesn't fit stays waiting, and `read` tells you to run it again.
 - If a file changes while it is being read, the script puts it back for the next check. If printing fails, it puts back every message it claimed.
 - It refuses symlinks, FIFOs, directories, hard-linked files, other users' files, files over 1 MiB, and files that grow past 1 MiB while being read. It renames them `.<you>-rejected-<file>` and reports them once.
 - A file that it cannot claim at all, for example because the mailbox is read-only to it, is reported once and left in place. `read` then exits with status 2.
-- Each check records the time in `.agent-mail-presence/<you>`. `send` warns when the recipient's mail has not been checked for an hour, or ever. The message still waits for the recipient.
+- Each check records the time in `.agent-mail-presence/<you>`, at most once a minute. `send` warns when the recipient's mail has not been checked for an hour, or ever. The message still waits for the recipient.
 - `send` requires a subject. It refuses an `--id` that isn't a plain identifier, and messages over 1 MiB. It removes control characters from the subject.
 - Any mailbox other than `~/Products/mailbox` must contain a `.agent-mail-mailbox` marker, which `agent-mail init` creates. So a wrong `--dir` or `$AGENT_MAIL_DIR` cannot claim a project's files.
 
 Other readers that follow this standard, such as `.mcp-servers-monitor.py check`, can stay. The script is optional; the naming standard is not.
 
-Delivery to sessions on other hosts over SSH is planned but not built yet. The `From:` line already records `<name>@<host>`, so replies can be routed later.
+## Sessions on several hosts
+
+Sessions on different machines use one mailbox when they share its directory:
+
+- **An NFS home.** For example, andoria-08 and delphi-3bd4 share `/home/jwiegley`, so `~/Products/mailbox` is the same directory on both. A new file can take up to a minute to appear on the other host.
+- **A Syncthing folder.** Sync the mailbox directory itself, or keep it inside a synced folder and point every session at it with `--dir` or `$AGENT_MAIL_DIR`. Run `agent-mail --dir <it> init` once, unless it is `~/Products/mailbox`. Syncthing's temporary files are hidden names, so readers ignore them. If Syncthing ever writes a conflict copy of a message, it arrives as one more message.
+- **One machine.** Nothing extra is needed.
+
+Each mailbox name still has exactly one reader, on one host. A claim records the host that made it as an 8-hex-digit tag. So a reader checks a claim's PID only on the claim's own host, and a claim from another host is delivered again only after it has been abandoned for 10 minutes. Each check is recorded in `.agent-mail-presence/` at most once a minute, so a shared mailbox isn't rewritten on every poll. The `From:` line records `<name>@<host>`, so you can see which machine a sender is on.

@@ -2,6 +2,12 @@
 """agent-mail: a file mailbox between agent-deck sessions on one host.
 
 Mailbox: a directory, by default ~/Products/mailbox ($AGENT_MAIL_DIR or --dir overrides it).
+Sessions on several hosts can share one mailbox when they share the directory: an NFS
+home, a Syncthing folder, or one machine. Claims record their host (an 8-hex-digit tag),
+so a reader checks a claim's PID only on the host that made it; a claim made on another
+host is delivered again after 10 minutes. On NFS a new file can take up to a minute to
+appear on another host; Syncthing's own temporary files are hidden names, so readers
+ignore them. Each mailbox name still has exactly one reader, on one host.
 
 Name: a session's mailbox name is its agent-deck title in lower case: lower-case letters,
 digits, "." and "-", starting with a letter or digit, with no "_" and no "--". Always pass it explicitly;
@@ -22,10 +28,11 @@ never mail.
 Receiving:
 - A file is read once its inode has gone 2 seconds unchanged (ctime, which a sender cannot
   backdate), so a message still being written waits.
-- It is claimed by renaming it to .NAME-claimed-PID-FILE, then printed between frame
+- It is claimed by renaming it to .NAME-claimed-PID-HOSTTAG-FILE, then printed between frame
   lines that carry a random token for that delivery, so a body cannot fake a frame. Afterwards it is
   moved to .NAME-read/FILE and kept for 7 days, so a reader whose output was cut can
-  reopen it. A claim whose reader has died, or that is 10 minutes old, is delivered again.
+  reopen it. A claim whose reader on this host has died, or that is 10 minutes old, is
+  delivered again.
 - One read prints a list of its messages first, then the messages, oldest first, up to
   about 12 KB (--max-bytes). A bigger message is shown in part, with the path of its
   copy. Mail not delivered stays waiting, and read says so.
@@ -36,8 +43,8 @@ Receiving:
 - A file that cannot be claimed at all (for example, the mailbox is read-only to this
   reader) is reported once and left where it is; read exits with status 2.
 - If printing fails, the claimed messages are put back.
-- Every read, watch poll and pending run records that NAME's mail was checked, in
-  .agent-mail-presence/NAME. send warns when the recipient's mail has not been checked
+- Reads, watch polls and pending runs record that NAME's mail was checked, at most once
+  a minute, in .agent-mail-presence/NAME. send warns when the recipient's mail has not been checked
   for an hour, or ever; the message still waits for it.
 
 Never pipe read or watch through head, tail, sed or grep: what they print is consumed.
@@ -92,6 +99,9 @@ PRESENCE_STALE = 3600.0
 NAME = re.compile(r"[a-z0-9](?:[a-z0-9.]|-(?!-))*")
 RECIPIENT = re.compile(NAME.pattern, re.IGNORECASE)
 MARKER = ".agent-mail-mailbox"
+HOST = socket.gethostname().split(".")[0].lower()
+HOSTTAG = hashlib.sha256(HOST.encode()).hexdigest()[:8]
+PRESENCE_EVERY = 60.0
 IDENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 STAMP = re.compile(r"(\d{8}T\d{6})(?:\.(\d{6}))?Z")
 
@@ -121,7 +131,7 @@ def cmd_init(d):
 
 def check_name(name):
     if not NAME.fullmatch(name) or len(name) > 64 or name.endswith("-"):
-        hint = " (delivery to another host is not supported yet)" if "@" in name else ""
+        hint = " (for sessions on several hosts, share one mailbox directory)" if "@" in name else ""
         if NAME.fullmatch(name.lower()):
             hint = f" (names are lower case: use {name.lower()!r})"
         raise SystemExit(f"agent-mail: invalid mailbox name {name!r}{hint}")
@@ -147,13 +157,28 @@ def owns(name):
     return is_mine
 
 
-def claim_re(name):
-    return re.compile(re.escape(f".{name}-claimed-") + r"(\d+)-(.+)", re.DOTALL)
+def claim_name(name, original):
+    return f".{name}-claimed-{os.getpid()}-{HOSTTAG}-{original}"
 
 
-def legacy_claim_re(name):
-    # Claims made by agent-mail before claims carried the reader's PID.
-    return re.compile(re.escape(f".{name}-claimed-") + r"(?!\d+-)(.+)", re.DOTALL)
+def parse_claim(name, entry):
+    """For one of NAME's claims, (pid, host tag, original file name); otherwise None.
+
+    The host tag is the first 8 hex digits of SHA-256 of the short host name. pid is None
+    for a claim from the first agent-mail, which carried no PID, and the tag is None for
+    one from before claims named their host.
+    """
+    prefix = f".{name}-claimed-"
+    if not entry.startswith(prefix):
+        return None
+    rest = entry[len(prefix):]
+    m = re.fullmatch(r"(\d+)-([0-9a-f]{8})-(.+)", rest, re.DOTALL)
+    if m:
+        return int(m.group(1)), m.group(2), m.group(3)
+    m = re.fullmatch(r"(\d+)-(.+)", rest, re.DOTALL)
+    if m:
+        return int(m.group(1)), None, m.group(2)
+    return None, None, rest
 
 
 def utc(ts=None, micro=False):
@@ -207,7 +232,13 @@ def presence_path(d, name):
 
 
 def touch_presence(d, name):
+    # At most once a minute, so a shared (NFS or synced) mailbox is not rewritten on every poll.
     p = presence_path(d, name)
+    try:
+        if time.time() - os.stat(p).st_mtime < PRESENCE_EVERY:
+            return
+    except OSError:
+        pass
     try:
         os.makedirs(os.path.dirname(p), mode=0o700, exist_ok=True)
         fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -266,15 +297,12 @@ def candidates(name, d, now):
     Returns (entries, waiting, busy): entries are (sort key, entry, original, lstat);
     waiting counts mail still being written, busy counts claims a live reader holds.
     """
-    is_mine, claims, legacy = owns(name), claim_re(name), legacy_claim_re(name)
+    is_mine = owns(name)
     found, waiting, busy = [], 0, 0
     for entry in os.listdir(d):
-        m = claims.fullmatch(entry)
-        old = None if m else legacy.fullmatch(entry)
-        if m:
-            original = m.group(2)
-        elif old:
-            original = old.group(1)
+        claim = parse_claim(name, entry)
+        if claim:
+            pid, tag, original = claim
         elif entry.startswith(".") or not is_mine(entry):
             continue
         else:
@@ -283,15 +311,14 @@ def candidates(name, d, now):
             st = os.lstat(os.path.join(d, entry))
         except FileNotFoundError:
             continue
-        if m:
-            pid = int(m.group(1))
-            if pid == os.getpid():
+        if claim:
+            local = tag in (None, HOSTTAG)
+            if local and pid == os.getpid():
                 continue
-            if alive(pid) and now - st.st_ctime < CLAIM_STALE:
-                busy += 1
-                continue
-        elif old:
-            if now - st.st_ctime < CLAIM_STALE:
+            # A reader on this host can be checked by PID. One on another host that shares
+            # this directory cannot, so its claim stands until it is CLAIM_STALE old.
+            held = alive(pid) if local and pid is not None else True
+            if held and now - st.st_ctime < CLAIM_STALE:
                 busy += 1
                 continue
         elif 0 <= now - st.st_ctime < SETTLE:
@@ -322,7 +349,7 @@ def poll(name, d, max_bytes=MAX_BYTES):
             out["more"] = len(found) - i
             break
         path = os.path.join(d, entry)
-        hold = os.path.join(d, f".{name}-claimed-{os.getpid()}-{original}")
+        hold = os.path.join(d, claim_name(name, original))
         if too_long(os.path.basename(hold)):
             out["stuck"].append((f"{st.st_ino}:{entry}:name", f"agent-mail: cannot claim {entry}: its name is too long; it is still at {path}"))
             continue
@@ -682,6 +709,12 @@ def self_test():
             ok("left by a dead reader" in out and not os.path.exists(dead), "recovers a dead reader's claim")
             ok("held by a live reader" not in out and os.path.exists(live), "leaves a live reader's claim")
             ok("being read by another reader" in capture(cmd_read, "pi", d, MAX_BYTES)[0], "says when another reader holds mail")
+            remote_tag = "f" * 8 if HOSTTAG != "f" * 8 else "e" * 8
+            remote = mk(f".pi-claimed-1-{remote_tag}-pi_20261029T235956.000000Z_from-nix_77777776.txt", "claimed on another host\n")
+            dead_here = mk(f".pi-claimed-999999-{HOSTTAG}-pi_20261029T235955.000000Z_from-nix_77777775.txt", "left by a dead reader on this host\n")
+            out = capture(cmd_read, "pi", d, MAX_BYTES)[0]
+            ok("left by a dead reader on this host" in out and not os.path.exists(dead_here), "recovers a dead reader's claim made on this host")
+            ok("claimed on another host" not in out and os.path.exists(remote), "leaves a recent claim made on another host")
             legacy = mk(".pi-claimed-pi_20261029T235957.000000Z_from-nix_88888888.txt", "claimed by an older agent-mail\n")
             ok("claimed by an older agent-mail" not in capture(cmd_read, "pi", d, MAX_BYTES)[0] and os.path.exists(legacy),
                "leaves a recent claim made by an older agent-mail")
@@ -689,6 +722,8 @@ def self_test():
             out = capture(cmd_read, "pi", d, MAX_BYTES)[0]
             ok("held by a live reader" in out, "recovers an abandoned claim")
             ok("claimed by an older agent-mail" in out and not os.path.exists(legacy), "recovers an abandoned claim made by an older agent-mail")
+            ok("claimed on another host" in out and not os.path.exists(remote), "recovers an abandoned claim made on another host")
+            ok(all(parse_claim("pi", e)[1] == HOSTTAG for e in os.listdir(d) if e.startswith(".pi-claimed-")), "claims made here carry this host's tag")
             CLAIM_STALE = 600.0
 
             long_name = "pi_" + "x" * (NAME_MAX - 3)
