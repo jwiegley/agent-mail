@@ -1,7 +1,7 @@
 #!/usr/bin/env -S python3 -I
-"""agent-mail: a file mailbox between agent-deck sessions on one host.
+"""agent-mail: a file mailbox between agent-deck sessions.
 
-Mailbox: a directory, by default ~/Products/mailbox ($AGENT_MAIL_DIR or --dir overrides it).
+Mailbox: a directory, by default ~/Mailbox ($AGENT_MAIL_DIR or --dir overrides it).
 Sessions on several hosts can share one mailbox when they share the directory: an NFS
 home, a Syncthing folder, or one machine. Claims record their host (an 8-hex-digit tag),
 so a reader checks a claim's PID only on the host that made it; a claim made on another
@@ -65,8 +65,9 @@ Commands:
       when mail is read.
   init
       Create the mailbox directory (mode 0700) and its .agent-mail-mailbox marker. Every
-      mailbox other than ~/Products/mailbox needs the marker, so that a wrong --dir or
-      $AGENT_MAIL_DIR cannot claim a project's files.
+      mailbox other than ~/Mailbox needs the marker, so that a wrong --dir or
+      $AGENT_MAIL_DIR cannot claim a project's files. ~/Mailbox itself is refused, since
+      Syncthing creates it.
   self-test
       Run the built-in checks in a temporary directory.
 """
@@ -99,6 +100,7 @@ PRESENCE_STALE = 3600.0
 NAME = re.compile(r"[a-z0-9](?:[a-z0-9.]|-(?!-))*")
 RECIPIENT = re.compile(NAME.pattern, re.IGNORECASE)
 MARKER = ".agent-mail-mailbox"
+DEFAULT_DIR = "~/Mailbox"
 HOST = socket.gethostname().split(".")[0].lower()
 HOSTTAG = hashlib.sha256(HOST.encode()).hexdigest()[:8]
 PRESENCE_EVERY = 60.0
@@ -107,21 +109,33 @@ STAMP = re.compile(r"(\d{8}T\d{6})(?:\.(\d{6}))?Z")
 
 
 def default_dir():
-    return os.environ.get("AGENT_MAIL_DIR") or os.path.expanduser("~/Products/mailbox")
+    return os.environ.get("AGENT_MAIL_DIR") or os.path.expanduser(DEFAULT_DIR)
 
 
 def require_mailbox(d):
     """Refuse a directory that is not a mailbox, so a wrong --dir cannot claim project files."""
     if not os.path.isdir(d):
         raise SystemExit(f"agent-mail: mailbox {d} does not exist")
-    default = os.path.realpath(os.path.expanduser("~/Products/mailbox"))
+    default = os.path.realpath(os.path.expanduser(DEFAULT_DIR))
     if os.path.realpath(d) != default and not os.path.isfile(os.path.join(d, MARKER)):
         raise SystemExit(f"agent-mail: {d} is not an agent-mail mailbox (it has no {MARKER}); check --dir and $AGENT_MAIL_DIR, or run init there")
     return d
 
 
 def cmd_init(d):
-    os.makedirs(d, mode=0o700, exist_ok=True)
+    default = os.path.realpath(os.path.expanduser(DEFAULT_DIR))
+    real = os.path.realpath(d)
+    # realpath neither folds case nor sees through a macOS firmlink or a bind
+    # mount, so compare the parents as files and the names without case; that
+    # holds whether ~/Mailbox exists yet or not.
+    parents = os.path.dirname(real), os.path.dirname(default)
+    same_parent = all(map(os.path.isdir, parents)) and os.path.samefile(*parents)
+    if real == default or (same_parent and os.path.basename(real).casefold() == os.path.basename(default).casefold()):
+        raise SystemExit(f"agent-mail: {DEFAULT_DIR} is the Syncthing folder, which Syncthing creates; init is for other directories")
+    try:
+        os.makedirs(d, mode=0o700, exist_ok=True)
+    except FileExistsError:
+        raise SystemExit(f"agent-mail: {d} exists but is not a directory")
     marker = os.path.join(d, MARKER)
     if not os.path.exists(marker):
         os.close(os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
@@ -623,6 +637,9 @@ def self_test():
         return out.getvalue(), code, err.getvalue()
 
     home = os.environ.get("HOME")
+    # The checks run commands without --dir, so a session's $AGENT_MAIL_DIR must
+    # not reach them.
+    box_env = os.environ.pop("AGENT_MAIL_DIR", None)
     saved = SETTLE, CLAIM_STALE
     with tempfile.TemporaryDirectory() as root:
         os.environ["HOME"] = root
@@ -630,6 +647,7 @@ def self_test():
             d = os.path.join(root, "mailbox")
             os.mkdir(d, 0o700)
             SETTLE = 0.0
+            ok("AGENT_MAIL_DIR" not in os.environ, "runs without $AGENT_MAIL_DIR")
 
             def mk(n, text):
                 p = os.path.join(d, n)
@@ -824,6 +842,65 @@ def self_test():
             capture(main, ["--dir", plain, "init"])
             ok(os.path.exists(os.path.join(plain, MARKER)) and "a project file" in capture(main, ["--dir", plain, "read", "pi"])[0],
                "init makes a directory a mailbox")
+            # A home of its own: the test mailbox above is "mailbox", the same
+            # name as "Mailbox" on a case-insensitive file system.
+            box = os.path.join(root, "home", "Mailbox")
+            os.makedirs(box, 0o700)
+            os.environ["HOME"] = os.path.dirname(box)
+            try:
+                ok(require_mailbox(box) == box, "accepts ~/Mailbox, the default, without a marker")
+                # On a case-insensitive file system ~/mailbox is ~/Mailbox, so init
+                # refuses the spelling everywhere, whether ~/Mailbox exists or not.
+                code = capture(main, ["--dir", os.path.join(root, "home", "mailbox"), "init"])[1]
+                ok("init is for other directories" in str(code) and not os.path.exists(os.path.join(box, MARKER)),
+                   "init refuses ~/Mailbox spelled in another case")
+                home4 = os.path.join(root, "home4")
+                os.mkdir(home4)
+                os.environ["HOME"] = home4
+                code = capture(main, ["--dir", os.path.join(home4, "mailbox"), "init"])[1]
+                ok("init is for other directories" in str(code) and not os.listdir(home4),
+                   "init refuses ~/Mailbox spelled in another case before it exists")
+            finally:
+                os.environ["HOME"] = root
+            # Syncthing creates ~/Mailbox; init must not.
+            home2 = os.path.join(root, "home2")
+            os.mkdir(home2)
+            os.environ["HOME"] = home2
+            try:
+                code = capture(main, ["init"])[1]
+                ok("init is for other directories" in str(code) and not os.path.lexists(os.path.join(home2, "Mailbox")),
+                   "init refuses to create ~/Mailbox")
+                # A path elsewhere that resolves to ~/Mailbox is ~/Mailbox.
+                link = os.path.join(root, "box-link")
+                os.symlink(os.path.join(home2, "Mailbox"), link)
+                code = capture(main, ["--dir", link, "init"])[1]
+                ok("init is for other directories" in str(code) and not os.path.lexists(os.path.join(home2, "Mailbox")),
+                   "init refuses a path that resolves to ~/Mailbox")
+                # A dangling symlink is reported, not followed.
+                dangling = os.path.join(root, "dangling")
+                os.symlink(os.path.join(root, "nowhere"), dangling)
+                code = capture(main, ["--dir", dangling, "init"])[1]
+                ok("exists but is not a directory" in str(code) and not os.path.lexists(os.path.join(root, "nowhere")),
+                   "init reports a dangling symlink")
+            finally:
+                os.environ["HOME"] = root
+            # The Positron hosts: ~/Mailbox is a symlink to a directory on local disk.
+            local = os.path.join(root, "local-mailbox")
+            os.mkdir(local, 0o700)
+            home3 = os.path.join(root, "home3")
+            os.mkdir(home3)
+            os.symlink(local, os.path.join(home3, "Mailbox"))
+            os.environ["HOME"] = home3
+            try:
+                with open(os.path.join(local, "pi_20260101T000000Z_from-nix_1.txt"), "w") as f:
+                    f.write("through the symlink\n")
+                ok("through the symlink" in capture(main, ["read", "pi"])[0], "reads ~/Mailbox through a symlink to a local directory")
+                with open(os.path.join(local, "pi_20260101T000001Z_from-nix_2.txt"), "w") as f:
+                    f.write("through --dir\n")
+                ok("through --dir" in capture(main, ["--dir", local, "read", "pi"])[0],
+                   "accepts --dir to the symlink's target without a marker")
+            finally:
+                os.environ["HOME"] = root
             for bad in ("a_b", "pi@clio", "../x", "", "x--y", "-x", "x-", "Pi", "NIX"):
                 try:
                     check_name(bad)
@@ -838,13 +915,15 @@ def self_test():
                 del os.environ["HOME"]
             else:
                 os.environ["HOME"] = home
+            if box_env is not None:
+                os.environ["AGENT_MAIL_DIR"] = box_env
     print(f"agent-mail self-test: {checks} checks passed")
     return 0
 
 
 def main(argv):
     p = argparse.ArgumentParser(prog="agent-mail", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--dir", default=None, help="mailbox directory (default $AGENT_MAIL_DIR or ~/Products/mailbox)")
+    p.add_argument("--dir", default=None, help="mailbox directory (default $AGENT_MAIL_DIR or ~/Mailbox)")
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("send")
     s.add_argument("--from", dest="sender", required=True)
