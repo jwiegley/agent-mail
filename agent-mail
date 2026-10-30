@@ -13,10 +13,11 @@ nix_20261030T050102.123456Z_from-pi_3f9a1c2e.txt, owned by you and mode 0600. It
 with From, To, UTC and Subject header lines, then a blank line, then the body. A sender
 writes it to a hidden file in the mailbox and renames it into place.
 
-Ownership: a file is NAME's mail when its name is NAME followed by "_", or by one of the
-older forms: "--", "-" and a YYYYMMDDT timestamp, or ".md"/".txt" ending the name. So
-"pi" never takes "clio-pi", "pi-2", "pi.v2" or "pipeline" mail. Names starting with "."
-are never mail.
+Ownership: a file named in the standard form belongs to exactly the name before its first
+"_". A file without that shape belongs to NAME in one of the older forms: NAME followed by
+"--", by "-" and a YYYYMMDDT timestamp, or by ".md"/".txt" ending the name. So "pi"
+never takes "clio-pi", "pi-2", "pi.v2" or "pipeline" mail. Names starting with "." are
+never mail.
 
 Receiving:
 - A file is read once its inode has gone 2 seconds unchanged (ctime, which a sender cannot
@@ -44,10 +45,11 @@ Commands:
       Send FILE, or standard input when FILE is "-" or omitted.
   read NAME [--max-bytes N]
       Deliver NAME's waiting mail once; prints "agent-mail: no mail for NAME" when empty.
-  watch NAME [--interval SECONDS] [--forever] [--max-bytes N]
+  watch NAME [--interval SECONDS] [--forever] [--max-bytes N] [--parent PID]
       Poll (default every 15 s). Exit after the first delivery, so a background task
       wakes its session once per batch; with --forever keep printing batches, for a
-      streaming monitor.
+      streaming monitor. With --parent (in Claude Code, --parent $PPID), stop without
+      reading once that process is gone, so a watcher outliving its session takes no mail.
   pending NAME
       One line for pi-loop's --cmd --on-change. It changes when new mail is ready to
       read, and again as a reminder while that mail stays unread. It does not change
@@ -98,7 +100,22 @@ def check_name(name):
 
 
 def owns(name):
-    return re.compile(re.escape(name) + r"(?:_|--|-\d{8}T|\.(?:md|txt)$|$)", re.IGNORECASE)
+    """A predicate: is this mailbox entry NAME's mail?
+
+    In the standard form the recipient is everything before the first "_", and names cannot
+    contain "_", so that part alone decides. Older forms count only for entries without
+    that shape.
+    """
+    legacy = re.compile(re.escape(name) + r"(?:--|-\d{8}T|\.(?:md|txt)$|$)", re.IGNORECASE)
+    lowered = name.lower()
+
+    def is_mine(entry):
+        to, sep, _ = entry.partition("_")
+        if sep and NAME.fullmatch(to):
+            return to.lower() == lowered
+        return legacy.match(entry) is not None
+
+    return is_mine
 
 
 def claim_re(name):
@@ -215,7 +232,7 @@ def candidates(name, d, now):
     Returns (entries, waiting, busy): entries are (sort key, entry, original, lstat);
     waiting counts mail still being written, busy counts claims a live reader holds.
     """
-    pattern, claims, legacy = owns(name), claim_re(name), legacy_claim_re(name)
+    is_mine, claims, legacy = owns(name), claim_re(name), legacy_claim_re(name)
     found, waiting, busy = [], 0, 0
     for entry in os.listdir(d):
         m = claims.fullmatch(entry)
@@ -224,7 +241,7 @@ def candidates(name, d, now):
             original = m.group(2)
         elif old:
             original = old.group(1)
-        elif entry.startswith(".") or not pattern.match(entry):
+        elif entry.startswith(".") or not is_mine(entry):
             continue
         else:
             original = entry
@@ -414,9 +431,12 @@ def cmd_read(name, d, max_bytes):
     return 2 if result["stuck"] else 0
 
 
-def cmd_watch(name, d, interval, forever, max_bytes, max_polls=None):
+def cmd_watch(name, d, interval, forever, max_bytes, max_polls=None, parent=None):
     polls = 0
     while True:
+        if parent is not None and not alive(parent):
+            print(f"agent-mail: process {parent}, which started the watcher for {name}, has gone; the watcher has stopped without reading", flush=True)
+            return 1
         if not os.path.isdir(d):
             print(f"agent-mail: mailbox {d} is missing; the watcher for {name} has stopped", flush=True)
             return 1
@@ -578,6 +598,9 @@ def self_test():
             for n in ("pi_link.txt", "pi_dir", "pi_fifo", "pi_big.txt"):
                 ok(f"{n} was not read" in out and os.path.lexists(os.path.join(d, f".pi-rejected-{n}")), f"rejects {n}")
             ok(capture(cmd_read, "pi", d, 100000)[0].strip() == "agent-mail: no mail for pi", "reports an empty mailbox")
+            ok("not for pi: pi-2_" in capture(cmd_read, "pi-2", d, 100000)[0], "pi-2 gets the mail that pi left alone")
+            ok("not for pi: pi.v2_" in capture(cmd_read, "pi.v2", d, 100000)[0], "pi.v2 gets its own mail too")
+            ok("not for pi" not in capture(cmd_read, "clio", d, 100000)[0], "clio takes none of clio-pi's mail")
             ok(os.path.exists(presence_path(d, "pi")), "records that pi's mail was checked")
 
             for i in range(3):
@@ -646,6 +669,10 @@ def self_test():
                 os.chmod(d, 0o700)
             out, code, _ = capture(cmd_watch, "pi", d, 0.01, False, MAX_BYTES, 3)
             ok(code == 0 and "stuck" in out, "a watch delivers the file once it can be claimed")
+            orphan = mk("pi_20261030T000600.000000Z_from-nix_88888889.txt", "not for an orphan\n")
+            out, code, _ = capture(cmd_watch, "pi", d, 0.01, False, MAX_BYTES, 3, 999999)
+            ok(code == 1 and "has gone" in out and os.path.exists(orphan), "a watch whose session has gone stops without reading")
+            ok("not for an orphan" in capture(cmd_watch, "pi", d, 0.01, False, MAX_BYTES, 3, os.getpid())[0], "a watch whose session lives reads")
 
             body = os.path.join(root, "body.txt")
             with open(body, "w") as f:
@@ -721,6 +748,7 @@ def main(argv):
     w.add_argument("--interval", type=float, default=15.0)
     w.add_argument("--forever", action="store_true")
     w.add_argument("--max-bytes", type=int, default=MAX_BYTES)
+    w.add_argument("--parent", type=int, help="stop when this process (the session that started the watcher) is gone")
     sub.add_parser("self-test")
     a = p.parse_args(argv)
     os.umask(0o077)
@@ -736,7 +764,7 @@ def main(argv):
         return cmd_read(name, d, max(1000, a.max_bytes))
     if a.cmd == "pending":
         return cmd_pending(name, d)
-    return cmd_watch(name, d, max(1.0, a.interval), a.forever, max(1000, a.max_bytes))
+    return cmd_watch(name, d, max(1.0, a.interval), a.forever, max(1000, a.max_bytes), parent=a.parent)
 
 
 if __name__ == "__main__":
