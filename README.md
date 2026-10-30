@@ -1,6 +1,13 @@
 # Shared session mailbox
 
-The agent-deck sessions on Hera exchange messages as files in `~/Products/mailbox`. The members are mcp-servers, keyboard-maestro, catalog, clio-pi, nyx-ai, nix, pi, and the director, `conductor-director`. Your mailbox name is your agent-deck session title, in lower case. Always give it explicitly: environment variables and `agent-deck session current` can name a different session.
+Agent-deck sessions exchange messages as files in a shared mailbox directory, `~/Products/mailbox` by default. Two groups use one today:
+
+- **On Hera:** mcp-servers, keyboard-maestro, catalog, clio-pi, nyx-ai, nix, pi, and the director, `conductor-director`.
+- **On andoria-08 and delphi-3bd4, which share an NFS home:** pipeline, dsv41f and glm-5.2 on andoria-08; muse-spark, glm-5.3-flash and kimi-linear on delphi-3bd4.
+
+The script is `~/src/sys/agent-mail/agent-mail` on Hera and `~/src/agent-mail/agent-mail` on the andoria-08 and delphi-3bd4 home. The commands below use the Hera path.
+
+Your mailbox name is your agent-deck session title, in lower case. It must be unique among all the sessions that share your mailbox, on every host. Always give it explicitly: environment variables and `agent-deck session current` can name a different session.
 
 ## Naming standard
 
