@@ -18,7 +18,7 @@ Frozen plan: `docs/superpowers/plans/2026-10-31-agent-mail-stewards.md` (approve
 
 | Task | State | Commits | Review | fess |
 |---|---|---|---|---|
-| 1 POLICY.md and parser | implementer running (BASE 3f0c52a) | | | |
+| 1 POLICY.md and parser | implemented d9cdf75 (DONE_WITH_CONCERNS); review running; fix round pending for decision 20 (drop the four price keys) | d9cdf75 | running | |
 | 2 roster and agent-deck readers | | | | |
 | 3 census | | | | |
 | 4 probe | | | | |
@@ -48,6 +48,11 @@ Frozen plan: `docs/superpowers/plans/2026-10-31-agent-mail-stewards.md` (approve
 - R5 patch scratch copies under `/Users/johnw/Products/steward-patch-scratch/`, not `/tmp`.
 - R6 the SDD workspace stays in the git-ignored `.superpowers/sdd/`.
 - R7 implementers commit their own task; the controller runs no git write while one is active; reviewers and auditors are read-only.
+
+## John's decisions during execution
+
+- Decision 20 (14:5x PDT): no steward cost measurement at all ("I don't care about steward costs. Drop this feature and functionality entirely."): Task 1 has 19 policy keys, Task 5 is the metrics file alone, the design's 6.10, 6.13 and section 11 are amended.
+- From mail-dev (22:00 UTC): the three channels exist since 14:59 PDT under John's decision 36 in that session; agent-mail main carries a LICENSE (c8b7707f); the program is unchanged since b2b912c.
 
 ## How to resume
 

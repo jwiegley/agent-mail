@@ -4,21 +4,21 @@
 
 **Goal:** Build everything the approved steward design puts in the agent-mail repository: the steward's instruction files, the worker's section, the read-only signals helper with its self-test, the two patches for John's director runtime with their tests, and the day-zero runbook, so that John can create the two steward conductors the day the preconditions land.
 
-**Architecture:** All deliverables live under `steward/` on branch `work/conductor`. The model-facing files are Markdown that `agent-deck conductor setup` links into each conductor's directory; the one program, `steward/steward-signals`, is a single stdlib-only Python 3 file with a `self-test` subcommand, like `agent-mail` itself, and it reads only metadata (file names, ctimes, agent-deck JSON, transcript usage fields), never a message body. The patches are produced against copies of John's unversioned `monitor_sessions.py` and `bridge.py` and tested there; John applies them.
+**Architecture:** All deliverables live under `steward/` on branch `work/conductor`. The model-facing files are Markdown that `agent-deck conductor setup` links into each conductor's directory; the one program, `steward/steward-signals`, is a single stdlib-only Python 3 file with a `self-test` subcommand, like `agent-mail` itself, and it reads only metadata (file names, ctimes, agent-deck JSON), never a message body. The patches are produced against copies of John's unversioned `monitor_sessions.py` and `bridge.py` and tested there; John applies them.
 
 **Tech Stack:** Python 3.12+ standard library only (no third-party imports); Markdown; `agent-deck` 1.16.34 CLI (read-only subcommands); unittest for the patch tests, run in John's conductor venv.
 
-**Status:** approved by John on 2026-10-31 (decision 19), to be executed subagent-driven on `work/conductor`; `mail-dev` confirmed the six v2 behaviours Task 1 of the design's requests relies on (main b2b912c; program unchanged at 5be5acd).
+**Status:** approved by John on 2026-10-31 (decision 19), to be executed subagent-driven on `work/conductor`; amended the same day for decision 20 (no steward cost measurement: Task 1 has 19 policy keys, Task 5 is the metrics file alone); `mail-dev` confirmed the six v2 behaviours Task 1 of the design's requests relies on (main b2b912c; program unchanged at 5be5acd).
 
 **Spec:** `docs/superpowers/specs/2026-10-31-agent-mail-conductors-design.md` (approved 2026-10-31). The plan argues from it; executors read both. The drafts the Markdown starts from are `docs/superpowers/research/2026-10-31-conductor-exploration/operations.md` sections 4 and 5; where a draft and the spec differ, the spec is right (spec 7.1 lists the differences).
 
 ## Global Constraints
 
 - Python: `#!/usr/bin/env -S python3 -I`, standard library only, one file, `self-test [SECTION ...]` runs in a temporary directory with `HOME` redirected and never touches `~/Mailbox` or agent-deck (spec 5.2 conventions; agent-mail's own self-test is the model).
-- The helper never opens a message file. It reads directory listings (`os.scandir`), `st_ctime`, member records (`.agent-mail/members/<name>.json`, metadata), `SENT.log`, `NOTES.log`, `TOPIC.md`, `POLICY.md`, agent-deck JSON and transcript JSONL `message.usage` fields (spec 6.5).
+- The helper never opens a message file. It reads directory listings (`os.scandir`), `st_ctime`, member records (`.agent-mail/members/<name>.json`, metadata), `SENT.log`, `NOTES.log`, `TOPIC.md`, `POLICY.md` and agent-deck JSON (spec 6.5).
 - Names follow agent-mail's grammar: `[a-z0-9](?:[a-z0-9.]|-(?!-))*`, at most 64 characters, not ending in `-` (spec 5.2). Message ids are file names without `.txt`: `<to>_<UTC>_from-<from>_<hex8>` with `<UTC>` as `YYYYMMDDTHHMMSS.ffffffZ`.
 - Exact copy, pinned by the self-test's `docs` section: the question-line template `Q <prefix>-<n>: <text>: A <x>, B <y>?` of at most 80 characters, using only letters, digits, spaces and `- . , : ( )`; the STATUS line `<UTC> tick=<min> open=<n> active=<n> waiting-john=<n> last-post=<UTC> doorbell=<ok|missing>`; the page text `NEED(steward): <steward> STATUS unchanged since <UTC> (tick <m>m, <n> open)`; the ledger states `unclaimed active blocked waiting-john done dropped orphaned`; the message-template subjects in spec 6.6; the summary form `SUMMARY +<channel> <date>: …` of at most 400 bytes with no `?`.
-- Thresholds and prices live only in `steward/POLICY.md` (spec 6.5, 7.1); the starting values are the spec's: stale 45 min, idle 20 min, question 30 min, nudge gap 30 min, 2 nudges per item per day, busy-stuck 2 h, deaf 15 min, offer 3 items every 2 h, 6 sends per turn, 20 per hour, ledger 8 KB, logs 14 days, back-after 30 min, doorbell delay 5 min, tick 15 min active and 60 otherwise, summary at 07:30 America/Los_Angeles.
+- Thresholds live only in `steward/POLICY.md` (spec 6.5, 7.1); the starting values are the spec's: stale 45 min, idle 20 min, question 30 min, nudge gap 30 min, 2 nudges per item per day, busy-stuck 2 h, deaf 15 min, offer 3 items every 2 h, 6 sends per turn, 20 per hour, ledger 8 KB, logs 14 days, back-after 30 min, doorbell delay 5 min, tick 15 min active and 60 otherwise, summary at 07:30 America/Los_Angeles.
 - No `?` appears in any text the steward prints except the question line; no `?` in `SUMMARY`, `STATUS` or template subjects (spec 6.4 step 7, 6.7).
 - The steward never uses `agent-deck session send`, `launch`, `stop`, `restart`, `set-parent`, `notify_discord.py`, or `inbox drain` (spec 4, 6.6); the instruction files must say so and the `docs` check must find those words only in a "never" sentence.
 - Nothing here modifies `agent-mail`, its README's rules, or any file outside `steward/` and `docs/`, except one pointer paragraph in the top-level `README.md` (Task 12). John's `monitor_sessions.py` and `bridge.py` are read-only; the patches are made against copies (Tasks 10, 11).
@@ -29,7 +29,7 @@
 1. A channel directory with thousands of 30-day posts: the census must stay under a second and read no file. Pinned in Task 3 (`test_census_scales`).
 2. Member titles with dots and digits (`glm-5.2`, `glm-5.3-flash`, `dsv41f`) in every name regex, and a member named as a prefix of another (`pi` vs `pipeline`): exact matching only. Pinned in Task 3 (`test_names_are_exact`).
 3. agent-deck JSON that is an object with a `sessions` key instead of a bare array, or rows missing `substate`, `background_work` or `transcript_path`: parse what is there, mark the rest unknown, never crash. Pinned in Task 2 (`test_list_shapes`).
-4. A transcript JSONL with lines that have no `message.usage`, are not JSON, or belong to another day: skip them and count only the UTC day asked for. Pinned in Task 5 (`test_usage_skips_bad_lines`).
+4. A `metrics/<date>.json` left corrupt or hand-edited: the merge must never crash the steward's turn or lose the counters it was given; the bad file is moved aside to `<date>.json.bad` and a fresh one written. Pinned in Task 5 (`test_metrics_corrupt_file`).
 5. A `POLICY.md` John edited with a misspelt key or a non-numeric value: refuse with the key named, never fall back to a default silently. Pinned in Task 1 (`test_policy_refuses_bad_values`).
 
 ---
@@ -42,10 +42,10 @@ steward/
   CLAUDE.md               the steward's instructions (conductor setup -instructions-md)
   SHARED.md               steward-safe shared conductor instructions (-shared-instructions-md)
   HEARTBEAT_RULES.md      (-heartbeat-rules-md)
-  POLICY.md               thresholds, caps, prices: one Markdown table the helper parses; John edits the conductor's copy
+  POLICY.md               thresholds and caps: one Markdown table the helper parses; John edits the conductor's copy
   POLICY-test.md          the same keys with short values for day zero
   WORKER.md               the stewarded-topic section workers follow; names steward-questions.md
-  steward-signals         Python 3, stdlib: signals, probe, usage, self-test (incl. docs checks)
+  steward-signals         Python 3, stdlib: signals, probe, metrics, self-test (incl. docs checks)
   patches/
     README.md             how John applies and tests the two patches
     monitor_sessions-steward.patch
@@ -54,7 +54,7 @@ steward/
 README.md                 one new paragraph pointing at steward/ (Task 12)
 ```
 
-`steward-signals` internal layout (one file, top to bottom): constants and regexes; `load_policy`; `load_roster`; agent-deck readers; census; probe; usage and metrics; the `signals`, `probe`, `usage` commands and their text/JSON rendering; `self_test` with sections `policy deck census probe usage signals docs`; `main`.
+`steward-signals` internal layout (one file, top to bottom): constants and regexes; `load_policy`; `load_roster`; agent-deck readers; census; probe; metrics; the `signals`, `probe`, `metrics` commands and their text/JSON rendering; `self_test` with sections `policy deck census probe metrics signals docs`; `main`.
 
 ---
 
@@ -65,7 +65,7 @@ README.md                 one new paragraph pointing at steward/ (Task 12)
 - Create: `steward/steward-signals` (skeleton: `main`, `self_test` harness, `load_policy`)
 
 **Interfaces:**
-- Produces: `load_policy(path: str) -> dict[str, int | float | str]` with keys exactly: `stale_min idle_min question_min nudge_gap_min nudges_per_item_day busy_stuck_h deaf_min offer_items offer_every_h sends_per_turn sends_per_hour ledger_kb log_days back_after_min doorbell_delay_min tick_active_min tick_idle_min summary_local_time summary_tz price_in price_cache_write price_cache_read price_out` (prices in dollars per million tokens, as decimals). Raises `PolicyError(key, reason)` on a missing or unknown key or a non-numeric value where a number is required. `POLICY.md` is a Markdown table with columns `key | value | meaning`.
+- Produces: `load_policy(path: str) -> dict[str, int | float | str]` with keys exactly: `stale_min idle_min question_min nudge_gap_min nudges_per_item_day busy_stuck_h deaf_min offer_items offer_every_h sends_per_turn sends_per_hour ledger_kb log_days back_after_min doorbell_delay_min tick_active_min tick_idle_min summary_local_time summary_tz` (19 keys). Raises `PolicyError(key, reason)` on a missing or unknown key or a non-numeric value where a number is required. `POLICY.md` is a Markdown table with columns `key | value | meaning`.
 - Produces: the self-test harness `ok(cond, what)` and `capture(fn, *args)` and `run_section(name)` in the style of `agent-mail self_test`.
 
 - [ ] **Step 1: Write the failing tests** in `self_test`, section `policy`:
@@ -77,7 +77,6 @@ def test_policy_parses_spec_values(d):
     ok(p["nudges_per_item_day"] == 2 and p["busy_stuck_h"] == 2 and p["deaf_min"] == 15, "policy: nudge and deaf values")
     ok(p["tick_active_min"] == 15 and p["tick_idle_min"] == 60 and p["doorbell_delay_min"] == 5, "policy: ticks and delay")
     ok(p["summary_local_time"] == "07:30" and p["summary_tz"] == "America/Los_Angeles", "policy: summary time")
-    ok(all(isinstance(p[k], float) for k in ("price_in", "price_cache_write", "price_cache_read", "price_out")), "policy: prices are decimals")
 
 def test_policy_refuses_bad_values(d):
     bad = write(d, "POLICY.md", TABLE.replace("| stale_min | 45 |", "| stale_min | forty-five |"))
@@ -95,7 +94,7 @@ def test_policy_refuses_bad_values(d):
 Run: `python3 -I steward/steward-signals self-test policy`
 Expected: exit 1, `steward-signals self-test FAILED: policy: …` (or ImportError-style failure for the missing file).
 
-- [ ] **Step 3: Write `steward/POLICY.md`** as a Markdown table `| key | value | meaning |` with the 23 keys above and the spec's starting values (Global Constraints); `steward/POLICY-test.md` with the same keys and values suited to day zero (`stale_min 2`, `idle_min 1`, `question_min 1`, `nudge_gap_min 1`, `busy_stuck_h 0.1`, `deaf_min 1`, `tick_active_min 1`, `tick_idle_min 2`, the rest unchanged). Implement `load_policy` and `PolicyError` in `steward/steward-signals`, plus `main` with subcommand `self-test [SECTION ...]`.
+- [ ] **Step 3: Write `steward/POLICY.md`** as a Markdown table `| key | value | meaning |` with the 19 keys above and the spec's starting values (Global Constraints); `steward/POLICY-test.md` with the same keys and values suited to day zero (`stale_min 2`, `idle_min 1`, `question_min 1`, `nudge_gap_min 1`, `busy_stuck_h 0.1`, `deaf_min 1`, `tick_active_min 1`, `tick_idle_min 2`, the rest unchanged). Implement `load_policy` and `PolicyError` in `steward/steward-signals`, plus `main` with subcommand `self-test [SECTION ...]`.
 
 - [ ] **Step 4: Run to verify it passes**
 
@@ -261,61 +260,54 @@ git add steward/steward-signals
 git commit -m "Probe one local member for a trailing question without printing its text"
 ```
 
-### Task 5: Usage, metrics and the cost lines
+### Task 5: The metrics file
 
 **Files:**
 - Modify: `steward/steward-signals`
 
 **Interfaces:**
-- Consumes: `load_policy` (Task 1), `deck_rows` (Task 2) for `transcript_path`, `run`.
-- Produces: `usage_for_day(transcript_path: str, day: str) -> Usage` with `Usage = dict(input, cache_write, cache_read, output, requests)` summed over JSONL lines whose `timestamp` falls in the UTC day `YYYY-MM-DD` and whose `message.usage` exists (field names `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, `output_tokens`); `session_metrics(run, steward) -> dict(turns, restarts)` from `agent-deck session metrics <steward> --json --since 24h`; `limits(run) -> dict(window_5h_pct, window_7d_pct)` from `agent-deck limits --json` (fields adapted to the real output, captured read-only first); `dollars(usage, policy) -> float`; `write_metrics(conductor_dir, day, data: dict) -> path` merging into `metrics/<day>.json` (counters the steward passes with `--set key=value` are merged, never overwritten downward); `cost_lines(usage, dollars, metrics, limits) -> str` producing the digest's `Steward:` line exactly as spec 6.8 shows it.
+- Consumes: the harness (Task 1).
+- Produces: `write_metrics(conductor_dir: str, day: str, data: dict) -> str`, merging `data` into `<conductor_dir>/metrics/<day>.json` and returning its path: for integers keep the larger, for dicts merge recursively, for other types take the new value; a file that is not valid JSON is moved aside to `<day>.json.bad` and a fresh file written, with one notice on stderr. The `metrics --dir DIR [--date YYYY-MM-DD] --set key=value ...` subcommand merges the steward's counters: a value is an int when it parses as one and a string otherwise, and a dotted key (`interventions.nudge=1`) addresses a nested dict. The counters the steward records are the spec's section 6.10 without cost: notice delay (p50 and max, seconds), posts and direct mails seen, NOTEs, member mail seen in transit without a NOTE, interventions by type and by the worker's response, questions opened, answered, dropped and defaulted, pages, `rate` records, relays sent, disputed and failed, forged files found, STATUS staleness episodes, doorbell and tick restarts, context resets, nudges, offers, defaults applied alone, nag reports. No token, dollar or usage-window figure is collected (spec decision 20).
 
-- [ ] **Step 1: Write the failing tests**, section `usage`:
+- [ ] **Step 1: Write the failing tests**, section `metrics`:
 
 ```python
-def test_usage_sums_a_day(d):
-    p = write(d, "t.jsonl", jsonl(
-        {"timestamp": "2026-11-03T01:00:00Z", "message": {"usage": {"input_tokens": 100, "cache_creation_input_tokens": 10, "cache_read_input_tokens": 1000, "output_tokens": 50}}},
-        {"timestamp": "2026-11-03T02:00:00Z", "message": {"usage": {"input_tokens": 200, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 2000, "output_tokens": 70}}},
-        {"timestamp": "2026-11-02T23:59:59Z", "message": {"usage": {"input_tokens": 999, "output_tokens": 999}}}))
-    u = usage_for_day(p, "2026-11-03")
-    ok(u == {"input": 300, "cache_write": 10, "cache_read": 3000, "output": 120, "requests": 2}, "usage: sums the UTC day only")
-
-def test_usage_skips_bad_lines(d):
-    p = write(d, "t.jsonl", 'not json\n{"timestamp":"2026-11-03T03:00:00Z","type":"user"}\n' + jsonl({"timestamp": "2026-11-03T04:00:00Z", "message": {"usage": {"input_tokens": 5, "output_tokens": 1}}}))
-    ok(usage_for_day(p, "2026-11-03")["requests"] == 1, "usage: non-JSON and usage-less lines skipped")
-
-def test_dollars_and_lines(d):
-    pol = load_policy(os.path.join(REPO, "steward", "POLICY.md"))
-    u = {"input": 1_200_000, "cache_write": 0, "cache_read": 38_000_000, "output": 90_000, "requests": 410}
-    line = cost_lines(u, dollars(u, pol), {"turns": 41, "restarts": 2}, {"window_5h_pct": 22, "window_7d_pct": 31})
-    ok(line.startswith("Steward: 41 turns, 2 resets, in 1.2M, cache 38M, out 90k tokens, about $") and line.endswith("; 5h window 22%, 7d 31%"), "usage: digest line in the spec's form")
-    ok("?" not in line, "usage: no question mark")
-
 def test_write_metrics_merges(d):
     write_metrics(d, "2026-11-03", {"turns": 3, "interventions": {"nudge": 1}})
-    path = write_metrics(d, "2026-11-03", {"turns": 4, "interventions": {"overlap": 1}})
+    path = write_metrics(d, "2026-11-03", {"turns": 4, "interventions": {"overlap": 1}, "last_post": "20261103T0700Z"})
     m = json.load(open(path))
-    ok(m["turns"] == 4 and m["interventions"] == {"nudge": 1, "overlap": 1}, "usage: metrics merge, counters never go backwards")
+    ok(m["turns"] == 4 and m["interventions"] == {"nudge": 1, "overlap": 1} and m["last_post"] == "20261103T0700Z", "metrics: merge keeps the larger counter, merges dicts, takes new strings")
+
+def test_metrics_subcommand(d):
+    out, code, _ = capture(main, ["metrics", "--dir", d, "--date", "2026-11-03", "--set", "turns=5", "--set", "interventions.nudge=2", "--set", "last_post=20261103T0700Z"])
+    m = json.load(open(os.path.join(d, "metrics", "2026-11-03.json")))
+    ok(code == 0 and m["turns"] == 5 and m["interventions"]["nudge"] == 2 and m["last_post"] == "20261103T0700Z", "metrics: --set writes ints, nested keys and strings")
+    ok("?" not in out, "metrics: no question mark")
+
+def test_metrics_corrupt_file(d):
+    os.makedirs(os.path.join(d, "metrics"), exist_ok=True); write(d, "metrics/2026-11-03.json", "{not json")
+    _, _, err = capture(write_metrics, d, "2026-11-03", {"turns": 1})
+    path = os.path.join(d, "metrics", "2026-11-03.json")
+    ok(os.path.exists(path + ".bad") and json.load(open(path))["turns"] == 1 and "moved aside" in err, "metrics: a corrupt file is moved aside and a fresh one written, with a notice")
 ```
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `python3 -I steward/steward-signals self-test usage`
-Expected: FAIL (NameError `usage_for_day`).
+Run: `python3 -I steward/steward-signals self-test metrics`
+Expected: FAIL (NameError `write_metrics`).
 
-- [ ] **Step 3: Implement** the functions above and the `usage <steward> --dir DIR [--date YYYY-MM-DD] [--set key=value ...]` subcommand. Before coding `limits`, run `agent-deck limits --json | head -c 400` and `agent-deck session metrics mail-conductor --json --since 24h | head -c 400` read-only and adapt the field names; put trimmed real output into the fixtures. Prices: `dollars = sum(tokens_k * price_k) / 1e6`. The merge rule: for integers keep the larger, for dicts merge recursively, for other types take the new value.
+- [ ] **Step 3: Implement `write_metrics` and the `metrics` subcommand** in `steward/steward-signals`. The merge rule: for integers keep the larger, for dicts merge recursively, for other types take the new value. The file is written atomically (temporary file in `metrics/`, then `os.replace`).
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `python3 -I steward/steward-signals self-test usage`
+Run: `python3 -I steward/steward-signals self-test metrics`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add steward/steward-signals
-git commit -m "Sum a steward's transcript usage, price it, read its windows, and keep the day's metrics"
+git commit -m "Keep a steward's daily metrics file, merging counters without losing any"
 ```
 
 ### Task 6: The signals command
@@ -390,7 +382,7 @@ def test_claude_md(d):
     ok("steward-tick <channel>" in t and "echo steward-tick" in t, "docs: the tick is named by channel")
     ok("intent " in t and "sent " in t and "RECEIVED.log" in t and "NOTES.log" in t, "docs: two-phase SENT.log, RECEIVED.log and NOTES.log")
     ok("DECISION" in t.split("## 10.")[1].split("## 11.")[0] and "post first" in t.split("## 10.")[1].split("## 11.")[0].lower(), "docs: DECISION post before the relay mail")
-    ok("steward-signals signals" in t and "steward-signals usage" in t, "docs: the helper is called by name")
+    ok("steward-signals signals" in t and "steward-signals metrics" in t, "docs: the helper is called by name")
     for num in ("45 min", "20 min", "2 h"): ok(num not in t, f"docs: threshold {num} is cited by POLICY key, not value")
     ok("?" not in strip_code_and_template(t), "docs: no stray question marks outside code blocks and the template")
 ```
@@ -583,7 +575,7 @@ git commit -m "Patch the Discord bridge to route case-insensitive prefixes and r
 - Modify: `steward/steward-signals` (section `docs`)
 
 **Interfaces:**
-- Produces: `steward/README.md` with: what each file is; the preconditions from spec 10 as a checklist; John's commands verbatim (the three `agent-mail channel create` lines with purposes worded by the work; the two `agent-deck conductor setup` lines from spec 6.4 with `-shared-instructions-md`, `-instructions-md`, `-policy-md`, `-heartbeat-rules-md` and `-env AGENTDECK_CONTEXT_WINDOW=`; the post-setup `cp --remove-destination` that turns the conductor's `POLICY.md` link into a copy; the one line typed in each member's pane naming the topic, the steward and that host's `WORKER.md` path); the Discord answer form and its two traps; and the day-zero runbook: the Phase 0 checks of spec 10 as a numbered table `check | how | expected`, run on `+steward-test` with `POLICY-test.md` and planted posts from John's shell (`agent-mail send --from steward-test-a --to +steward-test --subject "CLAIM t1: test" …`), each row's expected output exact, and the rollback (`agent-deck session stop <steward>`).
+- Produces: `steward/README.md` with: what each file is; the preconditions from spec 10 as a checklist; the three channels as they exist since 2026-10-31 14:59 PDT with their purposes verbatim (created by mail-dev under John's decision 36 in that session; a purpose cannot be edited by a command); John's commands verbatim (the two `agent-deck conductor setup` lines from spec 6.4 with `-shared-instructions-md`, `-instructions-md`, `-policy-md`, `-heartbeat-rules-md` and `-env AGENTDECK_CONTEXT_WINDOW=`; the post-setup `cp --remove-destination` that turns the conductor's `POLICY.md` link into a copy; the one line typed in each member's pane naming the topic, the steward and that host's `WORKER.md` path); the Discord answer form and its two traps; and the day-zero runbook: the Phase 0 checks of spec 10 as a numbered table `check | how | expected`, run on `+steward-test` with `POLICY-test.md` and planted posts from John's shell (`agent-mail send --from steward-test-a --to +steward-test --subject "CLAIM t1: test" …`), each row's expected output exact, and the rollback (`agent-deck session stop <steward>`).
 - Produces: in the top-level `README.md`, one paragraph under section 3: "Some topics have a steward …" pointing at `steward/WORKER.md`, with no other change to the README's rules.
 
 - [ ] **Step 1: Write the failing tests** (append to section `docs`):
@@ -591,7 +583,7 @@ git commit -m "Patch the Discord bridge to route case-insensitive prefixes and r
 ```python
 def test_steward_readme_and_pointer(d):
     r = read(os.path.join(REPO, "steward", "README.md"))
-    ok(r.count("agent-mail channel create") == 3 and "+steward-test" in r and r.count("agent-deck conductor setup") == 2, "docs: the channel and setup commands")
+    ok(all(c in r for c in ("+nix-config", "+ingest", "+steward-test")) and "channel create" not in r.split("day-zero")[0].lower().replace("cannot be edited", "") and r.count("agent-deck conductor setup") == 2, "docs: the three existing channels and the two setup commands")
     ok("-shared-instructions-md" in r and "-env AGENTDECK_CONTEXT_WINDOW=" in r and "cp --remove-destination" in r, "docs: setup flags and the POLICY copy step")
     ok("POLICY-test.md" in r and "steward-test-a" in r and "| check | how | expected |" in r, "docs: the day-zero runbook table")
     for check in ("doorbell", "steward-tick", "07:30", "session context", "DISPUTE", "session stop", "bridge.py", "Q&A"): ok(check in r, f"docs: day-zero check {check}")
@@ -629,4 +621,4 @@ git commit -m "Document the steward files, John's setup commands and the day-zer
 
 ## Self-review notes
 
-Spec coverage: 6.2 (Task 9), 6.4 (Tasks 7, 12), 6.5 (Tasks 2 to 6, 7), 6.6 and 6.7 (Tasks 7, 9), 6.8 (Tasks 5, 7), 6.9 (Tasks 7, 10), 6.10 (Tasks 5, 6, 7), 7.1 (Tasks 7, 8), 7.2 (Task 9), 8 "of John's own files" patches (Tasks 10, 11), 10 Phase 0 (Task 12). The Discord traps (spec 6.7) are both in Task 11's patch and in Task 12's runbook. Names used across tasks: `load_policy`, `PolicyError`, `load_roster`, `RosterError`, `Member`, `deck_rows`, `Row`, `fake_run`, `MSG_RE`, `list_entries`, `Entry`, `read_sent_log`, `read_notes_log`, `census`, `Census`, `probe`, `usage_for_day`, `Usage`, `session_metrics`, `limits`, `dollars`, `write_metrics`, `cost_lines`, `docs_checks`, `strip_code_and_template`, `steward_status_alerts`, `conductor_for_reply`.
+Spec coverage: 6.2 (Task 9), 6.4 (Tasks 7, 12), 6.5 (Tasks 2 to 6, 7), 6.6 and 6.7 (Tasks 7, 9), 6.8 (Task 7), 6.9 (Tasks 7, 10), 6.10 (Tasks 5, 6, 7), 7.1 (Tasks 7, 8), 7.2 (Task 9), 8 "of John's own files" patches (Tasks 10, 11), 10 Phase 0 (Task 12). The Discord traps (spec 6.7) are both in Task 11's patch and in Task 12's runbook. Names used across tasks: `load_policy`, `PolicyError`, `load_roster`, `RosterError`, `Member`, `deck_rows`, `Row`, `fake_run`, `MSG_RE`, `list_entries`, `Entry`, `read_sent_log`, `read_notes_log`, `census`, `Census`, `probe`, `write_metrics`, `docs_checks`, `strip_code_and_template`, `steward_status_alerts`, `conductor_for_reply`.
