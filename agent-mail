@@ -4915,9 +4915,12 @@ def section_sync(t):
     t.ok("another reader of b appears active on h1" in out_on_h0, "the same name on two hosts raises the warning")
 
     with fs.on(0) as r0:
+        claim = f".b-claimed-1-{HOSTTAG}-b_20261030T000000.000000Z_from-x_0000000a.txt"
         t.mk(os.path.join(r0, "+fleet", ".x.tmp"), "half-written\n")
         t.mk(os.path.join(r0, ".b-rejected-junk"), "refused\n")
-        t.mk(os.path.join(r0, f".b-claimed-1-{HOSTTAG}-b_20261030T000000.000000Z_from-x_0000000a.txt"), "claimed\n")
+        t.mk(os.path.join(r0, claim), "claimed\n")
+        t.mk(os.path.join(r0, ".nfs000000000000000a"), "an NFS client's placeholder\n")
+        t.mk(os.path.join(r0, "+fleet", ".DS_Store"), "Finder's state\n")
     sync()
 
     def walk(d):
@@ -4927,6 +4930,15 @@ def section_sync(t):
 
     t.ok(any(ignored(p) for p in walk(fs.replica(0))) and not any(ignored(p) for p in walk(fs.replica(2))),
          "claims, archives, rejected files and temporary files never cross, including +fleet/.x.tmp")
+    # nix's .stignore lines (decision 10), written out here instead of read from STIGNORE,
+    # which FakeSync and doctor use, so that a line dropped or changed there fails.
+    t.ok(STIGNORE == (".*-claimed-*", ".*-read", ".*-rejected-*", ".*.tmp", "(?d).nfs*", "(?d).DS_Store") and IGNORE == STIGNORE,
+         "STIGNORE holds nix's six ignore lines exactly, and FakeSync simulates them")
+    # One file per line, each kept local by that line alone, named here rather than matched.
+    local = [claim, ".a-read", ".b-read", ".b-rejected-junk", os.path.join("+fleet", ".x.tmp"), ".nfs000000000000000a", os.path.join("+fleet", ".DS_Store")]
+    crossed = [p for p in local if not os.path.lexists(os.path.join(fs.replica(0), p)) or os.path.lexists(os.path.join(fs.replica(2), p))]
+    t.ok(not crossed, "by name, a claim, two archives, a rejected file, a temporary file, an NFS placeholder and a .DS_Store stay on "
+                      f"their host; crossed or never made: {', '.join(crossed)}")
 
 
 SECTIONS = [
