@@ -1097,19 +1097,6 @@ def archive_target(d, name, file):
     return f"{dest}.{secrets.token_hex(3)}" if os.path.lexists(dest) else dest
 
 
-def prune(d, name, now):
-    a = archive_dir(d, name)
-    try:
-        entries = os.listdir(a)
-    except FileNotFoundError:
-        return
-    for entry in entries:
-        p = os.path.join(a, entry)
-        try:
-            if now - os.lstat(p).st_ctime > KEEP_DAYS * 86400:
-                os.unlink(p)
-        except OSError:
-            pass
 
 
 # A delivered item. hold is the claim path of direct mail; copy is its archive path.
@@ -1258,6 +1245,87 @@ def shared_ids(d, key):
         return {m.id for m in channel_posts(fd, key[1:])}
     finally:
         os.close(fd)
+
+
+# ---- retention ----
+
+RETENTION = 30 * 86400.0
+PRUNE_EVERY = 3600.0
+
+
+def open_owned_dir(path):
+    """A descriptor for PATH opened O_RDONLY | O_DIRECTORY | O_NOFOLLOW, or None when it is
+    not our directory."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    if os.fstat(fd).st_uid != os.getuid():
+        os.close(fd)
+        return None
+    return fd
+
+
+def prune_archive(d, name, now):
+    """Remove NAME's archive copies whose ctime is more than 7 days old; return how many.
+    Archive copies never leave their host, and only their owner prunes them."""
+    fd = open_owned_dir(archive_dir(d, name))
+    if fd is None:
+        return 0
+    removed = 0
+    try:
+        for entry in os.listdir(fd):
+            with contextlib.suppress(OSError):
+                st = os.stat(entry, dir_fd=fd, follow_symlinks=False)
+                if not stat.S_ISDIR(st.st_mode) and now - st.st_ctime > KEEP_DAYS * 86400:
+                    os.unlink(entry, dir_fd=fd)
+                    removed += 1
+    finally:
+        os.close(fd)
+    return removed
+
+
+def prune_posts(d, name, state, subs, now):
+    """Delete expired posts in NAME's subscribed channels and expired broadcasts at the top
+    level; return how many. A standard-named regular file expires 30 days after its stamp,
+    or, when stamped more than 24 hours ahead, 30 days after its ctime. Hidden files, other
+    names, directories and unsubscribed channels are never touched. Every unlink goes
+    through a descriptor for the directory that was listed, so a directory swapped for a
+    symlink meanwhile loses nothing outside. Deletions reach other hosts through Syncthing."""
+    removed = 0
+    for to in [*sorted(subs), None]:
+        if to is None:
+            to, fd = "all", open_owned_dir(os.path.realpath(d))
+        else:
+            try:
+                fd = open_channel(d, to)
+            except MailError:
+                fd = None
+        if fd is None:
+            continue
+        try:
+            for entry in os.listdir(fd):
+                m = parse_msg(entry)
+                if m is None or m.to != to:
+                    continue
+                with contextlib.suppress(OSError):
+                    st = os.stat(entry, dir_fd=fd, follow_symlinks=False)
+                    if stat.S_ISREG(st.st_mode) and (now - m.stamp > RETENTION or (m.stamp - now > FUTURE and now - st.st_ctime > RETENTION)):
+                        os.unlink(entry, dir_fd=fd)
+                        removed += 1
+        finally:
+            os.close(fd)
+    return removed
+
+
+def prune_due(d, name, settings, state, now):
+    """Prune NAME's posts and archive copies at most once an hour, on this host; True when it ran."""
+    if 0 <= now - (state.get("last_prune") or 0) < PRUNE_EVERY:
+        return False
+    prune_archive(d, name, now)
+    prune_posts(d, name, state, effective_subs(state, settings, now), now)
+    state["last_prune"] = now
+    return True
 
 
 def put_back(batch):
@@ -1455,16 +1523,21 @@ def receive(d, name, settings, write, max_bytes=None, *, idle=True, again="run r
     if not os.path.isdir(d):
         raise MailError("mailbox_missing", f"mailbox {d} does not exist")
     now = clock()
-    prune(d, name, now)
     state = load_state(d, name)
+    pruned = prune_due(d, name, settings, state, now)
     batch = collect(d, name, settings, state, max_bytes, now)
     if idle and not (batch.items or batch.notices) and batch.waiting:
         time.sleep(SETTLE + 0.2)
         now = clock()
         state = load_state(d, name)
+        if pruned:
+            state["last_prune"] = now
         batch = collect(d, name, settings, state, max_bytes, now)
     if not idle and not (batch.items or batch.notices or any(fresh for *_, fresh in batch.stuck)):
-        # A quiet pass of the claiming watch: nothing to show, so only the presence moves.
+        # A quiet pass of the claiming watch: nothing to show, so only the presence and the
+        # prune time move. A rebuilt cursor waits to be saved with the pass that shows it.
+        if not state.get("_rebuilt") and state_changed(state):
+            save_state(d, name, state)
         touch_member(d, name, batch.subs, now)
         result = Received("")
         result.batch = batch
@@ -2324,6 +2397,73 @@ def section_posts(t):
     t.ok("SECRET" not in receive(g, "r", s, sink), "a channel replaced by a symlink is never read")
 
 
+def section_retention(t):
+    T0 = time.time()
+    t.at(T0)
+
+    def sink(text):
+        pass
+
+    s = load_settings({}, {}, "a")
+    d = t.box()
+    create_channel(d, "fleet", "fleet-wide notices")
+    create_channel(d, "other", "a channel a does not read")
+    st = load_state(d, "a")
+    subscribe(d, "a", st, s, "fleet", now=T0)
+    save_state(d, "a", st)
+    p0 = t.post(d, "fleet", "nix", "DAY-0", stamp=T0)
+    p2 = t.post(d, "fleet", "nix", "DAY-2", stamp=T0 + 2 * 86400)
+    t.mk(os.path.join(d, "+fleet", "notes.txt"), "notes\n")
+    t.mk(os.path.join(d, "+fleet", ".hidden"), "hidden\n")
+    old_in_unsubscribed = t.post(d, "other", "nix", "OLD-OTHER", stamp=T0 - 40 * 86400)
+    t.at(T0 + 31 * 86400)
+    receive(d, "a", s, sink)
+    t.ok(not os.path.exists(p0) and os.path.exists(p2), "posts older than 30 days are pruned and younger ones kept")
+    planted_old = t.post(d, "fleet", "nix", "PLANTED-OLD", stamp=T0 - 86400)
+    t.at(T0 + 31 * 86400 + 600)
+    receive(d, "a", s, sink)
+    t.ok(os.path.exists(planted_old), "pruning runs at most once an hour")
+    fut = t.post(d, "fleet", "nix", "FUTURE-POST", stamp=clock() + 2 * 86400)
+    t.ok("FUTURE-POST" not in receive(d, "a", s, sink) and os.path.exists(fut), "a post stamped over 24 hours ahead is never delivered")
+    t.at(os.stat(fut).st_ctime + 30 * 86400 + 3601)
+    receive(d, "a", s, sink)
+    t.ok(not os.path.exists(fut), "and is deleted once its ctime is 30 days old")
+    t.ok(os.path.exists(os.path.join(d, "+fleet", "notes.txt")) and os.path.exists(os.path.join(d, "+fleet", ".hidden")),
+         "pruning leaves non-grammar and hidden files")
+    t.ok(os.path.exists(old_in_unsubscribed), "a reader does not prune a channel it does not subscribe to")
+
+    archive = archive_dir(d, "a")
+    copy_8_days = t.mk(os.path.join(archive, "old-copy.txt"), "old\n")
+    prune_archive(d, "a", os.stat(copy_8_days).st_ctime + 8 * 86400)
+    copy_6_days = t.mk(os.path.join(archive, "young-copy.txt"), "young\n")
+    prune_archive(d, "a", os.stat(copy_6_days).st_ctime + 6 * 86400)
+    t.ok(not os.path.exists(copy_8_days) and os.path.exists(copy_6_days), "archive copies older than 7 days go and younger ones stay")
+
+    old_broadcast = t.direct(d, "all", "nix", "OLD-BROADCAST", stamp=clock() - 40 * 86400)
+    t.run(["--dir", d, "pending", "a"])
+    t.ok(os.path.exists(old_broadcast), "pending prunes nothing")
+
+    outside = os.path.join(t.root, "outside")
+    os.mkdir(outside, 0o700)
+    victim = t.post(d, "fleet", "nix", "EXPIRED", stamp=clock() - 40 * 86400)
+    outside_file = t.mk(os.path.join(outside, os.path.basename(victim)), "must survive\n")
+    real_listdir = os.listdir
+
+    def swapping(target):
+        entries = real_listdir(target)
+        if os.path.basename(victim) in entries and not os.path.islink(os.path.join(d, "+fleet")):
+            os.rename(os.path.join(d, "+fleet"), os.path.join(t.root, "fleet-moved"))
+            os.symlink(outside, os.path.join(d, "+fleet"))
+        return entries
+
+    os.listdir = swapping
+    try:
+        prune_posts(d, "a", load_state(d, "a"), effective_subs(load_state(d, "a"), s, clock()), clock())
+    finally:
+        os.listdir = real_listdir
+    t.ok(os.path.exists(outside_file), "a channel swapped for a symlink between listing and unlink loses nothing outside")
+
+
 def section_send(t):
     t.patch("SETTLE", 0.0)
     root = t.root
@@ -2484,6 +2624,7 @@ SECTIONS = [
     ("channels", section_channels),
     ("receive", section_receive),
     ("posts", section_posts),
+    ("retention", section_retention),
     ("send", section_send),
     ("cli", section_cli),
 ]
