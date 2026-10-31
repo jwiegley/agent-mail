@@ -680,14 +680,23 @@ def read_member(d, name):
 def touch_member(d, name, subs, now, force=False):
     """Publish NAME's member record when its subscription list changes, when forced, or at
     most every 300 s, and touch the v1 presence file with it while v1 readers remain.
-    Best effort: a mailbox that cannot be written is still read, and a mailbox that has
-    vanished is never re-created. An unsafe directory on the way is unsafe_mailbox (see
-    open_meta), and every write and rename goes through a directory descriptor."""
+    Another host's record younger than 300 s either way is left alone unless forced
+    (subscribe and unsubscribe force), so two readers of one name do not overwrite each
+    other on every pass. Best effort: a mailbox that cannot be written is still read, and
+    a mailbox that has vanished is never re-created. An unsafe directory on the way is
+    unsafe_mailbox (see open_meta), and every write and rename goes through a directory
+    descriptor."""
     subs = sorted(subs)
     old = read_member(d, name)
-    if (not force and old is not None and old["host"] == HOST and old["subs"] == subs
-            and 0 <= now - parse_utc(old["checked"]) < MEMBER_EVERY):
-        return
+    if old is not None and not force:
+        age = now - parse_utc(old["checked"])
+        if old["host"] != HOST:
+            # Two readers of one name, which the duplicate-reader warning reports. Clocks
+            # may differ a little either way.
+            if abs(age) < MEMBER_EVERY:
+                return
+        elif old["subs"] == subs and 0 <= age < MEMBER_EVERY:
+            return
     record = {"v": 2, "name": name, "host": HOST, "checked": utc(now), "subs": subs}
     fds, tmp = [], None
     try:
@@ -2555,7 +2564,7 @@ class McpServer:
         state = load_state(d, name)
         sub = subscribe(d, name, state, self.settings, ch, wake=args.get("wake", False), backlog=args.get("backlog", 0), now=now)
         save_state(d, name, state)
-        touch_member(d, name, effective_subs(state, self.settings, now), now)
+        touch_member(d, name, effective_subs(state, self.settings, now), now, force=True)
         return self.head() + subscription_text(d, name, ch, sub), None, None
 
     def tool_unsubscribe(self, args, mid):
@@ -2565,7 +2574,7 @@ class McpServer:
         state = load_state(d, name)
         was = unsubscribe(state, self.settings, ch)
         save_state(d, name, state)
-        touch_member(d, name, effective_subs(state, self.settings, now), now)
+        touch_member(d, name, effective_subs(state, self.settings, now), now, force=True)
         listed = sorted(n for n, record in members(d).items() if ch in record["subs"])
         return (self.head() + f"+{ch}: {name} {'unsubscribed' if was else 'was not subscribed'}; subscribers listed: {', '.join(listed) or 'none'}"), None, None
 
@@ -2845,7 +2854,7 @@ def cmd_subscribe(name, d, ch, wake, backlog, settings, write=None):
         state = load_state(d, name)
         sub = subscribe(d, name, state, settings, ch, wake=wake, backlog=backlog, now=now)
         save_state(d, name, state)
-        touch_member(d, name, effective_subs(state, settings, now), now)
+        touch_member(d, name, effective_subs(state, settings, now), now, force=True)
         emit(write, subscription_text(d, name, ch, sub) + "\n")
     finally:
         lock.release()
@@ -2859,7 +2868,7 @@ def cmd_unsubscribe(name, d, ch, settings, write=None):
         state = load_state(d, name)
         was = unsubscribe(state, settings, ch)
         save_state(d, name, state)
-        touch_member(d, name, effective_subs(state, settings, now), now)
+        touch_member(d, name, effective_subs(state, settings, now), now, force=True)
         emit(write, f"+{ch}: {name} unsubscribed\n" if was else f"+{ch}: {name} was not subscribed\n")
     finally:
         lock.release()
@@ -3567,6 +3576,16 @@ def section_state(t):
         os.rename = real_rename
     t.ok(renamed == [f".pi.json.{os.getpid()}.tmp"] and not [e for e in os.listdir(members_dir) if e.endswith(".tmp")],
          "the member record's temporary name carries the pid, and a failed rename leaves no temporary file behind")
+    foreign = {"v": 2, "name": "pi", "host": "elsewhere", "checked": utc(now + 400), "subs": ["ops"]}
+    t.mk(member, json.dumps(foreign))
+    touch_member(d, "pi", ["fleet"], now + 460)
+    kept = read_member(d, "pi")["host"] == "elsewhere"
+    touch_member(d, "pi", ["fleet"], now + 701)
+    replaced = read_member(d, "pi")["host"] == HOST
+    t.mk(member, json.dumps({**foreign, "checked": utc(now + 800)}))
+    touch_member(d, "pi", ["fleet"], now + 700)
+    t.ok(kept and replaced and read_member(d, "pi")["host"] == "elsewhere",
+         "a pass leaves another host's fresh record for the name alone, even stamped a little ahead, and rewrites it once it is 300 s old")
     a, b = ReaderLock(d, "pi"), ReaderLock(d, "pi")
     t.ok(a.acquire() and not b.acquire() and b.holder == f"{os.getpid()}@{HOST}", "a second lock on one name fails, even inside one process")
     a.release()
@@ -4354,6 +4373,15 @@ def section_tools(t):
     t.mk(os.path.join(t.root, "later", MARKER_V2), "")
     t.ok("no mail for e" in text(tool(later, "pending")), "and the server recovers when the mailbox appears")
     t.ok("structuredContent" not in json.dumps(results), "no result carries structuredContent")
+    foreign = json.dumps({"v": 2, "name": "b", "host": "elsewhere", "checked": utc(clock() - 30), "subs": []})
+    t.mk(member_path(d, "b"), foreign)
+    tool(b, "unsubscribe", channel="fleet")
+    gone = read_member(d, "b") or {}
+    t.mk(member_path(d, "b"), foreign)
+    tool(b, "subscribe", channel="fleet")
+    back = read_member(d, "b") or {}
+    t.ok(gone.get("host") == HOST and gone.get("subs") == [] and back.get("host") == HOST and back.get("subs") == ["fleet"],
+         "the subscribe and unsubscribe tools publish at once, even over another host's fresh record for the name")
 
 
 def section_doctor(t):
@@ -4672,6 +4700,15 @@ def section_cli(t):
         del os.environ["AGENT_MAIL_CONFIG"]
     t.ok(published == [["fleet", "ops"]] * 3 + [["ci", "fleet"]] * 3,
          "read, watch and pending publish one subscription list, with the config file's pins and with --channel")
+    foreign = json.dumps({"v": 2, "name": "pi", "host": "elsewhere", "checked": utc(clock() - 30), "subs": []})
+    t.mk(member_path(d, "pi"), foreign)
+    t.run(["--dir", d, "subscribe", "pi", "ops"])
+    after_sub = read_member(d, "pi") or {}
+    t.mk(member_path(d, "pi"), foreign)
+    t.run(["--dir", d, "unsubscribe", "pi", "ops"])
+    after_unsub = read_member(d, "pi") or {}
+    t.ok(after_sub.get("host") == HOST and "ops" in after_sub.get("subs", []) and after_unsub.get("host") == HOST and "ops" not in after_unsub.get("subs", ["ops"]),
+         "subscribe and unsubscribe publish at once, even over another host's fresh record for the name")
 
 
 # ---- FakeSync: Syncthing replicas, simulated (test only) ----
