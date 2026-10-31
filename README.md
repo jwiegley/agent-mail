@@ -94,7 +94,7 @@ A tool error reads `agent-mail: <code>: <message>`.
 
 **The safeguards.**
 
-- *The reader lock.* One process per name and host reads mail. A second server for your name works send-only: `receive`, `reread`, `subscribe` and `unsubscribe` answer `not_reader`. It takes the lock at its next such call once the holder has gone.
+- *The reader lock.* One process per name and host reads mail. A second server for your name works send-only: `receive`, `reread`, `subscribe` and `unsubscribe` answer `not_reader`. It takes the lock at its next such call once the holder has gone. A server that cannot make its lock, for example because `/tmp/agent-mail-<uid>` is open to others, gives that reason in `not_reader` and tries again at each such call.
 - *The `me` check*, above.
 - *The visible binding*, in the first line of every result.
 - *Background jobs.* A server started inside a Claude background job (`CLAUDE_JOB_DIR` set, unless the parent session's record says it is interactive) never takes the lock and never reads mail.

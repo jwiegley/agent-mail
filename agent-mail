@@ -2448,10 +2448,12 @@ def rpc_error(mid, code, message):
 class McpServer:
     """One session's MCP server: JSON-RPC over stdio for one bound name, single-threaded,
     with static instructions and tools, text results only, and no resources, prompts or
-    notifications. lock is None for a background job, which never reads mail."""
+    notifications. lock is None for a background job, which never reads mail, and when
+    making the lock failed at start; lock_error is then that failure."""
 
-    def __init__(self, settings, identity, lock, problem=None):
+    def __init__(self, settings, identity, lock, problem=None, lock_error=None):
         self.settings, self.identity, self.lock, self.problem = settings, identity, lock, problem
+        self.lock_error = lock_error
         self.first = True
         self.last_receive = None
 
@@ -2515,7 +2517,15 @@ class McpServer:
         return require_mailbox(self.settings.dir)
 
     def reader(self):
-        """Hold the reader lock for this call: revalidated when held, taken when free."""
+        """Hold the reader lock for this call: revalidated when held, taken when free. A lock
+        that could not be made at start (an unsafe runtime directory) is made again here,
+        and while it still cannot be, its error is the reason given."""
+        if self.lock is None and self.lock_error is not None:
+            try:
+                self.lock, self.lock_error = ReaderLock(self.settings.dir, self.identity.name), None
+            except MailError as e:
+                self.lock_error = e
+                raise MailError("not_reader", f"this server cannot take the reader lock for {self.identity.name}: {e.message}") from None
         if self.lock is None:
             raise MailError("not_reader", "this server runs inside a Claude background job, which never reads mail")
         if not (self.lock.revalidate() if self.lock.held else self.lock.acquire()):
@@ -2680,15 +2690,15 @@ def run_mcp(a):
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    lock = None
+    lock = lock_error = None
     if identity.name and settings is not None and not background_job(os.environ, os.getppid(), home):
         try:
             lock = ReaderLock(settings.dir, identity.name)
             lock.acquire()
         except MailError as e:
             log(f"mcp {identity.name}: {e.message}")
-            lock = None
-    server = McpServer(settings, identity, lock, problem)
+            lock, lock_error = None, e
+    server = McpServer(settings, identity, lock, problem, lock_error)
     try:
         return serve(sys.stdin.buffer, protocol, server)
     finally:
@@ -4291,6 +4301,15 @@ def json_lines(text):
         return None
 
 
+def ask_line(proc, msg, timeout=10):
+    """Write one request to an agent-mail mcp subprocess and return its parsed answer line."""
+    proc.stdin.write((json.dumps(msg) + "\n").encode())
+    proc.stdin.flush()
+    if not select.select([proc.stdout], [], [], timeout)[0]:
+        raise TestFailed(f"the mcp subprocess gave no answer to {msg.get('method')} within {timeout} s")
+    return json.loads(proc.stdout.readline())
+
+
 def section_mcp(t):
     d = t.box()
     srv = t.server(d, "pi")
@@ -4336,6 +4355,28 @@ def section_mcp(t):
     stray_print_in_stderr = "STRAY PRINT" in noisy.stderr
     t.ok(stray_print_in_stderr and json_lines(noisy.stdout) is not None and len(json_lines(noisy.stdout)) == 3,
          "a stray print reaches stderr, never the protocol stream")
+    loose = os.path.join(t.root, "loose-run")
+    os.mkdir(loose)
+    os.chmod(loose, 0o755)  # open to others, so making the reader lock fails at start
+    proc = subprocess.Popen([sys.executable, "-I", SCRIPT, "mcp", "--dir", d, "--name", "t"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, env={**os.environ, "AGENT_MAIL_RUNTIME_DIR": loose})
+    try:
+        call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "receive", "arguments": {"me": "t"}}}
+        refused = ask_line(proc, call)["result"]
+        os.chmod(loose, 0o700)
+        taken = ask_line(proc, {**call, "id": 2})["result"]
+    finally:
+        proc.stdin.close()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    why = refused["content"][0]["text"]
+    t.ok(refused["isError"] and "not_reader" in why and f"the runtime directory {loose}" in why and "open to others" in why and "background job" not in why,
+         "a server that could not make its reader lock at start gives that reason, not a background job")
+    t.ok(not taken["isError"] and "no mail for t" in taken["content"][0]["text"],
+         "and it takes the lock at its next receive once the runtime directory is fixed")
 
 
 def section_tools(t):
