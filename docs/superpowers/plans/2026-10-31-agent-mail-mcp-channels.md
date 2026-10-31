@@ -635,7 +635,7 @@ t.ok(t.run(["frobnicate"])[1] == 2 and not re.search("peer mail is waiting", t.r
 - `serve` reads one line at a time, at most 8 MiB (a longer line gets -32600; builder's call), and writes one `json.dumps` line per response, flushed at once. A line that is not JSON gets -32700 with id null, and the loop goes on. A JSON array or a non-object gets -32600. Notifications get no response.
 - `initialize` echoes a version in `VERSIONS` and otherwise answers 2025-11-25. Its result is `{"protocolVersion", "capabilities": {"tools": {"listChanged": false}}, "serverInfo": {"name": "agent-mail", "version": VERSION}, "instructions": INSTRUCTIONS}`. `notifications/initialized` is ignored. `ping` returns `{}`. `tools/list` returns `TOOLS_JSON`. `tools/call` and `notifications/cancelled` belong to Task 15. Every other method, including `server/discover`, `resources/list` and `prompts/list`, gets -32601 at once.
 - The first request's method and protocol version go to the log, where Tasks 14 and 23 read each harness's handshake.
-- Tool descriptions and input schemas are static text written here: `send {to, subject, body, in_reply_to?}`, `receive {me, max_bytes?}`, `pending {}`, `subscribe {channel, wake?, backlog?}`, `unsubscribe {channel}`, `channels {}` and `reread {id?, last?}`, each with `additionalProperties: false`.
+- Tool descriptions and input schemas are static text written here: `send {to, subject, body, in_reply_to?}`, `receive {me, max_bytes?}`, `pending {}`, `subscribe {channel, wake?, backlog?}`, `unsubscribe {channel}`, `channels {}` and `reread {me, id?, last?}` (me added after the second audit: reread is held to the same me check and reader lock as receive), each with `additionalProperties: false`.
 - Handshake spike, before Task 15. Write a scratch MCP config holding only this server (`python3 -I <worktree>/agent-mail mcp --name amtest --dir <scratch mailbox>`). Start Claude Code with `AI_NIX_BYPASS_MANAGED_CONFIG=1 claude --strict-mcp-config --mcp-config=<scratch>`, and Codex with `codex -c 'mcp_servers.amtest.command="python3"' -c 'mcp_servers.amtest.args=[...]'`. Record the first logged method and version for each. If `-c` cannot define the table, record that and take Codex's handshake in Task 23. If a harness sends only `server/discover` and never `initialize`, stop and add the 2026-07-28 era before Task 15 (design decision 16).
 
 - [ ] **Step 1: Add the failing checks (section `mcp`)**
@@ -681,8 +681,8 @@ t.ok(stray_print_in_stderr and all(json.loads(l) for l in noisy.stdout.splitline
 - `pending {}` returns `pending_line(..., "human")`.
 - `subscribe {channel, wake=false, backlog=0}` and `unsubscribe {channel}` change state only while the lock is held (`not_reader` otherwise). Their results give the subscription, whether it is pinned, and the published subscribers.
 - `channels {}` lists each channel with its purpose, posts in the last 7 days, last post time and listed subscribers, marked `(you, wake)`, `(you, quiet)` or `(pinned)`. Then known sessions with host and last check, marked approximate. Then the bound name, the host, the backend `notify=auto` would pick, and whether the mailbox is on NFS. At most 8 KB.
-- `reread {id}` re-renders one item from the caller's archive with a fresh token. `reread {last: true}` re-renders the last batch. Neither changes anything.
-- A `notifications/cancelled` naming an answered receive's request id sets `last_batch.possibly_unseen`. The next `pending` or `receive` then adds `your receive at <UTC> may not have reached you; call reread with last=true`.
+- `reread {me, id}` re-renders one item from the caller's archive with a fresh token. `reread {me, last: true}` re-renders the last batch. Neither changes anything; both refuse a wrong `me`, a background-job server and a held lock, as receive does.
+- A `notifications/cancelled` naming an answered receive's request id sets `last_batch.possibly_unseen`. The next `pending` or `receive` then adds `your receive at <UTC> may not have reached you; call reread with last=true and your me`.
 
 - [ ] **Step 1: Add the failing checks (section `tools`)**
 
@@ -966,7 +966,7 @@ agent-mail =
 - [ ] **Step 3:** On andoria-08, the post's file appears in `~/Mailbox/+fleet/` within 60 s. Record its ctime as T1.
 - [ ] **Step 4:** At its next turn, B calls `receive {me}`. Expected: the post inside a frame, with `post +fleet` on the list line. B posts N1 and a new nonce N2 to `+fleet`. Record T2.
 - [ ] **Step 5:** A's doorbell rings (wake subscription), and A's `receive` shows B's post with N1 and N2. Record T3.
-- [ ] **Step 6:** Expected on both hosts: a session not subscribed to `+fleet` shows 0 channel items in `pending`; each reader's `.<name>-read/` holds its copies; `reread {last: true}` re-renders; the `+fleet` files are identical on both hosts.
+- [ ] **Step 6:** Expected on both hosts: a session not subscribed to `+fleet` shows 0 channel items in `pending`; each reader's `.<name>-read/` holds its copies; `reread {me, last: true}` re-renders; the `+fleet` files are identical on both hosts.
 - [ ] **Step 7:** Record T1 minus T0 (Hera to Positron over the tailnet) and T3 minus T2 (Positron to Hera) in the README runbook. Commit: `Record the cross-host channel check and its measured lag`. Leave the posts to expire after 30 days; no mail is deleted by hand.
 
 ---

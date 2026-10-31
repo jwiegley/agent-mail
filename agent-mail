@@ -1008,7 +1008,8 @@ def unsubscribe(state, settings, ch):
 def save_subscriptions(d, name, state, settings, now):
     """After a subscribe or unsubscribe: publish NAME's member record at once, then save its
     state. The record comes first because touch_member refuses an unsafe mailbox before it
-    writes anything, so a refused change leaves the state and the record as they were."""
+    writes the record (it may have created an empty .agent-mail/members), so a refused change
+    leaves the state and the record as they were."""
     touch_member(d, name, effective_subs(state, settings, now), now, force=True)
     save_state(d, name, state)
 
@@ -2221,8 +2222,8 @@ def bell_pass(d, name, settings, slot, now):
 
 
 def doorbell(d, name, settings, parent, forever, waiter=None, max_passes=None):
-    """Ring a content-free line when mail for NAME starts waiting; never claim, never write
-    anything but its slot and the log, never print anything but ring lines, never touch stderr.
+    """Ring a content-free line when mail for NAME starts waiting; never claim, never print
+    anything but ring lines, never touch stderr, and write nothing but its slot and the log.
     Slots do not pile up: a doorbell removes its slot when its parent has gone, and at start
     it removes every slot whose parent has gone. A slot outlives a ring, so a restarted
     doorbell still rings once per id.
@@ -2314,7 +2315,7 @@ def pending_line(d, name, settings, fmt):
     counts = (sum(1 for *_, st in found if stat.S_ISREG(st.st_mode)), sum(1 for i in posts if i.kind == "post"),
               sum(1 for i in posts if i.kind == "broadcast"))
     last = state.get("last_batch") or {}
-    note = f"; your receive at {utc(last['at'])} may not have reached you; call reread with last=true" if last.get("possibly_unseen") else ""
+    note = f"; your receive at {utc(last['at'])} may not have reached you; call reread with last=true and your me" if last.get("possibly_unseen") else ""
     if not any(counts):
         return f"agent-mail: no mail for {name}{note}"
     tail = f"; last delivery {utc(last['at'])} ({len(last.get('ids', []))} items)" if last.get("at") else "; no delivery yet"
@@ -2602,7 +2603,7 @@ class McpServer:
         batch = collect(d, name, self.settings, state, args.get("max_bytes", self.settings.max_bytes), now)
         text = delivery_text(batch, name, "call receive again", binding=True)
         if last.get("possibly_unseen"):
-            text += f"\nagent-mail: your receive at {utc(last['at'])} may not have reached you; call reread with last=true"
+            text += f"\nagent-mail: your receive at {utc(last['at'])} may not have reached you; call reread with last=true and your me"
 
         def done():
             commit(d, name, batch, state, now)
@@ -3004,6 +3005,14 @@ def cmd_send(sender, to, subject, ident, src, d, write=None, settings=None, in_r
     return 0
 
 
+def pid_arg(text):
+    """A --parent must name one process: 0 would mean the process group and a negative value every process we may signal."""
+    pid = int(text)
+    if pid < 1:
+        raise argparse.ArgumentTypeError("a process id of 1 or more")
+    return pid
+
+
 def build_parser():
     p = argparse.ArgumentParser(prog="agent-mail", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--dir", default=None, help="mailbox directory (default $AGENT_MAIL_DIR, config.json, or ~/Mailbox)")
@@ -3049,7 +3058,7 @@ def build_parser():
     w.add_argument("--channel", **pin)
     w.add_argument("--forever", action="store_true", help="keep going after a delivery or a ring")
     w.add_argument("--max-bytes", **budget)
-    w.add_argument("--parent", type=int, metavar="PID", help="stop when this process (the session that started the watcher) is gone")
+    w.add_argument("--parent", type=pid_arg, metavar="PID", help="stop when this process (the session that started the watcher) is gone; a pid of 1 or more")
     w.add_argument("--max-polls", type=int, help=argparse.SUPPRESS)  # for the self-test
     command(sub, "channels", "list the channels",
             "List the channels with their purposes, posts in the last 7 days, last post and the subscribers that member records list, "
@@ -4330,6 +4339,10 @@ def section_doorbell(t):
     out, code, err = t.run(["--dir", d, "watch", "pi", "--doorbell", "--parent", str(huge)])
     t.ok((code, out, err) == (0, "", "") and not os.path.lexists(bell_path(d, "pi", huge)),
          "a doorbell whose --parent is too large to be a pid stops as when its parent has gone, without a traceback")
+    for bad in ("0", "-1"):
+        out, code, err = t.run(["--dir", d, "watch", "pi", "--doorbell", "--parent", bad])
+        t.ok(code == 2 and "1 or more" in err and out == "" and not os.path.lexists(bell_path(d, "pi", int(bad))),
+             f"refuses --parent {bad}, which would name a process group rather than one process")
 
     class Scripted(FakeBackend):
         """Runs the next of its actions at each wait."""
