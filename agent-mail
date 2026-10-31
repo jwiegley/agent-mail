@@ -1888,9 +1888,11 @@ def bind_name(value, source):
 
 
 def resolve_identity(flag, env, home):
-    """A session's name, resolved once: --name, AGENT_MAIL_NAME, AGENTDECK_TITLE, then the
-    "- title:" line of AGENTDECK_IDENTITY_FILE. The first source present decides; a value
-    that, lower-cased, fails the grammar or is reserved binds nothing, and problem says why."""
+    """A session's name, resolved once: --name, AGENT_MAIL_NAME, AGENTDECK_TITLE, the
+    "- title:" line of AGENTDECK_IDENTITY_FILE, then (for Pi, which agent-deck gives only
+    an instance id) the same line of runtime/identity/<AGENTDECK_INSTANCE_ID>/identity.md.
+    The first source present decides; a value that, lower-cased, fails the grammar or is
+    reserved binds nothing, and problem says why."""
     for source, value in (("--name", flag), ("AGENT_MAIL_NAME", env.get("AGENT_MAIL_NAME")), ("AGENTDECK_TITLE", env.get("AGENTDECK_TITLE"))):
         if value:
             return bind_name(value, source)
@@ -1898,6 +1900,14 @@ def resolve_identity(flag, env, home):
     if path:
         title, why = identity_title(path, home)
         return bind_name(title, "AGENTDECK_IDENTITY_FILE") if title else Identity(None, "AGENTDECK_IDENTITY_FILE", f"AGENTDECK_IDENTITY_FILE {why}")
+    instance = env.get("AGENTDECK_INSTANCE_ID")
+    if instance:
+        if not IDENT.fullmatch(instance) or ".." in instance:
+            return Identity(None, "AGENTDECK_INSTANCE_ID", f"AGENTDECK_INSTANCE_ID {escape(instance)!r} is not an agent-deck session id")
+        title, why = identity_title(os.path.join(home, IDENTITY_DIR, instance, "identity.md"), home)
+        if title:
+            return bind_name(title, "AGENTDECK_INSTANCE_ID")
+        return Identity(None, "AGENTDECK_INSTANCE_ID", f"agent-deck's identity file for AGENTDECK_INSTANCE_ID {instance} {why}")
     return Identity(None, None, "no source names this session")
 
 
@@ -2963,6 +2973,19 @@ def section_identity(t):
     write_record(ppid, kind="bg")
     t.ok(background_job({"CLAUDE_JOB_DIR": "/x"}, ppid, home), "a bg record stays a background job")
     t.ok(check_me("PI", "pi") is None and getattr(t.raises(check_me, "nix", "pi"), "code", None) == "name_mismatch", "me is compared without case")
+    # Task 11b (decision 24): a Pi session gets only AGENTDECK_INSTANCE_ID.
+    t.ok(resolve_identity(None, {"AGENTDECK_INSTANCE_ID": "eae28c17-1793375361"}, home).name == "nix", "a Pi session is named from agent-deck's identity file for its instance id")
+    t.ok(all(resolve_identity(None, {"AGENTDECK_INSTANCE_ID": bad}, home).name is None
+             for bad in ("../eae28c17-1793375361", "x/../eae28c17-1793375361", "eae28c17-1793375361/..", "a..b", "/etc")),
+         "an instance id holding / or .. names nothing")
+    other_dir = os.path.join(home, IDENTITY_DIR, "0123abcd-1")
+    os.makedirs(other_dir, 0o700)
+    other = t.mk(os.path.join(other_dir, "identity.md"), "- title: Pi\n")
+    pi_env = {"AGENTDECK_INSTANCE_ID": "eae28c17-1793375361"}
+    t.ok([resolve_identity("a", pi_env, home).name, resolve_identity(None, {**pi_env, "AGENT_MAIL_NAME": "b"}, home).name,
+          resolve_identity(None, {**pi_env, "AGENTDECK_TITLE": "c"}, home).name,
+          resolve_identity(None, {**pi_env, "AGENTDECK_IDENTITY_FILE": other}, home).name] == ["a", "b", "c", "pi"],
+         "each of the first four sources still wins over the instance id")
 
 
 def section_send(t):
