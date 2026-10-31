@@ -4542,6 +4542,23 @@ def section_cli(t):
     t.ok("+ops" in listing and "you, wake" in listing and "you, quiet" in listing, "channels NAME marks that session's subscriptions")
     out = t.run(["--dir", d, "unsubscribe", "pi", "ops"])[0]
     t.ok("ops" not in load_state(d, "pi")["subs"] and "+ops" in out, "unsubscribe drops a subscription")
+    # One subscription list from read, watch and pending: beside the runtime subscription to
+    # +fleet, a pin from the config file, then a pin from --channel, which replaces it.
+    config = t.mk(os.path.join(root, "pins.json"), json.dumps({"sessions": {"pi": {"channels": ["ops"]}}}))
+    t.run(["--dir", d, "channel", "create", "ci", "--purpose", "ci notices"])
+    os.environ["AGENT_MAIL_CONFIG"] = config
+    try:
+        published = []
+        for flags in ([], ["--channel", "ci"]):
+            for cmd in (["read", "pi"], ["watch", "pi", "--poll", "1", "--max-polls", "1"], ["pending", "pi"]):
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(member_path(d, "pi"))
+                t.run(["--dir", d] + cmd + flags)
+                published.append(members(d).get("pi", {}).get("subs"))
+    finally:
+        del os.environ["AGENT_MAIL_CONFIG"]
+    t.ok(published == [["fleet", "ops"]] * 3 + [["ci", "fleet"]] * 3,
+         "read, watch and pending publish one subscription list, with the config file's pins and with --channel")
 
 
 # ---- FakeSync: Syncthing replicas, simulated (test only) ----
