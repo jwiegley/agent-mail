@@ -9,14 +9,22 @@ one row for each key in POLICY_KEYS. A missing, unknown or repeated key, or a va
 number above zero; for summary_local_time a time of day, HH:MM; for summary_tz a tz database name), is
 refused with the key named; nothing falls back to a default.
 
+TOPIC.md lists the topic's members as a Markdown table, | name | host | harness |, under a "## Members" heading. A
+name that is not an agent-mail name or is listed twice is refused with the name shown, and so is a file with no such
+heading. Each member's agent-deck row comes from one read-only listing for each host; a host that does not answer
+leaves its members unknown, never stopped.
+
 Commands:
   self-test [SECTION ...]
       Run the built-in checks, each section in a fresh temporary home.
 """
 
 import argparse
+import collections
 import contextlib
+import datetime
 import io
+import json
 import os
 import re
 import sys
@@ -31,6 +39,9 @@ POLICY_KEYS = (
 )
 NUMBER_RE = re.compile(r"[0-9]+(?:\.[0-9]+)?")
 TIME_RE = re.compile(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]")
+NAME_RE = re.compile(r"[a-z0-9](?:[a-z0-9.]|-(?!-))*")  # agent-mail's NAME_PAT; see grammatical
+BACKGROUND_SUBSTATES = ("background-work", "watching")  # the substates agent-deck gives a session whose pane shows background work
+SHELL_WORDS = ("sleep", "watch", "sh -c", "bash -c", "tail")  # in a background task's text they mark a shell command
 
 
 # ---- policy ----
@@ -45,18 +56,24 @@ class PolicyError(Exception):
         self.reason = reason
 
 
-def policy_rows(text):
-    """(key, value) for each data row of the Markdown tables in TEXT: the lines that start with "|", less each
-    header row (the cells key and value, in any case) and each separator row. Any other row is a data row, so
-    one that only looks like the header is refused later as an unknown key."""
-    for line in text.splitlines():
+def table_rows(lines, width):
+    """The first WIDTH cells, stripped, of each row of the Markdown tables in LINES: the lines that start with "|",
+    less each separator row (only dashes and colons). A row with fewer cells is padded with empty ones, so a short
+    row has no value."""
+    for line in lines:
         if line.lstrip().startswith("|"):
-            cells = [cell.strip() for cell in line.strip().strip("|").split("|")] + ["", ""]  # padded: a short row has no value
-            key, value = cells[0], cells[1]
-            header = key.casefold() == "key" and value.casefold() == "value"
-            separator = not (key + value).strip("-: ")  # only dashes and colons
-            if not (header or separator):
-                yield key, value
+            cells = ([cell.strip() for cell in line.strip().strip("|").split("|")] + [""] * width)[:width]
+            if "".join(cells).strip("-: "):
+                yield cells
+
+
+def policy_rows(text):
+    """(key, value) for each data row of the Markdown tables in TEXT: the rows table_rows reads, less each header
+    row (the cells key and value, in any case). Any other row is a data row, so one that only looks like the
+    header is refused later as an unknown key."""
+    for key, value in table_rows(text.splitlines(), 2):
+        if (key.casefold(), value.casefold()) != ("key", "value"):
+            yield key, value
 
 
 def policy_value(key, text):
@@ -96,6 +113,146 @@ def load_policy(path):
         if key not in policy:
             raise PolicyError(key, "no row for this key")
     return {key: policy[key] for key in POLICY_KEYS}
+
+
+# ---- roster ----
+
+Member = collections.namedtuple("Member", "name host harness")
+
+
+class RosterError(Exception):
+    """A TOPIC.md the helper refuses. .name is the text that is wrong, as the file has it (a member's name, or the
+    heading that is missing) and .reason says how. The message leaves out any question mark they hold, because
+    nothing the steward prints may carry one."""
+
+    def __init__(self, name, reason="not a valid name"):
+        super().__init__(f"steward-signals: TOPIC.md: {name}: {reason}".replace("?", ""))
+        self.name = name
+        self.reason = reason
+
+
+def grammatical(name):
+    """Whether NAME follows agent-mail's name grammar. The names agent-mail reserves are not checked here."""
+    return NAME_RE.fullmatch(name) is not None and len(name) <= 64 and not name.endswith("-")
+
+
+def section_lines(text, heading):
+    """The lines of TEXT under the Markdown heading HEADING (in any case), up to the next heading or the end of the
+    file; None when TEXT has no such heading."""
+    found, lines = False, []
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            if found:
+                break
+            found = line.strip().casefold() == heading.casefold()
+        elif found:
+            lines.append(line)
+    return lines if found else None
+
+
+def load_roster(path):
+    """The members in the "## Members" table of the TOPIC.md at PATH, in table order, as Member(name, host, harness).
+    A name that is not an agent-mail name or is listed twice, or a file with no such heading, raises RosterError, so
+    the steward never watches a name it cannot mail, nor takes a typo in the heading for a topic with no members."""
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    section = section_lines(text, "## Members")
+    if section is None:
+        raise RosterError("## Members", "no such heading")
+    members = []
+    for name, host, harness in table_rows(section, 3):
+        if (name.casefold(), host.casefold(), harness.casefold()) == ("name", "host", "harness"):
+            continue
+        if not grammatical(name):
+            raise RosterError(name)
+        if any(m.name == name for m in members):
+            raise RosterError(name, "listed twice")
+        members.append(Member(name, host, harness))
+    return members
+
+
+# ---- agent-deck ----
+
+def text_of(value):
+    """VALUE when it is a non-empty string, else None."""
+    return value if isinstance(value, str) and value else None
+
+
+def utc_of(value):
+    """The ISO 8601 stamp VALUE as UTC to the second, YYYY-MM-DDTHH:MM:SSZ: agent-deck writes Z in some rows and an
+    offset in others, and the steward would read the mixed zones as different times. None when VALUE is not a stamp
+    with a zone."""
+    try:
+        when = datetime.datetime.fromisoformat(value)
+        if when.tzinfo is None:
+            return None
+        return when.astimezone(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def background_kind(row):
+    """What background work the agent-deck session ROW shows: "shell" (which agent-deck 1.16.29 misreports, so the
+    steward does not rely on it), "tool" (any other), None (none) or "unknown" (some, but nothing says what). A shell
+    word anywhere in the text counts, so a task named for one reads as shell work too, which errs on the safe side:
+    the steward treats shell work as unknown."""
+    work = row.get("background_work")  # hera's rows: background_work.kind and .task
+    if isinstance(work, dict) and work:
+        kind, text = work.get("kind"), work.get("task")
+    elif work:
+        return "unknown"  # not a table of fields
+    elif row.get("substate") in BACKGROUND_SUBSTATES:  # andoria-08's rows have no background_work: substate "watching" and substate_detail
+        kind, text = None, row.get("substate_detail")
+    else:
+        return None
+    kind, text = (value.casefold() if isinstance(value, str) else "" for value in (kind, text))
+    if not (kind or text):
+        return "unknown"
+    return "shell" if "shell" in kind or any(word in text for word in SHELL_WORDS) else "tool"
+
+
+def deck_sessions(run, argv):
+    """The session rows (dicts) in the listing that RUN(ARGV) printed, or None when the host did not answer: the
+    command failed, what it printed is not a listing (a bare array, or an object with a sessions array), or the
+    errors list that --with-errors adds holds anything."""
+    out, code = run(argv)
+    if code != 0:
+        return None
+    try:
+        data = json.loads(out)
+    except (ValueError, RecursionError):
+        return None
+    sessions = data.get("sessions") if isinstance(data, dict) else data
+    if (isinstance(data, dict) and data.get("errors")) or not isinstance(sessions, list):
+        return None
+    return [row for row in sessions if isinstance(row, dict)]
+
+
+def deck_rows(run, members, hera_host="hera"):
+    """The agent-deck row of each member, by name: dict(status, substate, bg, last_activity, host_ok).
+    RUN(argv) returns (stdout, returncode) and does not raise. Members on HERA_HOST are read from `agent-deck list
+    --json`, the others from `agent-deck remote sessions HOST --json --with-errors`, one call for each host, and
+    matched to rows by title, exactly. A member its host's listing does not hold has host_ok true and every other
+    field None; a host that does not answer (see deck_sessions) gives each of its members host_ok false and every
+    other field None, so a silent host is never read as stopped members. A field a row lacks or holds in the wrong
+    form is None, or "unknown" for bg; nothing raises."""
+    rows = {}
+    for host in dict.fromkeys(m.host for m in members):  # each host once, in roster order
+        if host == hera_host:
+            argv = ["agent-deck", "list", "--json"]
+        else:
+            argv = ["agent-deck", "remote", "sessions", host, "--json", "--with-errors"]
+        sessions = deck_sessions(run, argv)
+        by_title = {}
+        for session in sessions or []:
+            if isinstance(session.get("title"), str):
+                by_title.setdefault(session["title"], session)  # agent-deck lists a title once; were it twice, the first row wins
+        for m in members:
+            if m.host == host:
+                session = by_title.get(m.name, {})
+                rows[m.name] = {"status": text_of(session.get("status")), "substate": text_of(session.get("substate")), "bg": background_kind(session),
+                                "last_activity": utc_of(session.get("last_activity_at")), "host_ok": sessions is not None}
+    return rows
 
 
 # ---- self-test ----
@@ -346,6 +503,225 @@ def section_policy(d):
     test_policy_header_and_stray_rows(d)
     test_policy_checks_values(d)
     test_policy_message_has_no_question_mark(d)
+
+
+# ---- self-test section: deck ----
+
+TOPIC_WITH_TABLE = """# +ingest
+
+## Purpose
+Model ingestion: convert, evaluate, publish.
+
+## Members
+| name | host | harness |
+|------|------|---------|
+| pipeline | andoria-08 | claude |
+| omlx | hera | pi |
+| glm-5.2 | andoria-08 | claude |
+
+## History
+| when | what |
+|------|------|
+| 2026-11-02 | opened |
+"""
+# Rows as agent-deck printed them on 2026-10-31, cut down to the title, the status fields and the background work: `list --json`
+# on hera (a bare array) and `remote sessions andoria-08 --json --with-errors` (an object, with an errors list).
+HERA_LIST = [
+    {"title": "wiggum", "status": "running", "substate": "background-work", "last_activity_at": "2026-10-31T15:39:01.595015-07:00",
+     "background_work": {"kind": "workflow", "task": "wiggum-phase2a-understand", "step": 4, "steps": 5, "elapsed": "24m40s", "source": "pane"}},
+    {"title": "mail-conductor", "status": "waiting", "substate": "idle-at-empty-prompt", "last_activity_at": "2026-10-31T22:32:31Z"},
+    {"title": "ares-review", "status": "waiting", "last_activity_at": "2026-10-28T12:49:37-07:00"},
+]
+ANDORIA_LIST = {"sessions": [{"title": "pipeline", "status": "waiting", "substate": "watching", "last_activity_at": "2026-10-31T22:29:07Z",
+                              "substate_detail": "1 watching \u00b7 board headings and reviews on the eleven stacked PRs"}],
+                "errors": []}
+
+
+def fake_run(mapping):
+    """A run(argv) for deck_rows that answers from MAPPING instead of calling agent-deck, and keeps each argv it was
+    given in run.calls. A key is the start of the command line after "agent-deck", with "remote sessions HOST" written
+    "remote HOST": "list", "remote andoria-08", "session output lfm3". Its value is the stdout, or a (stdout, returncode)
+    pair. The longest key that fits answers, and a command that fits none fails with no output."""
+    def run(argv):
+        run.calls.append(list(argv))
+        words = argv[1:]
+        if words[:2] == ["remote", "sessions"]:
+            words = ["remote"] + words[2:]
+        line = " ".join(words)
+        fits = [key for key in mapping if line == key or line.startswith(key + " ")]
+        answer = mapping[max(fits, key=len)] if fits else ("", 1)
+        return (answer, 0) if isinstance(answer, str) else tuple(answer)
+
+    run.calls = []
+    return run
+
+
+def test_roster_parses_and_refuses(d):
+    members = load_roster(write(d, "TOPIC.md", TOPIC_WITH_TABLE))   # pipeline/andoria-08/claude, omlx/hera/pi, glm-5.2/andoria-08/claude
+    ok([m.name for m in members] == ["pipeline", "omlx", "glm-5.2"], "roster: names in table order")
+    ok(raises(RosterError, load_roster, write(d, "T2.md", TOPIC_WITH_TABLE.replace("glm-5.2", "Glm_5.2"))).name == "Glm_5.2", "roster: refuses a bad name")
+
+
+def test_roster_reads_only_its_table(d):
+    members = load_roster(write(d, "TOPIC.md", TOPIC_WITH_TABLE))
+    ok(members == [Member("pipeline", "andoria-08", "claude"), Member("omlx", "hera", "pi"), Member("glm-5.2", "andoria-08", "claude")], "roster: each member has its host and harness")
+    before = "# +ingest\n| Not A Name | x | y |\n" + TOPIC_WITH_TABLE
+    ok(load_roster(write(d, "TOPIC.md", before)) == members, "roster: a table before the Members heading is not read, nor is the one after it")
+    capitalised = TOPIC_WITH_TABLE.replace("## Members", "## members").replace("| name | host | harness |", "| Name | Host | Harness |")
+    ok(load_roster(write(d, "TOPIC.md", capitalised)) == members, "roster: the heading and the header row may be in any case")
+    extra = TOPIC_WITH_TABLE.replace("| name | host | harness |", "| name | host | harness | notes |").replace("| omlx | hera | pi |", "| omlx | hera | pi | Pi loop |")
+    ok(load_roster(write(d, "TOPIC.md", extra)) == members, "roster: cells after the third are ignored")
+    last = TOPIC_WITH_TABLE[:TOPIC_WITH_TABLE.index("## History")].rstrip("\n")  # the table ends the file, with no newline
+    ok(load_roster(write(d, "TOPIC.md", last)) == members, "roster: the table may end the file")
+    ok(load_roster(write(d, "TOPIC.md", "## Members\n| name | host | harness |\n|---|---|---|\n")) == [], "roster: a table with no rows is a roster with no members")
+
+
+def test_roster_name_grammar(d):
+    def named(name):
+        return write(d, "TOPIC.md", TOPIC_WITH_TABLE.replace("glm-5.2", name))
+
+    for bad in ("Pi", "a_b", "x-", "x--y", "-x", ".x", "a" * 65, "glm 5.2", ""):
+        ok(raises(RosterError, load_roster, named(bad)).name == bad, f"roster: {bad!r} is not an agent-mail name")
+    for good in ("pi", "glm-5.2", "dsv41f", "a.b", "a" * 64):
+        ok(load_roster(named(good))[2].name == good, f"roster: {good!r} is an agent-mail name")
+
+
+def test_roster_refuses_what_it_cannot_read(d):
+    e = raises(RosterError, load_roster, write(d, "TOPIC.md", TOPIC_WITH_TABLE.replace("## Members", "## Member")))
+    ok(e.name == "## Members" and str(e) == "steward-signals: TOPIC.md: ## Members: no such heading", "roster: a file with no Members heading is refused, not read as no members")
+    twice = write(d, "TOPIC.md", TOPIC_WITH_TABLE.replace("| omlx | hera | pi |", "| pipeline | hera | pi |"))
+    e = raises(RosterError, load_roster, twice)
+    ok(e.name == "pipeline" and str(e) == "steward-signals: TOPIC.md: pipeline: listed twice", "roster: a name listed twice is refused, not resolved")
+
+
+def test_roster_message_has_no_question_mark(d):
+    e = raises(RosterError, load_roster, write(d, "TOPIC.md", TOPIC_WITH_TABLE.replace("glm-5.2", "glm?5.2")))
+    ok(e.name == "glm?5.2" and str(e) == "steward-signals: TOPIC.md: glm5.2: not a valid name", "roster: a question mark in a name does not reach the message")
+
+
+def test_fake_run(d):
+    run = fake_run({"session": "short", "session output lfm3": ["long", 0], "list": ("", 3)})
+    ok(run(["agent-deck", "session", "output", "lfm3", "--max-tokens", "200"]) == ("long", 0), "deck: the longest key that fits answers, and a list value works as a pair")
+    ok(run(["agent-deck", "session", "output", "pi"]) == ("short", 0), "deck: a shorter key answers what only it fits")
+    ok(run(["agent-deck", "list", "--json"]) == ("", 3) and run(["agent-deck", "stop", "lfm3"]) == ("", 1), "deck: a key's code is returned, and a command that fits no key fails")
+    ok(run(["agent-deck", "listing"]) == ("", 1) and len(run.calls) == 5, "deck: a key fits whole words only, and every argv is kept")
+
+
+def test_list_shapes(d):
+    members = load_roster(write(d, "TOPIC.md", TOPIC_WITH_TABLE))
+    rows = deck_rows(fake_run({"list": '[{"title":"omlx","status":"running","substate":"busy","background_work":{"task":"sleep"}}]',
+                               "remote andoria-08": '{"sessions":[{"title":"pipeline","status":"waiting"}]}'}), members)
+    ok(rows["omlx"]["status"] == "running" and rows["omlx"]["bg"] == "shell", "deck: local row read, shell background flagged")
+    ok(rows["pipeline"]["status"] == "waiting" and rows["pipeline"]["substate"] is None and rows["pipeline"]["host_ok"], "deck: object-with-sessions shape and missing fields tolerated")
+    ok(rows["glm-5.2"]["status"] is None and rows["glm-5.2"]["host_ok"], "deck: absent from a successful listing is None, not an error")
+
+
+def test_failed_host_marks_unknown(d):
+    members = load_roster(write(d, "TOPIC.md", TOPIC_WITH_TABLE))
+    rows = deck_rows(fake_run({"list": "[]", "remote andoria-08": ("", 1)}), members)
+    ok(rows["pipeline"]["host_ok"] is False and rows["glm-5.2"]["host_ok"] is False and rows["pipeline"]["status"] is None, "deck: a failed host marks all its members unknown")
+    ok(rows["omlx"]["host_ok"] is True, "deck: hera unaffected")
+
+
+def test_real_rows(d):
+    members = [Member("wiggum", "hera", "claude"), Member("mail-conductor", "hera", "claude"), Member("ares-review", "hera", "claude"), Member("pipeline", "andoria-08", "claude")]
+    rows = deck_rows(fake_run({"list": json.dumps(HERA_LIST), "remote andoria-08": json.dumps(ANDORIA_LIST)}), members)
+    ok(rows["wiggum"] == {"status": "running", "substate": "background-work", "bg": "tool", "last_activity": "2026-10-31T22:39:01Z", "host_ok": True}, "deck: a real hera row with workflow background work")
+    ok(rows["mail-conductor"] == {"status": "waiting", "substate": "idle-at-empty-prompt", "bg": None, "last_activity": "2026-10-31T22:32:31Z", "host_ok": True}, "deck: a real waiting row")
+    ok(rows["ares-review"] == {"status": "waiting", "substate": None, "bg": None, "last_activity": "2026-10-28T19:49:37Z", "host_ok": True}, "deck: a real row with no substate, its offset stamp read as UTC")
+    ok(rows["pipeline"] == {"status": "waiting", "substate": "watching", "bg": "shell", "last_activity": "2026-10-31T22:29:07Z", "host_ok": True}, "deck: a real remote row that is watching counts as shell work")
+
+
+def test_one_call_per_host(d):
+    members = [Member("pipeline", "andoria-08", "claude"), Member("omlx", "hera", "pi"), Member("glm-5.2", "andoria-08", "claude"), Member("lfm3", "delphi-3bd4", "claude")]
+    run = fake_run({"list": "[]", "remote andoria-08": "[]", "remote delphi-3bd4": "[]"})
+    deck_rows(run, members)
+    expected = [["agent-deck", "list", "--json"],
+                ["agent-deck", "remote", "sessions", "andoria-08", "--json", "--with-errors"],
+                ["agent-deck", "remote", "sessions", "delphi-3bd4", "--json", "--with-errors"]]
+    ok(sorted(run.calls) == sorted(expected), "deck: one call for each host, with the command lines that were run for real")
+    run = fake_run({"list": '[{"title":"athena","status":"idle"}]'})
+    ok(deck_rows(run, [Member("athena", "athena", "claude")], hera_host="athena")["athena"]["status"] == "idle" and run.calls == [["agent-deck", "list", "--json"]], "deck: hera_host names the host that agent-deck list answers for")
+    run = fake_run({})
+    ok(deck_rows(run, []) == {} and run.calls == [], "deck: no members, no calls")
+
+
+def test_unreadable_answers_are_unknown(d):
+    members = [Member("omlx", "hera", "pi"), Member("pipeline", "andoria-08", "claude")]
+    listing = {"sessions": [{"title": "pipeline", "status": "waiting"}], "errors": []}
+    answers = (("output that is not JSON", "agent-deck: no such remote"),
+               ("no output", ""),
+               ("a JSON null", "null"),
+               ("a JSON number", "42"),
+               ("an object with no sessions", '{"errors": []}'),
+               ("a null sessions list", '{"sessions": null}'),
+               ("JSON nested too deep to read", "[" * 1000000),
+               ("errors in the listing", json.dumps({**listing, "errors": [{"remote": "andoria-08", "error": "timed out"}]})),
+               ("a failed command that printed a listing", (json.dumps(listing), 1)))
+    for what, answer in answers:
+        rows = deck_rows(fake_run({"list": "[]", "remote andoria-08": answer}), members)
+        ok(rows["pipeline"] == {"status": None, "substate": None, "bg": None, "last_activity": None, "host_ok": False} and rows["omlx"]["host_ok"], f"deck: {what} marks the host unknown")
+    rows = deck_rows(fake_run({"remote andoria-08": json.dumps(listing)}), members)  # nothing answers list, so it fails
+    ok(rows["omlx"]["host_ok"] is False and rows["pipeline"]["host_ok"] and rows["pipeline"]["status"] == "waiting", "deck: a failed local listing marks hera's members unknown, and only them")
+
+
+def test_odd_rows_read_as_far_as_they_go(d):
+    members = [Member(name, "hera", "claude") for name in ("pi", "pipeline", "omlx", "syncthing", "ares")]
+    listing = [{"title": "pipeline", "status": "running"}, "a stray string", None, {"status": "idle"}, {"title": 7, "status": "idle"}, {"title": ["ares"], "status": "idle"},
+               {"title": "omlx", "status": 5, "substate": ["x"], "last_activity_at": "yesterday", "background_work": "sleep 5"},
+               {"title": "syncthing", "status": ""}]
+    rows = deck_rows(fake_run({"list": json.dumps(listing)}), members)
+    ok(rows["pi"]["status"] is None and rows["pi"]["host_ok"] and rows["pipeline"]["status"] == "running", "deck: a title matches exactly, so pi is not pipeline")
+    ok(rows["ares"] == {"status": None, "substate": None, "bg": None, "last_activity": None, "host_ok": True}, "deck: rows with no title, or a title that is not text, are skipped")
+    ok(rows["omlx"] == {"status": None, "substate": None, "bg": "unknown", "last_activity": None, "host_ok": True}, "deck: fields of the wrong type are unknown, not an error")
+    ok(rows["syncthing"]["status"] is None, "deck: an empty status is unknown")
+
+
+def test_background_work_kinds(d):
+    def bg_of(**fields):
+        listing = json.dumps([{"title": "omlx", "status": "running", **fields}])
+        return deck_rows(fake_run({"list": listing}), [Member("omlx", "hera", "pi")])["omlx"]["bg"]
+
+    for task in ("sleep 600", "Sleep 5", "tail -f x", "watch -n 5 ls", "sh -c 'make'", "bash -c 'make'"):
+        ok(bg_of(background_work={"task": task}) == "shell", f"deck: background work {task!r} is shell work")
+    ok(bg_of(background_work={"kind": "shell", "task": "build"}) == "shell", "deck: a kind that says shell is shell work")
+    ok(bg_of(background_work={"kind": "workflow", "task": "landing"}) == "tool" and bg_of(background_work={"kind": "workflow"}) == "tool"
+       and bg_of(background_work={"task": "landing"}) == "tool", "deck: any other background work is tool work")
+    ok(bg_of() is None and bg_of(background_work=None) is None and bg_of(background_work={}) is None and bg_of(substate="idle-at-empty-prompt") is None, "deck: a row with no background work has bg None")
+    for what, work in (("a string", "sleep 5"), ("a list", ["sleep"]), ("a table with no kind or task", {"step": 3})):
+        ok(bg_of(background_work=work) == "unknown", f"deck: background work that is {what} is unknown")
+    ok(bg_of(substate="watching", substate_detail="1 watching \u00b7 CI") == "shell", "deck: a watching substate reads its detail, and watching is shell work")
+    ok(bg_of(substate="watching") == "unknown" and bg_of(substate="background-work") == "unknown", "deck: a background substate with nothing to read is unknown")
+    ok(bg_of(substate="background-work", background_work={"kind": "workflow", "task": "landing"}) == "tool", "deck: background_work is read before the substate")
+
+
+def test_last_activity_is_utc(d):
+    def last_activity(stamp):
+        listing = json.dumps([{"title": "omlx", "last_activity_at": stamp}])
+        return deck_rows(fake_run({"list": listing}), [Member("omlx", "hera", "pi")])["omlx"]["last_activity"]
+
+    ok(last_activity("2026-10-31T22:32:31Z") == "2026-10-31T22:32:31Z", "deck: a UTC stamp is kept")
+    ok(last_activity("2026-10-31T15:39:01.595015-07:00") == "2026-10-31T22:39:01Z", "deck: an offset stamp with a fraction is read as UTC to the second")
+    for odd in ("2026-10-31T22:32:31", "yesterday", "", 5, None, "0001-01-01T00:00:00+05:00"):
+        ok(last_activity(odd) is None, f"deck: {odd!r} is not a stamp with a zone")
+
+
+@section("deck")
+def section_deck(d):
+    test_roster_parses_and_refuses(d)
+    test_roster_reads_only_its_table(d)
+    test_roster_name_grammar(d)
+    test_roster_refuses_what_it_cannot_read(d)
+    test_roster_message_has_no_question_mark(d)
+    test_fake_run(d)
+    test_list_shapes(d)
+    test_failed_host_marks_unknown(d)
+    test_real_rows(d)
+    test_one_call_per_host(d)
+    test_unreadable_answers_are_unknown(d)
+    test_odd_rows_read_as_far_as_they_go(d)
+    test_background_work_kinds(d)
+    test_last_activity_is_utc(d)
 
 
 # ---- main ----
