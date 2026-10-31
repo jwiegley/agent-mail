@@ -711,6 +711,162 @@ class ReaderLock:
             self.fd = self.ino = None
 
 
+# ---- channels ----
+
+CHANNEL_MARKER = ".agent-mail-channel"
+PURPOSE_MAX = 200
+MAX_SUBS = 20
+MAX_BACKLOG = 20
+REPLAY = 86400.0  # how far back a lost or new cursor starts
+WEEK = 7 * 86400.0
+
+
+def open_channel(d, ch):
+    """A descriptor for +CH: a real directory, ours, holding a regular marker file of ours.
+    Anything else, a symlink included, is no_such_channel."""
+    check_name(ch, "channel")
+    try:
+        fd = os.open(os.path.join(d, f"+{ch}"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        raise MailError("no_such_channel", f"there is no channel +{ch}; agent-mail channel create makes one") from None
+    try:
+        st = os.fstat(fd)
+        marker = os.stat(CHANNEL_MARKER, dir_fd=fd, follow_symlinks=False)
+        if st.st_uid == os.getuid() and stat.S_ISREG(marker.st_mode) and marker.st_uid == os.getuid():
+            return fd
+    except OSError:
+        pass
+    os.close(fd)
+    raise MailError("no_such_channel", f"+{ch} is not a channel: it is not our directory holding {CHANNEL_MARKER}")
+
+
+def channel_dir(d, ch):
+    os.close(open_channel(d, ch))
+    return os.path.join(d, f"+{ch}")
+
+
+def channel_posts(fd, ch):
+    """The standard-named entries in an open channel directory that name the channel."""
+    for entry in os.listdir(fd):
+        m = parse_msg(entry)
+        if m is not None and m.to == ch:
+            yield m
+
+
+def read_purpose(fd):
+    try:
+        mfd = os.open(CHANNEL_MARKER, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+        try:
+            data = os.read(mfd, 4096)
+        finally:
+            os.close(mfd)
+    except OSError:
+        return ""
+    return clean_line(data.decode("utf-8", "replace"))[:PURPOSE_MAX]
+
+
+def create_channel(d, ch, purpose):
+    """Make +CH, mode 0700, with a marker holding its purpose; return its path."""
+    check_name(ch, "channel")
+    if os.path.lexists(member_path(d, ch)):
+        raise MailError("name_taken", f"a session named {ch} has a member record, so +{ch} cannot be a channel")
+    text = clean_line(purpose or "")
+    if not text:
+        raise MailError("bad_argument", "a channel needs a purpose")
+    if len(text) > PURPOSE_MAX:
+        raise MailError("bad_argument", f"the purpose is {len(text)} characters; at most {PURPOSE_MAX}")
+    path = os.path.join(d, f"+{ch}")
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        raise MailError("channel_exists", f"+{ch} already exists") from None
+    except FileNotFoundError:
+        raise MailError("mailbox_missing", f"mailbox {d} does not exist") from None
+    with os.fdopen(os.open(os.path.join(path, CHANNEL_MARKER), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), "w", encoding="utf-8") as f:
+        f.write(text + "\n")
+    return path
+
+
+def list_channels(d, now):
+    """Each channel, sorted by name, with its purpose, its posts in the last 7 days, its
+    last post's stamp and the subscribers that member records list (display only)."""
+    try:
+        entries = os.listdir(d)
+    except (FileNotFoundError, NotADirectoryError):
+        raise MailError("mailbox_missing", f"mailbox {d} does not exist") from None
+    listed = {}
+    for name, record in members(d).items():
+        for ch in record["subs"]:
+            listed.setdefault(ch, []).append(name)
+    out = []
+    for entry in sorted(entries):
+        if not entry.startswith("+"):
+            continue
+        try:
+            fd = open_channel(d, entry[1:])
+        except MailError:
+            continue
+        try:
+            purpose = read_purpose(fd)
+            stamps = [m.stamp for m in channel_posts(fd, entry[1:])]
+        finally:
+            os.close(fd)
+        out.append({"name": entry[1:], "purpose": purpose, "posts_7d": sum(1 for s in stamps if s >= now - WEEK),
+                    "last_post": utc(max(stamps)) if stamps else None, "subscribers": sorted(listed.get(entry[1:], []))})
+    return out
+
+
+def effective_subs(state, settings, now):
+    """The channels a reader receives, each with wake, pinned and since: the channels pinned
+    in settings, which no tool can remove, and the runtime subscriptions in its state."""
+    subs = {ch: {"wake": bool(info.get("wake")), "pinned": False, "since": info.get("since", now)}
+            for ch, info in state.get("subs", {}).items() if isinstance(info, dict)}
+    for ch, wake in (settings.channels if settings is not None else {}).items():
+        entry = subs.setdefault(ch, {"wake": False, "pinned": False, "since": now - REPLAY})
+        entry["pinned"] = True
+        entry["wake"] = entry["wake"] or wake
+    return subs
+
+
+def subscribe(d, name, state, settings, ch, wake=False, backlog=0, now=None):
+    """Subscribe NAME to +CH at runtime and return the effective subscription.
+
+    since is now; with a backlog of N, the N newest posts already there stay unread and
+    every other existing post enters the seen set. Subscribing again changes only wake,
+    and subscribing to a pinned channel records wake without touching its cursor.
+    """
+    now = clock() if now is None else now
+    if isinstance(backlog, bool) or not isinstance(backlog, int) or not 0 <= backlog <= MAX_BACKLOG:
+        raise MailError("bad_argument", f"backlog must be a whole number from 0 to {MAX_BACKLOG}")
+    fd = open_channel(d, ch)
+    try:
+        posts = sorted((m.stamp, m.id) for m in channel_posts(fd, ch))
+    finally:
+        os.close(fd)
+    subs = state.setdefault("subs", {})
+    current = effective_subs(state, settings, now)
+    if ch in subs or ch in current:
+        subs[ch] = {"since": current[ch]["since"], "wake": bool(wake)}
+        return effective_subs(state, settings, now)[ch]
+    if len(current) >= MAX_SUBS:
+        raise MailError("too_many_subscriptions", f"{name} already has {len(current)} subscriptions; at most {MAX_SUBS}")
+    keep = posts[len(posts) - backlog:] if backlog else []
+    seen = state.setdefault("seen", {}).setdefault(f"+{ch}", [])
+    for _, pid in posts[:len(posts) - len(keep)]:
+        if pid not in seen:
+            seen.append(pid)
+    subs[ch] = {"since": min([now] + [stamp for stamp, _ in keep]), "wake": bool(wake)}
+    return effective_subs(state, settings, now)[ch]
+
+
+def unsubscribe(state, settings, ch):
+    """Drop a runtime subscription and its seen set; True when there was one."""
+    if settings is not None and ch in settings.channels:
+        raise MailError("pinned", f"+{ch} is pinned in the settings, so it cannot be unsubscribed")
+    state.get("seen", {}).pop(f"+{ch}", None)
+    return state.get("subs", {}).pop(ch, None) is not None
+
+
 class Rejected(Exception):
     pass
 
@@ -1213,13 +1369,20 @@ class T:
             f.write(text)
         return path
 
-    def direct(self, d, to, sender, body, stamp=None):
-        """Write a grammar-valid message as a peer would: a hidden file, then a rename."""
+    def _peer(self, where, to, header_to, sender, body, stamp):
         when = utc(clock() if stamp is None else stamp, micro=True)
         name = f"{to}_{when}_from-{sender}_{secrets.token_hex(4)}.txt"
-        tmp = self.mk(os.path.join(d, f".{name}.tmp"), f"From: {sender}@{HOST}\nTo: {to}\nUTC: {when}\nSubject: test\nX-Agent-Mail: 2\n\n{body}\n")
-        os.rename(tmp, os.path.join(d, name))
-        return os.path.join(d, name)
+        tmp = self.mk(os.path.join(where, f".{name}.tmp"), f"From: {sender}@{HOST}\nTo: {header_to}\nUTC: {when}\nSubject: test\nX-Agent-Mail: 2\n\n{body}\n")
+        os.rename(tmp, os.path.join(where, name))
+        return os.path.join(where, name)
+
+    def direct(self, d, to, sender, body, stamp=None):
+        """Write a grammar-valid message as a peer would: a hidden file, then a rename."""
+        return self._peer(d, to, to, sender, body, stamp)
+
+    def post(self, d, ch, sender, body, stamp=None):
+        """Write a grammar-valid post into +CH as a peer would."""
+        return self._peer(os.path.join(d, f"+{ch}"), ch, f"+{ch}", sender, body, stamp)
 
     def at(self, epoch):
         """Set the injected clock; None returns to the real one."""
@@ -1550,6 +1713,53 @@ def section_state(t):
         os.chmod(run, 0o700)
 
 
+def section_channels(t):
+    d = t.box()
+    now = time.time()
+    s = load_settings({}, {}, "pi")
+
+    def marker_text(d, ch):
+        with open(os.path.join(d, f"+{ch}", CHANNEL_MARKER)) as f:
+            return f.read().rstrip("\n")
+
+    t.ok(create_channel(d, "fleet", "fleet-wide notices") == os.path.join(d, "+fleet") and marker_text(d, "fleet") == "fleet-wide notices",
+         "creates +fleet with its purpose")
+    t.ok(getattr(t.raises(create_channel, d, "fleet", "again"), "code", None) == "channel_exists", "a channel is created once")
+    touch_member(d, "nix", [], now)
+    t.ok(getattr(t.raises(create_channel, d, "nix", "p"), "code", None) == "name_taken", "a channel cannot take a session's name")
+    t.ok(getattr(t.raises(create_channel, d, "all", "p"), "code", None) == "reserved_name", "a channel cannot take a reserved name")
+    t.ok(getattr(t.raises(create_channel, d, "ops", " \x1b "), "code", None) == "bad_argument" and not os.path.lexists(os.path.join(d, "+ops")),
+         "a channel needs a purpose")
+    elsewhere = os.path.join(t.root, "elsewhere")
+    os.mkdir(elsewhere)
+    t.mk(os.path.join(elsewhere, CHANNEL_MARKER), "a marker behind a symlink\n")
+    os.symlink(elsewhere, os.path.join(d, "+evil"))
+    os.mkdir(os.path.join(d, "+bare"))
+    t.ok([c["name"] for c in list_channels(d, now)] == ["fleet"] and getattr(t.raises(channel_dir, d, "evil"), "code", None) == "no_such_channel",
+         "a symlink or a directory without the marker is not a channel")
+    st = load_state(d, "pi")
+    t.ok(getattr(t.raises(subscribe, d, "pi", st, s, "nope"), "code", None) == "no_such_channel", "subscribing to a missing channel fails")
+    many = load_state(d, "many")
+    for i in range(20):
+        create_channel(d, f"c{i}", "one of twenty")
+        subscribe(d, "many", many, s, f"c{i}", now=now)
+    twenty_first = t.raises(subscribe, d, "many", many, s, "fleet", now=now)
+    t.ok(getattr(twenty_first, "code", None) == "too_many_subscriptions", "at most 20 subscriptions")
+    t.ok(getattr(t.raises(subscribe, d, "pi", st, s, "fleet", backlog=21, now=now), "code", None) == "bad_argument", "a backlog is at most 20")
+    ids = [parse_msg(os.path.basename(t.post(d, "fleet", "nix", f"post {i}", stamp=now - 3600 + i * 60))).id for i in range(5)]
+    subscribe(d, "pi", st, s, "fleet", backlog=2, now=now)
+    t.ok(set(st["seen"]["+fleet"]) == set(ids[:3]), "backlog 2 leaves exactly the two newest of five earlier posts unread")
+    pinned_ops = load_settings({"channels": ["ops:wake"]}, {}, "pi")
+    t.ok(getattr(t.raises(unsubscribe, st, pinned_ops, "ops"), "code", None) == "pinned", "a pinned channel cannot be unsubscribed")
+    t.ok(effective_subs(load_state(d, "fresh"), pinned_ops, now) == {"ops": {"wake": True, "pinned": True, "since": now - 86400}},
+         "a pinned channel with no state starts 24 hours back")
+    touch_member(d, "pi", effective_subs(st, s, now), now)
+    c = next(c for c in list_channels(d, now) if c["name"] == "fleet")
+    t.ok(c["posts_7d"] == 5 and c["subscribers"] == ["pi"], "lists posts in the last 7 days and published subscribers")
+    unsubscribe(st, s, "fleet")
+    t.ok("fleet" not in st["subs"] and "+fleet" not in st["seen"], "unsubscribe drops the channel and its seen set")
+
+
 def section_send(t):
     t.patch("SETTLE", 0.0)
     root = t.root
@@ -1679,6 +1889,7 @@ SECTIONS = [
     ("grammar", section_grammar),
     ("settings", section_settings),
     ("state", section_state),
+    ("channels", section_channels),
     ("send", section_send),
     ("cli", section_cli),
 ]
