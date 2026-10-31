@@ -55,8 +55,11 @@ Receiving:
 Never pipe read or watch through head, tail, sed or grep: what they print is consumed.
 
 Commands:
-  send --from NAME --to NAME --subject TEXT [--id SESSION_ID] [FILE]
-      Send FILE, or standard input when FILE is "-" or omitted.
+  send --from NAME --to NAME|+CHANNEL|all --subject TEXT [--in-reply-to ID] [--id SESSION_ID] [FILE]
+      Send FILE, or standard input when FILE is "-" or omitted: direct mail to a session,
+      a post to a channel (at most 8 KiB), or a broadcast to all (at most 4 KiB). Refuses
+      private keys and tokens, and caps each sender at 20 posts per channel an hour, one
+      broadcast per 15 minutes, and one identical body per target per 10 minutes.
   read NAME [--max-bytes N]
       Deliver NAME's waiting mail once; prints "agent-mail: no mail for NAME" when empty.
   watch NAME [--interval SECONDS] [--forever] [--max-bytes N] [--parent PID]
@@ -516,7 +519,7 @@ def note_send(d, sender, target, body, now):
     """
     path = state_file(d, sender, ".send")
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-    digest = hashlib.sha256(body.encode("utf-8", "surrogateescape")).hexdigest()[:16]
+    digest = hashlib.sha256(body.encode("utf-8", "surrogatepass")).hexdigest()[:16]
     fd = os.open(path[:-len(".json")] + ".lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
@@ -867,6 +870,103 @@ def unsubscribe(state, settings, ch):
     return state.get("subs", {}).pop(ch, None) is not None
 
 
+# ---- send ----
+
+POST_LIMIT = 8192
+BROADCAST_LIMIT = 4096
+SUBJECT_MAX = 200
+SendResult = collections.namedtuple("SendResult", "id path warnings")
+# Complete token shapes the fleet's tools hold; prose and git hashes do not match.
+TOKEN_PAT = (r"(?:gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82}|sk-ant-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{40,}"
+             r"|AKIA[0-9A-Z]{16}|xox[abprs]-[A-Za-z0-9-]{10,})")
+SECRET_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|(?<![A-Za-z0-9_-])" + TOKEN_PAT + r"(?![A-Za-z0-9_-])")
+
+
+def looks_like_secret(text):
+    """True for a PEM private-key block or a complete token; a backstop, not a scanner."""
+    return SECRET_RE.search(text) is not None
+
+
+def write_new(fd, file, data):
+    """Write DATA under a hidden temporary name in the directory FD, then rename it to FILE."""
+    tmp = f".{file}.tmp"
+    tfd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+    try:
+        with os.fdopen(tfd, "wb") as f:
+            f.write(data)
+        try:
+            os.stat(file, dir_fd=fd, follow_symlinks=False)
+            raise MailError("exists", f"{file} already exists")
+        except FileNotFoundError:
+            pass
+        os.rename(tmp, file, src_dir_fd=fd, dst_dir_fd=fd)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp, dir_fd=fd)
+        raise
+
+
+def send(d, sender, to, subject, body, settings, in_reply_to=None, ident=None):
+    """Write one message from SENDER and return SendResult(id, path, warnings).
+
+    TO is a session name (direct mail at the top level), +CHANNEL (a post in the channel)
+    or all (a broadcast at the top level). Refusals come in this order: paused;
+    invalid_name or reserved_name; no_such_channel; broadcast_not_allowed; too_large;
+    looks_like_secret; rate_limited or duplicate.
+    """
+    if settings.paused:
+        raise MailError("paused", f"agent-mail is paused on this host ({PAUSE_PATH} exists), so nothing is sent")
+    check_name(sender, "sender")
+    if to == "all":
+        kind, name_to, word, limit, what = "broadcast", "all", "broadcast", BROADCAST_LIMIT, "the 4 KiB limit for broadcasts"
+    elif to.startswith("+"):
+        kind, name_to, word, limit, what = "post", check_name(to[1:], "channel"), "post", POST_LIMIT, "the 8 KiB limit for posts"
+    else:
+        kind, name_to, word, limit, what = "direct", check_name(to), "message", LIMIT, "the 1 MiB limit"
+    if kind == "post":
+        fd = open_channel(d, name_to)
+    else:
+        try:
+            fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+        except OSError:
+            raise MailError("mailbox_missing", f"mailbox {d} does not exist") from None
+    try:
+        if kind == "broadcast" and not settings.allow_broadcast:
+            raise MailError("broadcast_not_allowed", f"broadcasts are turned off for {sender} (sessions.{sender}.allow_broadcast)")
+        if ident is not None and not IDENT.fullmatch(ident):
+            raise MailError("bad_argument", f"invalid --id {ident!r}")
+        if in_reply_to is not None and parse_msg(f"{in_reply_to}.txt") is None:
+            raise MailError("invalid_id", f"In-Reply-To must be a message id, not {escape(str(in_reply_to))}")
+        line = clean_line(subject or "")[:SUBJECT_MAX]
+        if not line:
+            raise MailError("no_subject", "a message needs a subject")
+        now = clock()
+        stamp = utc(now, micro=True)
+        file = f"{name_to}_{stamp}_from-{sender}_{secrets.token_hex(4)}.txt"
+        header = (f"From: {sender}@{HOST}" + (f" (agent-deck {ident})" if ident else "") + f"\nTo: {to}\nUTC: {stamp}\nSubject: {line}\n"
+                  + (f"In-Reply-To: {in_reply_to}\n" if in_reply_to is not None else "") + "X-Agent-Mail: 2\n")
+        data = f"{header}\n{body.rstrip()}\n".encode("utf-8", "replace")
+        if len(data) > limit:
+            raise MailError("too_large", f"the {word} is {len(data)} bytes, over {what}; send a file path instead")
+        if looks_like_secret(f"{subject}\n{body}"):
+            raise MailError("looks_like_secret", "the message looks like it holds a private key or a token; never put secrets in mail")
+        note_send(d, sender, to, body, now)
+        write_new(fd, file, data)
+    finally:
+        os.close(fd)
+    warnings = []
+    if kind == "direct":
+        checked = last_checked(d, name_to)
+        if checked is None:
+            warnings.append(f"no reader has checked {name_to}'s mail yet; the message waits")
+        elif now - checked > PRESENCE_STALE:
+            warnings.append(f"{name_to}'s mail was last checked {int((now - checked) // 60)} minutes ago; the message waits")
+    elif kind == "post" and not any(name_to in record["subs"] for record in members(d).values()):
+        warnings.append(f"nobody lists +{name_to} yet; the post is kept 30 days")
+    where = os.path.join(d, f"+{name_to}") if kind == "post" else d
+    return SendResult(file[:-len(".txt")], os.path.join(where, file), warnings)
+
+
 class Rejected(Exception):
     pass
 
@@ -1200,11 +1300,13 @@ def clean_line(text):
     return " ".join("".join(" " if unicodedata.category(ch)[0] == "C" else ch for ch in text).split())
 
 
-def cmd_send(sender, to, subject, ident, src, d, write=None):
+def cmd_send(sender, to, subject, ident, src, d, write=None, settings=None, in_reply_to=None):
+    """The CLI's send: the body comes from FILE, or standard input when FILE is "-" or
+    omitted; prints the new file's path, and each warning on stderr."""
     if not os.path.isdir(d):
         raise MailError("mailbox_missing", f"mailbox {d} does not exist")
-    if ident is not None and not IDENT.fullmatch(ident):
-        raise MailError("bad_argument", f"invalid --id {ident!r}")
+    if not subject or not clean_line(subject):
+        raise MailError("no_subject", "a message needs a --subject")
     try:
         if src in (None, "-"):
             body = sys.stdin.read()
@@ -1213,36 +1315,12 @@ def cmd_send(sender, to, subject, ident, src, d, write=None):
                 body = f.read()
     except (OSError, UnicodeDecodeError) as e:
         raise MailError("unreadable_body", f"cannot read the message body: {e}") from None
-    stamp = utc(micro=True)
-    final = os.path.join(d, f"{to}_{stamp}_from-{sender}_{secrets.token_hex(4)}.txt")
-    host = socket.gethostname().split(".")[0].lower()
-    header = f"From: {sender}@{host}" + (f" (agent-deck {ident})" if ident else "") + f"\nTo: {to}\nUTC: {stamp}\n"
-    if not subject or not clean_line(subject):
-        raise MailError("no_subject", "a message needs a --subject")
-    header += f"Subject: {clean_line(subject)}\n"
-    data = f"{header}\n{body.rstrip()}\n".encode("utf-8")
-    if len(data) > LIMIT:
-        raise MailError("too_large", f"the message is {len(data)} bytes, over the 1 MiB limit; send a file path instead")
-    tmp = os.path.join(d, "." + os.path.basename(final) + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-        if os.path.lexists(final):
-            raise MailError("exists", f"{final} already exists")
-        os.rename(tmp, final)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
-        raise
-    emit(write, f"{final}\n")
-    checked = last_checked(d, to)
-    if checked is None:
-        print(f"agent-mail: warning: no reader has checked {to}'s mail yet; the message waits until one does", file=sys.stderr)
-    elif clock() - checked > PRESENCE_STALE:
-        print(f"agent-mail: warning: {to}'s mail was last checked {int((clock() - checked) // 60)} minutes ago; the message waits until it is read", file=sys.stderr)
+    if settings is None:
+        settings = load_settings({}, os.environ, sender)
+    r = send(d, sender, to, subject, body, settings, in_reply_to=in_reply_to, ident=ident)
+    emit(write, f"{r.path}\n")
+    for warning in r.warnings:
+        print(f"agent-mail: warning: {warning}", file=sys.stderr)
     return 0
 
 
@@ -1254,6 +1332,7 @@ def main(argv):
     s.add_argument("--from", dest="sender", required=True)
     s.add_argument("--to", required=True)
     s.add_argument("--subject", required=True)
+    s.add_argument("--in-reply-to", help="the id of the message this one answers")
     s.add_argument("--id")
     s.add_argument("file", nargs="?")
     r = sub.add_parser("read")
@@ -1300,9 +1379,10 @@ def dispatch(a):
     if a.cmd == "init":
         return cmd_init(cli_settings(a, None).dir)
     if a.cmd == "send":
-        sender, to = check_name(a.sender, "sender"), check_name(a.to)
-        d = require_mailbox(cli_settings(a, sender).dir)
-        return cmd_send(sender, to, a.subject, a.id, a.file, d)
+        sender = check_name(a.sender, "sender")
+        s = cli_settings(a, sender)
+        d = require_mailbox(s.dir)
+        return cmd_send(sender, a.to, a.subject, a.id, a.file, d, settings=s, in_reply_to=a.in_reply_to)
     name = check_name(a.name)
     s = cli_settings(a, name)
     d = require_mailbox(s.dir)
@@ -1774,7 +1854,7 @@ def section_send(t):
     t.ok(stat.S_IMODE(os.stat(sent).st_mode) == 0o600, "writes mode 0600")
     with open(sent) as f:
         text = f.read()
-    t.ok(re.match(r"From: pi@\S+ \(agent-deck 34f513aa-1793309640\)\nTo: nix\nUTC: \S+\nSubject: Test sub ject\n\nhello nix\n$", text) is not None,
+    t.ok(re.match(r"From: pi@\S+ \(agent-deck 34f513aa-1793309640\)\nTo: nix\nUTC: \S+\nSubject: Test sub ject\nX-Agent-Mail: 2\n\nhello nix\n$", text) is not None,
          "writes clean header lines")
     t.ok("no reader has checked nix's mail yet" in err, "warns when nobody reads the recipient's mail")
     t.ok(not [e for e in os.listdir(d) if e.endswith(".tmp")], "leaves no temporary file")
@@ -1794,7 +1874,8 @@ def section_send(t):
     t.ok(t.capture(cmd_pending, "nix", d)[0] == line1, "pending repeats itself while nothing changes")
     t.ok("hello nix" in t.capture(cmd_read, "nix", d, MAX_BYTES)[0], "the recipient reads it")
     t.ok(t.capture(cmd_pending, "nix", d)[0] == line1, "pending does not change when mail is read")
-    t.ok(not t.capture(cmd_send, "pi", "nix", "s", None, body, d)[2], "no warning once the recipient reads")
+    again = t.mk(os.path.join(root, "again.txt"), "hello again, nix\n")
+    t.ok(not t.capture(cmd_send, "pi", "nix", "s", None, again, d)[2], "no warning once the recipient reads")
     line2 = t.capture(cmd_pending, "nix", d)[0]
     t.ok(line2 != line1 and "announced" in line2, "pending changes on new mail")
     st = read_json(state_file(d, "nix", ".pending"))
@@ -1804,6 +1885,33 @@ def section_send(t):
     line3 = t.capture(cmd_pending, "nix", d)[0]
     t.ok(line3 != line2 and "reminder 1" in line3, "pending reminds about unread mail")
     t.ok(t.capture(cmd_pending, "nix", d)[0] == line3, "and does not repeat the reminder at once")
+
+    s = load_settings({}, {}, "pi")
+    no_broadcast, paused = dataclasses.replace(s, allow_broadcast=False), dataclasses.replace(s, paused=True)
+    create_channel(d, "fleet", "fleet-wide notices")
+    r = send(d, "pi", "+fleet", "ping", "hello", s)
+    with open(r.path) as f:
+        post_text = f.read()
+    t.ok(re.fullmatch(r"fleet_\d{8}T\d{6}\.\d{6}Z_from-pi_[0-9a-f]{8}\.txt", os.path.basename(r.path)) is not None
+         and os.path.dirname(r.path) == os.path.join(d, "+fleet"), "a post lands in its channel under the standard name")
+    t.ok("To: +fleet\n" in post_text and "X-Agent-Mail: 2\n" in post_text, "a post carries To: +fleet and X-Agent-Mail: 2")
+    t.ok(os.path.basename(send(d, "pi", "all", "s", "b", s).path).startswith("all_"), "a broadcast lands at the top level as all_")
+    t.ok(getattr(t.raises(send, d, "pi", "+fleet", "s", "x" * 8192, s), "code", None) == "too_large", "a post over 8 KiB is refused")
+    t.ok(getattr(t.raises(send, d, "nix", "all", "s", "x" * 4096, s), "code", None) == "too_large", "a broadcast over 4 KiB is refused")
+    t.ok(getattr(t.raises(send, d, "pi", "all", "s", "b", no_broadcast), "code", None) == "broadcast_not_allowed", "allow_broadcast false refuses a broadcast")
+    t.ok(getattr(t.raises(send, d, "pi", "nix", "s", "-----BEGIN OPENSSH PRIVATE KEY-----\nabc", s), "code", None) == "looks_like_secret",
+         "refuses a private key block")
+    t.ok(getattr(t.raises(send, d, "pi", "nix", "s", "token ghp_" + "a" * 36, s), "code", None) == "looks_like_secret", "refuses a GitHub token")
+    t.ok(send(d, "pi", "nix", "s2", "commit " + "0b1c" * 10 + " and the word sk-ant in prose", s).id, "lets a git hash and prose through")
+    t.ok(getattr(t.raises(send, d, "pi", "nix", "s", "b", paused), "code", None) == "paused", "a paused host does not send")
+    t.ok(getattr(t.raises(send, d, "pi", "+nope", "s", "b", s), "code", None) == "no_such_channel", "a post to a missing channel is refused")
+    t.ok("nobody lists +fleet yet; the post is kept 30 days" in r.warnings, "warns when nobody lists the channel")
+    reply = send(d, "nix", "pi", "re: ping", "pong", s, in_reply_to=r.id)
+    with open(reply.path) as f:
+        reply_text = f.read()
+    t.ok(f"\nIn-Reply-To: {r.id}\nX-Agent-Mail: 2\n\n" in reply_text
+         and getattr(t.raises(send, d, "nix", "pi", "s", "other", s, in_reply_to="not an id"), "code", None) == "invalid_id",
+         "In-Reply-To carries a message id and nothing else")
 
 
 def section_cli(t):
