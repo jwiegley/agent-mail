@@ -1838,6 +1838,90 @@ def watch_dirs(d, name, settings):
     return dirs
 
 
+# ---- identity ----
+
+Identity = collections.namedtuple("Identity", "name source problem")
+IDENTITY_DIR = os.path.join(".local", "share", "agent-deck", "runtime", "identity")
+SMALL_FILE = 65536
+TITLE_RE = re.compile(r"^- title:[ \t]*(.*?)[ \t]*$", re.MULTILINE)
+
+
+def read_small(path, limit=SMALL_FILE):
+    """The bytes of a regular file of ours, opened without following a symlink, at most
+    LIMIT long; OSError for anything else."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_size > limit:
+            raise OSError(errno.EPERM, "not a regular file of ours within the size limit")
+        return os.read(fd, limit + 1)[:limit]
+    finally:
+        os.close(fd)
+
+
+def identity_title(path, home):
+    """The "- title:" value of an agent-deck identity file, and why not when it is None. The
+    file counts only as a regular file (by lstat) of ours, at most 64 KiB, under
+    <home>/.local/share/agent-deck/runtime/identity/ by real path."""
+    root = os.path.realpath(os.path.join(home, IDENTITY_DIR))
+    try:
+        st = os.lstat(path)
+    except OSError as e:
+        return None, f"cannot be read ({e.strerror})"
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+        return None, "is not a regular file of ours"
+    if os.path.commonpath([root, os.path.realpath(path)]) != root:
+        return None, f"is not under {root}"
+    try:
+        m = TITLE_RE.search(read_small(path).decode("utf-8", "replace"))
+    except OSError as e:
+        return None, f"cannot be read ({e.strerror})"
+    return (m.group(1), None) if m and m.group(1) else (None, "has no '- title:' line")
+
+
+def bind_name(value, source):
+    name = value.strip().lower()
+    try:
+        return Identity(check_name(name), source, None)
+    except MailError as e:
+        return Identity(None, source, f"{source} gives a name that binds nothing: {e.message}")
+
+
+def resolve_identity(flag, env, home):
+    """A session's name, resolved once: --name, AGENT_MAIL_NAME, AGENTDECK_TITLE, then the
+    "- title:" line of AGENTDECK_IDENTITY_FILE. The first source present decides; a value
+    that, lower-cased, fails the grammar or is reserved binds nothing, and problem says why."""
+    for source, value in (("--name", flag), ("AGENT_MAIL_NAME", env.get("AGENT_MAIL_NAME")), ("AGENTDECK_TITLE", env.get("AGENTDECK_TITLE"))):
+        if value:
+            return bind_name(value, source)
+    path = env.get("AGENTDECK_IDENTITY_FILE")
+    if path:
+        title, why = identity_title(path, home)
+        return bind_name(title, "AGENTDECK_IDENTITY_FILE") if title else Identity(None, "AGENTDECK_IDENTITY_FILE", f"AGENTDECK_IDENTITY_FILE {why}")
+    return Identity(None, None, "no source names this session")
+
+
+def background_job(env, ppid, home):
+    """True for a Claude background job: CLAUDE_JOB_DIR is set, unless the parent's session
+    record (<$CLAUDE_CONFIG_DIR or ~/.claude>/sessions/<ppid>.json, ours, with that pid) says
+    "kind": "interactive". This is agent-deck's rule for issue #2683, since the variable
+    can leak into a foreground pane through tmux. A background job never takes the lock."""
+    if not env.get("CLAUDE_JOB_DIR"):
+        return False
+    record = os.path.join(env.get("CLAUDE_CONFIG_DIR") or os.path.join(home, ".claude"), "sessions", f"{ppid}.json")
+    try:
+        data = json.loads(read_small(record).decode("utf-8"))
+    except (OSError, ValueError):
+        return True
+    return not (isinstance(data, dict) and data.get("pid") == ppid and data.get("kind") == "interactive")
+
+
+def check_me(me, bound):
+    """Refuse with name_mismatch unless ME, lower-cased, is the bound name."""
+    if not isinstance(me, str) or me.strip().lower() != bound:
+        raise MailError("name_mismatch", f"me is {escape(str(me))!r}, but this server is bound to {bound}; pass your own agent-deck session name as me")
+
+
 def stdout_write(text):
     if sys.stdout is None:  # descriptor 1 was closed when Python started
         raise OSError(errno.EBADF, "standard output is closed")
@@ -2843,6 +2927,44 @@ def section_waiter(t):
             w.close()
 
 
+def section_identity(t):
+    home = t.root
+    iddir = os.path.join(home, ".local", "share", "agent-deck", "runtime", "identity", "eae28c17-1793375361")
+    os.makedirs(iddir, 0o700)
+    idfile = t.mk(os.path.join(iddir, "identity.md"), "# agent-deck identity\n- title: Nix\n- id: eae28c17-1793375361\n")
+    env = {"AGENT_MAIL_NAME": "b", "AGENTDECK_TITLE": "c", "AGENTDECK_IDENTITY_FILE": idfile}
+
+    def without(e, key):
+        return {k: v for k, v in e.items() if k != key}
+
+    def only(e, key):
+        return {key: e[key]}
+
+    t.ok(resolve_identity("a", env, home).name == "a", "--name comes first")
+    t.ok([resolve_identity(None, e, home).name for e in (env, without(env, "AGENT_MAIL_NAME"), only(env, "AGENTDECK_IDENTITY_FILE"))] == ["b", "c", "nix"],
+         "then AGENT_MAIL_NAME, AGENTDECK_TITLE and the identity file")
+    outside = t.mk(os.path.join(home, "outside.md"), "- title: nix\n")
+    t.ok(resolve_identity(None, {"AGENTDECK_IDENTITY_FILE": outside}, home).name is None, "an identity file outside agent-deck's runtime/identity is ignored")
+    link = os.path.join(iddir, "link.md")
+    os.symlink(idfile, link)
+    t.ok(resolve_identity(None, {"AGENTDECK_IDENTITY_FILE": link}, home).name is None, "a symlinked identity file is ignored")
+    i = resolve_identity(None, {"AGENT_MAIL_NAME": "Bad_Name", "AGENTDECK_TITLE": "c"}, home)
+    t.ok(i.name is None and "AGENT_MAIL_NAME" in (i.problem or ""), "the first source present decides, and a bad one is reported")
+    t.ok("reserved" in (resolve_identity(None, {"AGENTDECK_TITLE": "Agent-Mail"}, home).problem or ""), "a reserved title binds nothing")
+    ppid = 424242
+
+    def write_record(pid, kind):
+        os.makedirs(os.path.join(home, ".claude", "sessions"), 0o700, exist_ok=True)
+        t.mk(os.path.join(home, ".claude", "sessions", f"{pid}.json"), json.dumps({"pid": pid, "kind": kind}))
+
+    t.ok(background_job({"CLAUDE_JOB_DIR": "/x"}, ppid, home) and not background_job({}, ppid, home), "CLAUDE_JOB_DIR alone marks a background job")
+    write_record(ppid, kind="interactive")
+    t.ok(not background_job({"CLAUDE_JOB_DIR": "/x"}, ppid, home), "a foreground record beats a leaked CLAUDE_JOB_DIR")
+    write_record(ppid, kind="bg")
+    t.ok(background_job({"CLAUDE_JOB_DIR": "/x"}, ppid, home), "a bg record stays a background job")
+    t.ok(check_me("PI", "pi") is None and getattr(t.raises(check_me, "nix", "pi"), "code", None) == "name_mismatch", "me is compared without case")
+
+
 def section_send(t):
     t.patch("SETTLE", 0.0)
     root = t.root
@@ -3005,6 +3127,7 @@ SECTIONS = [
     ("posts", section_posts),
     ("retention", section_retention),
     ("waiter", section_waiter),
+    ("identity", section_identity),
     ("send", section_send),
     ("cli", section_cli),
 ]
