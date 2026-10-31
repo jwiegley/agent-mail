@@ -1022,7 +1022,8 @@ def send(d, sender, to, subject, body, settings, in_reply_to=None, ident=None):
     TO is a session name (direct mail at the top level), +CHANNEL (a post in the channel)
     or all (a broadcast at the top level). Refusals come in this order: paused;
     invalid_name or reserved_name; no_such_channel; broadcast_not_allowed; too_large;
-    looks_like_secret; rate_limited or duplicate.
+    looks_like_secret; rate_limited or duplicate. A write that fails is send_failed, with
+    nothing sent; send raises nothing but MailError.
     """
     if settings.paused:
         raise MailError("paused", f"agent-mail is paused on this host ({PAUSE_PATH} exists), so nothing is sent")
@@ -1060,8 +1061,12 @@ def send(d, sender, to, subject, body, settings, in_reply_to=None, ident=None):
             raise MailError("too_large", f"the {word} is {len(data)} bytes, over {what}; send a file path instead")
         if looks_like_secret(f"{subject}\n{body}"):
             raise MailError("looks_like_secret", "the message looks like it holds a private key or a token; never put secrets in mail")
-        with send_window(d, sender, to, body, now) as late:
-            write_new(fd, file, data)
+        try:
+            with send_window(d, sender, to, body, now) as late:
+                write_new(fd, file, data)
+        except OSError as e:
+            where = f" ({e.filename})" if isinstance(e.filename, str) else ""
+            raise MailError("send_failed", f"the {word} to {to} was not sent: {e.strerror or e}{where}") from None
     finally:
         os.close(fd)
     warnings = list(late)
@@ -4420,6 +4425,15 @@ def section_send(t):
         t.patch("write_json", real_write_json)
     t.ok(os.path.exists(r.path) and any("was not recorded" in w for w in r.warnings),
          "a send whose window cannot be saved afterwards still returns the message it wrote, with a warning")
+    locked = t.box("locked")
+    os.chmod(locked, 0o500)
+    try:
+        e = t.raises(send, locked, "pi", "nix", "s", "into a read-only mailbox", s)
+        out, code, err = t.capture(cmd_send, "pi", "nix", "s", None, body, locked)
+    finally:
+        os.chmod(locked, 0o700)
+    t.ok(getattr(e, "code", None) == "send_failed" and "was not sent" in e.message and code == 1 and "was not sent" in err and not out
+         and sorted(os.listdir(locked)) == [MARKER_V2], "a read-only mailbox makes send fail with send_failed, never a raw OSError, and leaves nothing behind")
 
 
 def section_cli(t):
