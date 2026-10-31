@@ -184,7 +184,7 @@ def check_name(name, kind="session"):
         hint = " (for sessions on several hosts, share one mailbox directory)" if "@" in name else ""
         if name != name.lower() and grammatical(name.lower()):
             hint = f" (names are lower case: use {name.lower()!r})"
-        raise MailError("invalid_name", f"invalid {what} {name!r}{hint}")
+        raise MailError("invalid_name", f"invalid {what} {echo(name)}{hint}")
     if name in RESERVED or name.startswith(RESERVED_PREFIX):
         raise MailError("reserved_name", f"the {what} {name!r} is reserved")
     return name
@@ -217,6 +217,18 @@ def escape(text):
     except UnicodeEncodeError:
         data = text.encode("utf-8", "surrogatepass")
     return "".join(chr(b) if chr(b) in SAFE else f"\\x{b:02x}" for b in data)
+
+
+ECHO_MAX = 64  # characters of a caller's value that a refusal shows
+
+
+def echo(value, escaped=False):
+    """A caller's VALUE, quoted, for a refusal: at most its first ECHO_MAX characters, escaped
+    as notices are when ESCAPED, then its length when it was longer, so that no refusal
+    grows with its input."""
+    text = str(value)
+    shown = repr(escape(text[:ECHO_MAX]) if escaped else text[:ECHO_MAX])
+    return shown if len(text) <= ECHO_MAX else f"{shown}... ({len(text)} characters)"
 
 
 ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b\n]*(?:\x07|\x1b\\)?|[@-Z\\-_])")
@@ -984,7 +996,9 @@ def subscribe(d, name, state, settings, ch, wake=False, backlog=0, now=None):
 
 
 def unsubscribe(state, settings, ch):
-    """Drop a runtime subscription and its seen set; True when there was one."""
+    """Drop a runtime subscription and its seen set; True when there was one. CH must be a
+    channel name, as for subscribe, so an answer never repeats anything else."""
+    check_name(ch, "channel")
     if settings is not None and ch in settings.channels:
         raise MailError("pinned", f"+{ch} is pinned in the settings, so it cannot be unsubscribed")
     state.get("seen", {}).pop(f"+{ch}", None)
@@ -1064,9 +1078,9 @@ def send(d, sender, to, subject, body, settings, in_reply_to=None, ident=None):
         if kind == "broadcast" and not settings.allow_broadcast:
             raise MailError("broadcast_not_allowed", f"broadcasts are turned off for {sender} (sessions.{sender}.allow_broadcast)")
         if ident is not None and not IDENT.fullmatch(ident):
-            raise MailError("bad_argument", f"invalid --id {ident!r}")
+            raise MailError("bad_argument", f"invalid --id {echo(ident)}")
         if in_reply_to is not None and parse_msg(f"{in_reply_to}.txt") is None:
-            raise MailError("invalid_id", f"In-Reply-To must be a message id, not {escape(str(in_reply_to))}")
+            raise MailError("invalid_id", f"In-Reply-To must be a message id, not {echo(in_reply_to, escaped=True)}")
         line = clean_line(subject or "")[:SUBJECT_MAX]
         if not line:
             raise MailError("no_subject", "a message needs a subject")
@@ -2079,7 +2093,7 @@ def background_job(env, ppid, home):
 def check_me(me, bound):
     """Refuse with name_mismatch unless ME, lower-cased, is the bound name."""
     if not isinstance(me, str) or me.strip().lower() != bound:
-        raise MailError("name_mismatch", f"me is {escape(str(me))!r}, but this server is bound to {bound}; pass your own agent-deck session name as me")
+        raise MailError("name_mismatch", f"me is {echo(me, escaped=True)}, but this server is bound to {bound}; pass your own agent-deck session name as me")
 
 
 # ---- doorbell and pending ----
@@ -2434,7 +2448,7 @@ def archived_item(d, name, ident, max_bytes):
     """An item rebuilt from NAME's own archive copy of message IDENT, for reread."""
     m = parse_msg(f"{ident}.txt")
     if m is None:
-        raise MailError("invalid_id", f"{escape(str(ident))} is not a message id")
+        raise MailError("invalid_id", f"{echo(ident, escaped=True)} is not a message id")
     fd = open_owned_dir(archive_dir(d, name))
     if fd is None:
         raise MailError("not_in_archive", f"{name} has no archive yet; copies are kept 7 days")
@@ -4669,6 +4683,18 @@ def section_tools(t):
         usurper.release()
     t.ok(took and r["isError"] and "not_reader" in text(r) and "holds its lock" in text(r) and os.path.exists(waiting),
          "receive revalidates a lock it already holds: once its lock file is replaced and another holds the new one, it claims nothing")
+    huge = "\x1b[2J<x>_" * 12500  # 100000 characters, with a control and characters a name never holds
+    calls = [("receive", {"me": huge}), ("send", {"to": huge, "subject": "s", "body": "b"}), ("send", {"to": "+" + huge, "subject": "s", "body": "b"}),
+             ("send", {"to": "a", "subject": "s", "body": "b", "in_reply_to": huge}), ("reread", {"me": "pi", "id": huge}),
+             ("subscribe", {"channel": huge}), ("unsubscribe", {"channel": huge})]
+    answers = [text(r) for r in (t.call(bound_pi, "tools/call", {"name": n, "arguments": a})["result"] for n, a in calls) if r["isError"]]
+    _, id_code, id_err = t.run(["--dir", d, "send", "--from", "a", "--to", "b", "--subject", "s", "--id", huge, t.mk(os.path.join(t.root, "b.txt"), "b\n")])
+    t.ok(len(answers) == len(calls) and id_code == 1 and all(len(a) < 600 and "(100000 characters)" in a and "\x1b" not in a for a in answers + [id_err]),
+         "a refusal shows at most 64 characters of a caller's value, and its length")
+    odd = tool(bound_pi, "unsubscribe", channel="Fleet\x1b[2J")
+    _, odd_code, odd_err = t.run(["--dir", d, "unsubscribe", "q", "Fleet"])  # q: a name whose lock no server holds
+    t.ok(odd["isError"] and "invalid_name" in text(odd) and "\x1b" not in text(odd) and odd_code == 1 and "invalid channel name 'Fleet'" in odd_err,
+         "unsubscribe refuses a value that is not a channel name, as subscribe does")
 
 
 def section_doctor(t):
