@@ -990,6 +990,14 @@ def unsubscribe(state, settings, ch):
     return state.get("subs", {}).pop(ch, None) is not None
 
 
+def save_subscriptions(d, name, state, settings, now):
+    """After a subscribe or unsubscribe: publish NAME's member record at once, then save its
+    state. The record comes first because touch_member refuses an unsafe mailbox before it
+    writes anything, so a refused change leaves the state and the record as they were."""
+    touch_member(d, name, effective_subs(state, settings, now), now, force=True)
+    save_state(d, name, state)
+
+
 # ---- send ----
 
 POST_LIMIT = 8192
@@ -2565,8 +2573,7 @@ class McpServer:
         name, ch, now = self.identity.name, bare(args["channel"]), clock()
         state = load_state(d, name)
         sub = subscribe(d, name, state, self.settings, ch, wake=args.get("wake", False), backlog=args.get("backlog", 0), now=now)
-        save_state(d, name, state)
-        touch_member(d, name, effective_subs(state, self.settings, now), now, force=True)
+        save_subscriptions(d, name, state, self.settings, now)
         return self.head() + subscription_text(d, name, ch, sub), None, None
 
     def tool_unsubscribe(self, args, mid):
@@ -2575,8 +2582,7 @@ class McpServer:
         name, ch, now = self.identity.name, bare(args["channel"]), clock()
         state = load_state(d, name)
         was = unsubscribe(state, self.settings, ch)
-        save_state(d, name, state)
-        touch_member(d, name, effective_subs(state, self.settings, now), now, force=True)
+        save_subscriptions(d, name, state, self.settings, now)
         listed = sorted(n for n, record in members(d).items() if ch in record["subs"])
         return (self.head() + f"+{ch}: {name} {'unsubscribed' if was else 'was not subscribed'}; subscribers listed: {', '.join(listed) or 'none'}"), None, None
 
@@ -2859,8 +2865,7 @@ def cmd_subscribe(name, d, ch, wake, backlog, settings, write=None):
         now = clock()
         state = load_state(d, name)
         sub = subscribe(d, name, state, settings, ch, wake=wake, backlog=backlog, now=now)
-        save_state(d, name, state)
-        touch_member(d, name, effective_subs(state, settings, now), now, force=True)
+        save_subscriptions(d, name, state, settings, now)
         emit(write, subscription_text(d, name, ch, sub) + "\n")
     finally:
         lock.release()
@@ -2873,8 +2878,7 @@ def cmd_unsubscribe(name, d, ch, settings, write=None):
         now = clock()
         state = load_state(d, name)
         was = unsubscribe(state, settings, ch)
-        save_state(d, name, state)
-        touch_member(d, name, effective_subs(state, settings, now), now, force=True)
+        save_subscriptions(d, name, state, settings, now)
         emit(write, f"+{ch}: {name} unsubscribed\n" if was else f"+{ch}: {name} was not subscribed\n")
     finally:
         lock.release()
@@ -3179,6 +3183,28 @@ class T:
     def post(self, d, ch, sender, body, stamp=None):
         """Write a grammar-valid post into +CH as a peer would."""
         return self._peer(os.path.join(d, f"+{ch}"), ch, f"+{ch}", sender, body, stamp)
+
+    def saved(self, d, name):
+        """The bytes of NAME's state file, its .bak and its member record, None for each one missing."""
+        found = []
+        for path in (state_file(d, name), state_file(d, name) + ".bak", member_path(d, name)):
+            try:
+                with open(path, "rb") as f:
+                    found.append(f.read())
+            except FileNotFoundError:
+                found.append(None)
+        return found
+
+    def unsafe_presence(self, d):
+        """Put a symlink to an empty directory outside the mailbox in place of D's
+        .agent-mail-presence, which touch_member must refuse; return that directory."""
+        presence = os.path.join(d, ".agent-mail-presence")
+        if os.path.isdir(presence) and not os.path.islink(presence):
+            os.rename(presence, os.path.join(self.root, f"presence-of-{os.path.basename(d)}"))
+        outside = os.path.join(self.root, f"outside-{os.path.basename(d)}")
+        os.mkdir(outside, 0o700)
+        os.symlink(outside, presence)
+        return outside
 
     def at(self, epoch):
         """Set the injected clock; None returns to the real one."""
@@ -4402,6 +4428,17 @@ def section_tools(t):
     back = read_member(d, "b") or {}
     t.ok(gone.get("host") == HOST and gone.get("subs") == [] and back.get("host") == HOST and back.get("subs") == ["fleet"],
          "the subscribe and unsubscribe tools publish at once, even over another host's fresh record for the name")
+    unsafe = t.box("unsafe-tools")
+    for ch in ("fleet", "ops"):
+        create_channel(unsafe, ch, f"{ch} notices")
+    pi = t.server(unsafe, "pi")
+    tool(pi, "subscribe", channel="fleet")
+    outside = t.unsafe_presence(unsafe)
+    before = t.saved(unsafe, "pi")
+    refused = [tool(pi, "subscribe", channel="ops"), tool(pi, "unsubscribe", channel="fleet")]
+    t.ok(all(r["isError"] and "unsafe_mailbox" in text(r) and ".agent-mail-presence is a symlink" in text(r) for r in refused)
+         and t.saved(unsafe, "pi") == before and sorted(load_state(unsafe, "pi")["subs"]) == ["fleet"] and not os.listdir(outside),
+         "the subscribe and unsubscribe tools, refused as unsafe_mailbox, change neither the state nor the member record")
 
 
 def section_doctor(t):
@@ -4754,6 +4791,17 @@ def section_cli(t):
     after_unsub = read_member(d, "pi") or {}
     t.ok(after_sub.get("host") == HOST and "ops" in after_sub.get("subs", []) and after_unsub.get("host") == HOST and "ops" not in after_unsub.get("subs", ["ops"]),
          "subscribe and unsubscribe publish at once, even over another host's fresh record for the name")
+    unsafe = t.box("unsafe-subscribe")
+    for ch in ("fleet", "ops"):
+        t.run(["--dir", unsafe, "channel", "create", ch, "--purpose", f"{ch} notices"])
+    t.run(["--dir", unsafe, "subscribe", "pi", "fleet"])
+    outside = t.unsafe_presence(unsafe)
+    before = t.saved(unsafe, "pi")
+    _, sub_code, sub_err = t.run(["--dir", unsafe, "subscribe", "pi", "ops"])
+    _, unsub_code, unsub_err = t.run(["--dir", unsafe, "unsubscribe", "pi", "fleet"])
+    t.ok((sub_code, unsub_code) == (1, 1) and all(".agent-mail-presence is a symlink" in e for e in (sub_err, unsub_err))
+         and t.saved(unsafe, "pi") == before and sorted(load_state(unsafe, "pi")["subs"]) == ["fleet"] and not os.listdir(outside),
+         "a subscribe or unsubscribe refused as unsafe_mailbox changes neither the state nor the member record")
 
 
 # ---- FakeSync: Syncthing replicas, simulated (test only) ----
