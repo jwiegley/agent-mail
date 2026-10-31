@@ -10,9 +10,9 @@ number above zero; for summary_local_time a time of day, HH:MM; for summary_tz a
 refused with the key named; nothing falls back to a default.
 
 TOPIC.md lists the topic's members as a Markdown table, | name | host | harness |, under a "## Members" heading. A
-name that is not an agent-mail name or is listed twice is refused with the name shown, and so is a file with no such
-heading. Each member's agent-deck row comes from one read-only listing for each host; a host that does not answer
-leaves its members unknown, never stopped.
+name that is not an agent-mail name or is listed twice, or a member with no host, is refused with the name shown, and
+so is a file with no such heading. Each member's agent-deck row comes from one read-only listing for each host; a host
+that does not answer leaves its members unknown, never stopped.
 
 Commands:
   self-test [SECTION ...]
@@ -152,8 +152,9 @@ def section_lines(text, heading):
 
 def load_roster(path):
     """The members in the "## Members" table of the TOPIC.md at PATH, in table order, as Member(name, host, harness).
-    A name that is not an agent-mail name or is listed twice, or a file with no such heading, raises RosterError, so
-    the steward never watches a name it cannot mail, nor takes a typo in the heading for a topic with no members."""
+    A name that is not an agent-mail name or is listed twice, a member with no host, or a file with no such heading
+    raises RosterError, so the steward never watches a name it cannot mail or a member it cannot look up, nor takes a
+    typo in the heading for a topic with no members."""
     with open(path, encoding="utf-8") as f:
         text = f.read()
     section = section_lines(text, "## Members")
@@ -165,6 +166,8 @@ def load_roster(path):
             continue
         if not grammatical(name):
             raise RosterError(name)
+        if not host:
+            raise RosterError(name, "empty host")
         if any(m.name == name for m in members):
             raise RosterError(name, "listed twice")
         members.append(Member(name, host, harness))
@@ -176,6 +179,11 @@ def load_roster(path):
 def text_of(value):
     """VALUE when it is a non-empty string, else None."""
     return value if isinstance(value, str) and value else None
+
+
+def bool_of(value):
+    """VALUE when it is a bool, else None."""
+    return value if isinstance(value, bool) else None
 
 
 def utc_of(value):
@@ -228,30 +236,40 @@ def deck_sessions(run, argv):
     return [row for row in sessions if isinstance(row, dict)]
 
 
+def row_rank(session):
+    """How well the agent-deck row SESSION shows its member, as a sort key: a row that is neither stopped nor archived
+    beats one that is, and then the later last_activity beats the earlier. A stamp that cannot be read ranks last."""
+    live = session.get("status") != "stopped" and session.get("archived") is not True
+    return live, utc_of(session.get("last_activity_at")) or ""
+
+
 def deck_rows(run, members, hera_host="hera"):
-    """The agent-deck row of each member, by name: dict(status, substate, bg, last_activity, host_ok).
+    """The agent-deck row of each member, by name: dict(status, substate, bg, last_activity, archived, host_ok).
     RUN(argv) returns (stdout, returncode) and does not raise. Members on HERA_HOST are read from `agent-deck list
     --json`, the others from `agent-deck remote sessions HOST --json --with-errors`, one call for each host, and
-    matched to rows by title, exactly. A member its host's listing does not hold has host_ok true and every other
-    field None; a host that does not answer (see deck_sessions) gives each of its members host_ok false and every
-    other field None, so a silent host is never read as stopped members. A field a row lacks or holds in the wrong
-    form is None, or "unknown" for bg; nothing raises."""
+    matched to rows by title, exactly; of several rows with one title the best by row_rank is read. A member its
+    host's listing does not hold has host_ok true and every other field None; a host that does not answer (see
+    deck_sessions), or has no name, gives each of its members host_ok false and every other field None, so a silent
+    host is never read as stopped members. A field a row lacks or holds in the wrong form is None, or "unknown" for
+    bg; nothing raises."""
     rows = {}
     for host in dict.fromkeys(m.host for m in members):  # each host once, in roster order
         if host == hera_host:
             argv = ["agent-deck", "list", "--json"]
         else:
             argv = ["agent-deck", "remote", "sessions", host, "--json", "--with-errors"]
-        sessions = deck_sessions(run, argv)
+        sessions = deck_sessions(run, argv) if host else None  # with no host name, agent-deck would answer for every remote
         by_title = {}
         for session in sessions or []:
-            if isinstance(session.get("title"), str):
-                by_title.setdefault(session["title"], session)  # agent-deck lists a title once; were it twice, the first row wins
+            title = session.get("title")
+            if isinstance(title, str) and (title not in by_title or row_rank(session) > row_rank(by_title[title])):
+                by_title[title] = session  # on a tie the row listed first stays
         for m in members:
             if m.host == host:
                 session = by_title.get(m.name, {})
                 rows[m.name] = {"status": text_of(session.get("status")), "substate": text_of(session.get("substate")), "bg": background_kind(session),
-                                "last_activity": utc_of(session.get("last_activity_at")), "host_ok": sessions is not None}
+                                "last_activity": utc_of(session.get("last_activity_at")), "archived": bool_of(session.get("archived")),
+                                "host_ok": sessions is not None}
     return rows
 
 
@@ -524,17 +542,18 @@ Model ingestion: convert, evaluate, publish.
 |------|------|
 | 2026-11-02 | opened |
 """
-# Rows as agent-deck printed them on 2026-10-31, cut down to the title, the status fields and the background work: `list --json`
-# on hera (a bare array) and `remote sessions andoria-08 --json --with-errors` (an object, with an errors list).
+# Rows as agent-deck printed them on 2026-10-31, cut down to the title, the status fields, the last activity and the background
+# work: `list --json` on hera (a bare array) and `remote sessions andoria-08 --json --with-errors` (an object, with an errors list).
 HERA_LIST = [
-    {"title": "wiggum", "status": "running", "substate": "background-work", "last_activity_at": "2026-10-31T15:39:01.595015-07:00",
+    {"title": "wiggum", "status": "running", "substate": "background-work", "archived": False, "last_activity_at": "2026-10-31T15:39:01.595015-07:00",
      "background_work": {"kind": "workflow", "task": "wiggum-phase2a-understand", "step": 4, "steps": 5, "elapsed": "24m40s", "source": "pane"}},
-    {"title": "mail-conductor", "status": "waiting", "substate": "idle-at-empty-prompt", "last_activity_at": "2026-10-31T22:32:31Z"},
-    {"title": "ares-review", "status": "waiting", "last_activity_at": "2026-10-28T12:49:37-07:00"},
+    {"title": "mail-conductor", "status": "waiting", "substate": "idle-at-empty-prompt", "archived": False, "last_activity_at": "2026-10-31T22:32:31Z"},
+    {"title": "ares-review", "status": "waiting", "archived": False, "last_activity_at": "2026-10-28T12:49:37-07:00"},
 ]
-ANDORIA_LIST = {"sessions": [{"title": "pipeline", "status": "waiting", "substate": "watching", "last_activity_at": "2026-10-31T22:29:07Z",
+ANDORIA_LIST = {"sessions": [{"title": "pipeline", "status": "waiting", "substate": "watching", "archived": False, "last_activity_at": "2026-10-31T22:29:07Z",
                               "substate_detail": "1 watching \u00b7 board headings and reviews on the eleven stacked PRs"}],
                 "errors": []}
+NO_FIELDS = {"status": None, "substate": None, "bg": None, "last_activity": None, "archived": None}  # what a Row holds with no row to read
 
 
 def fake_run(mapping):
@@ -556,6 +575,24 @@ def fake_run(mapping):
     return run
 
 
+def row_for(*sessions):
+    """The Row that deck_rows gives the hera member omlx when agent-deck lists a session titled omlx for each of SESSIONS
+    (dicts of fields), in that order."""
+    listing = json.dumps([{"title": "omlx", **session} for session in sessions])
+    return deck_rows(fake_run({"list": listing}), [Member("omlx", "hera", "pi")])["omlx"]
+
+
+def row_of(**fields):
+    """The Row that deck_rows gives omlx when agent-deck lists one session with FIELDS."""
+    return row_for(fields)
+
+
+def test_table_rows(d):
+    lines = ["| name | host |", "|:-----|-----:|", "  |:----:|:----:|", "| --- | :---: |", "| a | b | c |", "| d |", "not a row", "|", "| | |", "  | e | f |"]
+    ok(list(table_rows(lines, 2)) == [["name", "host"], ["a", "b"], ["d", ""], ["e", "f"]],
+       "table: rows are cut to the width and padded to it, and separator rows (colon-aligned or spaced), empty rows and prose are skipped")
+
+
 def test_roster_parses_and_refuses(d):
     members = load_roster(write(d, "TOPIC.md", TOPIC_WITH_TABLE))   # pipeline/andoria-08/claude, omlx/hera/pi, glm-5.2/andoria-08/claude
     ok([m.name for m in members] == ["pipeline", "omlx", "glm-5.2"], "roster: names in table order")
@@ -571,6 +608,8 @@ def test_roster_reads_only_its_table(d):
     ok(load_roster(write(d, "TOPIC.md", capitalised)) == members, "roster: the heading and the header row may be in any case")
     extra = TOPIC_WITH_TABLE.replace("| name | host | harness |", "| name | host | harness | notes |").replace("| omlx | hera | pi |", "| omlx | hera | pi | Pi loop |")
     ok(load_roster(write(d, "TOPIC.md", extra)) == members, "roster: cells after the third are ignored")
+    aligned = TOPIC_WITH_TABLE.replace("|------|------|---------|", "|:-----|:----:|--------:|")
+    ok(aligned != TOPIC_WITH_TABLE and load_roster(write(d, "TOPIC.md", aligned)) == members, "roster: a colon-aligned separator row is not a member")
     last = TOPIC_WITH_TABLE[:TOPIC_WITH_TABLE.index("## History")].rstrip("\n")  # the table ends the file, with no newline
     ok(load_roster(write(d, "TOPIC.md", last)) == members, "roster: the table may end the file")
     ok(load_roster(write(d, "TOPIC.md", "## Members\n| name | host | harness |\n|---|---|---|\n")) == [], "roster: a table with no rows is a roster with no members")
@@ -592,6 +631,10 @@ def test_roster_refuses_what_it_cannot_read(d):
     twice = write(d, "TOPIC.md", TOPIC_WITH_TABLE.replace("| omlx | hera | pi |", "| pipeline | hera | pi |"))
     e = raises(RosterError, load_roster, twice)
     ok(e.name == "pipeline" and str(e) == "steward-signals: TOPIC.md: pipeline: listed twice", "roster: a name listed twice is refused, not resolved")
+    nohost = write(d, "TOPIC.md", TOPIC_WITH_TABLE.replace("| omlx | hera | pi |", "| omlx |  | pi |"))
+    e = raises(RosterError, load_roster, nohost)
+    ok(e.name == "omlx" and str(e) == "steward-signals: TOPIC.md: omlx: empty host", "roster: a member with no host is refused")
+    ok(raises(RosterError, load_roster, write(d, "TOPIC.md", TOPIC_WITH_TABLE.replace("| omlx | hera | pi |", "| omlx |"))).name == "omlx", "roster: so is a row that ends before its host cell")
 
 
 def test_roster_message_has_no_question_mark(d):
@@ -626,10 +669,10 @@ def test_failed_host_marks_unknown(d):
 def test_real_rows(d):
     members = [Member("wiggum", "hera", "claude"), Member("mail-conductor", "hera", "claude"), Member("ares-review", "hera", "claude"), Member("pipeline", "andoria-08", "claude")]
     rows = deck_rows(fake_run({"list": json.dumps(HERA_LIST), "remote andoria-08": json.dumps(ANDORIA_LIST)}), members)
-    ok(rows["wiggum"] == {"status": "running", "substate": "background-work", "bg": "tool", "last_activity": "2026-10-31T22:39:01Z", "host_ok": True}, "deck: a real hera row with workflow background work")
-    ok(rows["mail-conductor"] == {"status": "waiting", "substate": "idle-at-empty-prompt", "bg": None, "last_activity": "2026-10-31T22:32:31Z", "host_ok": True}, "deck: a real waiting row")
-    ok(rows["ares-review"] == {"status": "waiting", "substate": None, "bg": None, "last_activity": "2026-10-28T19:49:37Z", "host_ok": True}, "deck: a real row with no substate, its offset stamp read as UTC")
-    ok(rows["pipeline"] == {"status": "waiting", "substate": "watching", "bg": "shell", "last_activity": "2026-10-31T22:29:07Z", "host_ok": True}, "deck: a real remote row that is watching counts as shell work")
+    ok(rows["wiggum"] == {"status": "running", "substate": "background-work", "bg": "tool", "last_activity": "2026-10-31T22:39:01Z", "archived": False, "host_ok": True}, "deck: a real hera row with workflow background work")
+    ok(rows["mail-conductor"] == {"status": "waiting", "substate": "idle-at-empty-prompt", "bg": None, "last_activity": "2026-10-31T22:32:31Z", "archived": False, "host_ok": True}, "deck: a real waiting row")
+    ok(rows["ares-review"] == {"status": "waiting", "substate": None, "bg": None, "last_activity": "2026-10-28T19:49:37Z", "archived": False, "host_ok": True}, "deck: a real row with no substate, its offset stamp read as UTC")
+    ok(rows["pipeline"] == {"status": "waiting", "substate": "watching", "bg": "shell", "last_activity": "2026-10-31T22:29:07Z", "archived": False, "host_ok": True}, "deck: a real remote row that is watching counts as shell work")
 
 
 def test_one_call_per_host(d):
@@ -644,6 +687,8 @@ def test_one_call_per_host(d):
     ok(deck_rows(run, [Member("athena", "athena", "claude")], hera_host="athena")["athena"]["status"] == "idle" and run.calls == [["agent-deck", "list", "--json"]], "deck: hera_host names the host that agent-deck list answers for")
     run = fake_run({})
     ok(deck_rows(run, []) == {} and run.calls == [], "deck: no members, no calls")
+    rows = deck_rows(run, [Member("omlx", "", "pi")])
+    ok(run.calls == [] and rows["omlx"] == {**NO_FIELDS, "host_ok": False}, "deck: a member with no host is unknown without a call, since agent-deck answers an empty remote name for every remote")
 
 
 def test_unreadable_answers_are_unknown(d):
@@ -660,7 +705,7 @@ def test_unreadable_answers_are_unknown(d):
                ("a failed command that printed a listing", (json.dumps(listing), 1)))
     for what, answer in answers:
         rows = deck_rows(fake_run({"list": "[]", "remote andoria-08": answer}), members)
-        ok(rows["pipeline"] == {"status": None, "substate": None, "bg": None, "last_activity": None, "host_ok": False} and rows["omlx"]["host_ok"], f"deck: {what} marks the host unknown")
+        ok(rows["pipeline"] == {**NO_FIELDS, "host_ok": False} and rows["omlx"]["host_ok"], f"deck: {what} marks the host unknown")
     rows = deck_rows(fake_run({"remote andoria-08": json.dumps(listing)}), members)  # nothing answers list, so it fails
     ok(rows["omlx"]["host_ok"] is False and rows["pipeline"]["host_ok"] and rows["pipeline"]["status"] == "waiting", "deck: a failed local listing marks hera's members unknown, and only them")
 
@@ -668,19 +713,18 @@ def test_unreadable_answers_are_unknown(d):
 def test_odd_rows_read_as_far_as_they_go(d):
     members = [Member(name, "hera", "claude") for name in ("pi", "pipeline", "omlx", "syncthing", "ares")]
     listing = [{"title": "pipeline", "status": "running"}, "a stray string", None, {"status": "idle"}, {"title": 7, "status": "idle"}, {"title": ["ares"], "status": "idle"},
-               {"title": "omlx", "status": 5, "substate": ["x"], "last_activity_at": "yesterday", "background_work": "sleep 5"},
+               {"title": "omlx", "status": 5, "substate": ["x"], "archived": "yes", "last_activity_at": "yesterday", "background_work": "sleep 5"},
                {"title": "syncthing", "status": ""}]
     rows = deck_rows(fake_run({"list": json.dumps(listing)}), members)
     ok(rows["pi"]["status"] is None and rows["pi"]["host_ok"] and rows["pipeline"]["status"] == "running", "deck: a title matches exactly, so pi is not pipeline")
-    ok(rows["ares"] == {"status": None, "substate": None, "bg": None, "last_activity": None, "host_ok": True}, "deck: rows with no title, or a title that is not text, are skipped")
-    ok(rows["omlx"] == {"status": None, "substate": None, "bg": "unknown", "last_activity": None, "host_ok": True}, "deck: fields of the wrong type are unknown, not an error")
+    ok(rows["ares"] == {**NO_FIELDS, "host_ok": True}, "deck: rows with no title, or a title that is not text, are skipped")
+    ok(rows["omlx"] == {**NO_FIELDS, "bg": "unknown", "host_ok": True}, "deck: fields of the wrong type are unknown, not an error")
     ok(rows["syncthing"]["status"] is None, "deck: an empty status is unknown")
 
 
 def test_background_work_kinds(d):
     def bg_of(**fields):
-        listing = json.dumps([{"title": "omlx", "status": "running", **fields}])
-        return deck_rows(fake_run({"list": listing}), [Member("omlx", "hera", "pi")])["omlx"]["bg"]
+        return row_of(**fields)["bg"]
 
     for task in ("sleep 600", "Sleep 5", "tail -f x", "watch -n 5 ls", "sh -c 'make'", "bash -c 'make'"):
         ok(bg_of(background_work={"task": task}) == "shell", f"deck: background work {task!r} is shell work")
@@ -697,8 +741,7 @@ def test_background_work_kinds(d):
 
 def test_last_activity_is_utc(d):
     def last_activity(stamp):
-        listing = json.dumps([{"title": "omlx", "last_activity_at": stamp}])
-        return deck_rows(fake_run({"list": listing}), [Member("omlx", "hera", "pi")])["omlx"]["last_activity"]
+        return row_of(last_activity_at=stamp)["last_activity"]
 
     ok(last_activity("2026-10-31T22:32:31Z") == "2026-10-31T22:32:31Z", "deck: a UTC stamp is kept")
     ok(last_activity("2026-10-31T15:39:01.595015-07:00") == "2026-10-31T22:39:01Z", "deck: an offset stamp with a fraction is read as UTC to the second")
@@ -706,8 +749,33 @@ def test_last_activity_is_utc(d):
         ok(last_activity(odd) is None, f"deck: {odd!r} is not a stamp with a zone")
 
 
+def test_archived_flag(d):
+    ok(row_of(archived=True)["archived"] is True and row_of(archived=False)["archived"] is False, "deck: archived is the bool agent-deck gives")
+    ok(row_of()["archived"] is None, "deck: a row with no archived field has archived None, not False")
+    for odd in ("true", 1, None, []):
+        ok(row_of(archived=odd)["archived"] is None, f"deck: archived {odd!r} is not a bool, so it is unknown")
+
+
+def test_a_title_listed_twice_reads_as_its_best_row(d):
+    stopped = {"status": "stopped", "last_activity_at": "2026-10-31T20:00:00Z"}
+    archived = {"status": "idle", "archived": True, "last_activity_at": "2026-10-31T21:00:00Z"}
+    running = {"status": "running", "last_activity_at": "2026-10-31T10:00:00Z"}
+    for what, dead in (("stopped", stopped), ("archived", archived)):
+        ok(row_for(dead, running)["status"] == "running" and row_for(running, dead)["status"] == "running", f"deck: a {what} row never hides a live one with its title, in either order")
+    later = {"status": "waiting", "last_activity_at": "2026-10-31T12:00:00Z"}
+    ok(row_for(running, later)["status"] == "waiting" and row_for(later, running)["status"] == "waiting", "deck: of two live rows the later last_activity wins, in either order")
+    offset_later = {"status": "waiting", "last_activity_at": "2026-10-31T15:39:01-07:00"}  # 22:39:01Z: later than utc_earlier, though its digits are smaller
+    utc_earlier = {"status": "running", "last_activity_at": "2026-10-31T22:32:31Z"}
+    ok(row_for(utc_earlier, offset_later)["status"] == "waiting" and row_for(offset_later, utc_earlier)["status"] == "waiting", "deck: last_activity is compared as a time, not by its digits")
+    ok(row_for({"status": "idle", "last_activity_at": "yesterday"}, later)["status"] == "waiting" and row_for(later, {"status": "idle"})["status"] == "waiting", "deck: a row whose last_activity cannot be read ranks last")
+    ok(row_for({"status": "idle"}, {"status": "waiting"})["status"] == "idle", "deck: when nothing tells two live rows apart, the first listed stays")
+    older = {"status": "stopped", "last_activity_at": "2026-10-30T20:00:00Z"}
+    ok(row_for(older, stopped)["last_activity"] == "2026-10-31T20:00:00Z" and row_for(stopped, older)["last_activity"] == "2026-10-31T20:00:00Z", "deck: with no live row, the later last_activity wins")
+
+
 @section("deck")
 def section_deck(d):
+    test_table_rows(d)
     test_roster_parses_and_refuses(d)
     test_roster_reads_only_its_table(d)
     test_roster_name_grammar(d)
@@ -722,6 +790,8 @@ def section_deck(d):
     test_odd_rows_read_as_far_as_they_go(d)
     test_background_work_kinds(d)
     test_last_activity_is_utc(d)
+    test_archived_flag(d)
+    test_a_title_listed_twice_reads_as_its_best_row(d)
 
 
 # ---- main ----
