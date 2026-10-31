@@ -23,7 +23,3 @@ The same rows as POLICY.md, with short thresholds so the day-zero checks on `+st
 | tick_idle_min | 2 | Minutes between ticks otherwise |
 | summary_local_time | 07:30 | Local time, on a 24-hour clock, at or after which the first turn of the day posts the one-paragraph SUMMARY |
 | summary_tz | America/Los_Angeles | Time zone of summary_local_time, as a tz database name |
-| price_in | 4.00 | Dollars per million input tokens |
-| price_cache_write | 5.00 | Dollars per million cache-write tokens |
-| price_cache_read | 0.20 | Dollars per million cache-read tokens |
-| price_out | 20.00 | Dollars per million output tokens |

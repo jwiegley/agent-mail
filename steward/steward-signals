@@ -4,10 +4,10 @@
 A topic steward is an agent-deck conductor that watches one agent-mail channel. This helper reads
 metadata only: it never opens a message file, never writes to the mailbox and never sends anything.
 
-POLICY.md holds the steward's thresholds, self-caps and token prices as a Markdown table,
-| key | value | meaning |, with one row for each key that steward/POLICY.md in the repository lists. A
-missing, unknown or repeated key, or a value that is not a number where a number is required, is refused
-with the key named; nothing falls back to a default.
+POLICY.md holds the steward's thresholds and self-caps as a Markdown table, | key | value | meaning |, with
+one row for each key in POLICY_KEYS. A missing, unknown or repeated key, or a value its key cannot use (a
+number above zero; for summary_local_time a time of day, HH:MM; for summary_tz a tz database name), is
+refused with the key named; nothing falls back to a default.
 
 Commands:
   self-test [SECTION ...]
@@ -21,56 +21,68 @@ import os
 import re
 import sys
 import tempfile
+import zoneinfo
 
 REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))  # the directory that holds steward/
 POLICY_KEYS = (
     "stale_min", "idle_min", "question_min", "nudge_gap_min", "nudges_per_item_day", "busy_stuck_h", "deaf_min",
     "offer_items", "offer_every_h", "sends_per_turn", "sends_per_hour", "ledger_kb", "log_days", "back_after_min",
     "doorbell_delay_min", "tick_active_min", "tick_idle_min", "summary_local_time", "summary_tz",
-    "price_in", "price_cache_write", "price_cache_read", "price_out",
 )
-POLICY_TEXT_KEYS = ("summary_local_time", "summary_tz")  # the keys whose value is text; every other value is a number
-POLICY_PRICE_KEYS = ("price_in", "price_cache_write", "price_cache_read", "price_out")  # dollars per million tokens, always decimals
 NUMBER_RE = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+TIME_RE = re.compile(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]")
 
 
 # ---- policy ----
 
 class PolicyError(Exception):
-    """A POLICY.md the helper refuses. .key names the row that is wrong, .reason says how."""
+    """A POLICY.md the helper refuses. .key names the row that is wrong and .reason says how, both as the file has
+    them. The message leaves out any question mark they hold, because nothing the steward prints may carry one."""
 
     def __init__(self, key, reason):
-        super().__init__(f"steward-signals: POLICY.md: {key}: {reason}")
+        super().__init__(f"steward-signals: POLICY.md: {key}: {reason}".replace("?", ""))
         self.key = key
         self.reason = reason
 
 
 def policy_rows(text):
-    """(key, value) for each data row of the Markdown tables in TEXT: the lines that start with "|",
-    less each header row and each separator row."""
+    """(key, value) for each data row of the Markdown tables in TEXT: the lines that start with "|", less each
+    header row (the cells key and value, in any case) and each separator row. Any other row is a data row, so
+    one that only looks like the header is refused later as an unknown key."""
     for line in text.splitlines():
         if line.lstrip().startswith("|"):
             cells = [cell.strip() for cell in line.strip().strip("|").split("|")] + ["", ""]  # padded: a short row has no value
             key, value = cells[0], cells[1]
-            if key.lower() != "key" and (key + value).strip("-: "):  # a separator row is only dashes and colons
+            header = key.casefold() == "key" and value.casefold() == "value"
+            separator = not (key + value).strip("-: ")  # only dashes and colons
+            if not (header or separator):
                 yield key, value
 
 
 def policy_value(key, text):
-    """The value of one row: TEXT itself for a text key, else a number, always a float for a price."""
+    """The value of one row: the time of day for summary_local_time, a tz database name for summary_tz,
+    else a number above zero."""
     if not text:
         raise PolicyError(key, "no value")
-    if key in POLICY_TEXT_KEYS:
+    if key == "summary_local_time":
+        if TIME_RE.fullmatch(text) is None:
+            raise PolicyError(key, f"expected a time of day such as 07:30, got {text!r}")
         return text
-    if NUMBER_RE.fullmatch(text) is None:
-        raise PolicyError(key, f"expected a number such as 45 or 0.5, got {text!r}")
-    return float(text) if "." in text or key in POLICY_PRICE_KEYS else int(text)
+    if key == "summary_tz":
+        try:
+            zoneinfo.ZoneInfo(text)
+        except (zoneinfo.ZoneInfoNotFoundError, ValueError, OSError):
+            raise PolicyError(key, f"expected a tz database name such as America/Los_Angeles, got {text!r}") from None
+        return text
+    if NUMBER_RE.fullmatch(text) is None or float(text) == 0:
+        raise PolicyError(key, f"expected a number above zero, such as 45 or 0.5, got {text!r}")
+    return float(text) if "." in text else int(text)
 
 
 def load_policy(path):
-    """The thresholds, self-caps and prices in the POLICY.md table at PATH, by key, in POLICY_KEYS order.
-    Each key must have exactly one row: a missing, unknown or repeated key, or a value that is not a number
-    where one is required, raises PolicyError, so a typo is never replaced by a default."""
+    """The thresholds and self-caps in the POLICY.md table at PATH, by key, in POLICY_KEYS order.
+    Each key must have exactly one row: a missing, unknown or repeated key, or a value its key cannot use,
+    raises PolicyError, so a typo is never replaced by a default."""
     with open(path, encoding="utf-8") as f:
         text = f.read()
     policy = {}
@@ -95,11 +107,15 @@ CHECKS = 0  # checks passed so far, in every section
 ISOLATED = ("AGENT_MAIL_", "AGENTDECK_", "AGENT_DECK_")
 
 
+class TestFailed(Exception):
+    """A check that did not hold; self_test is the only place that catches it. The message is what the check says."""
+
+
 def ok(cond, what):
-    """Count a passed check, or end the self-test naming the one that failed."""
+    """Count a passed check, or raise TestFailed naming the one that failed."""
     global CHECKS
     if not cond:
-        raise SystemExit(f"steward-signals self-test FAILED: {what}")
+        raise TestFailed(what)
     CHECKS += 1
 
 
@@ -172,12 +188,17 @@ def run_section(name):
 
 
 def self_test(names=()):
-    """Run the named sections, or every section, in the order they are defined."""
+    """Run the named sections, or every section, in the order they are defined. The first failed check ends the run."""
     unknown = [n for n in names if n not in SECTIONS]
     if unknown:
         print(f"steward-signals: no self-test section {unknown[0]!r}; the sections are {', '.join(SECTIONS)}", file=sys.stderr)
         return 2
-    total = sum(run_section(name) for name in SECTIONS if not names or name in names)
+    chosen = [name for name in SECTIONS if not names or name in names]  # fixed now: a check may register a section for a moment
+    try:
+        total = sum(run_section(name) for name in chosen)
+    except TestFailed as e:
+        print(f"steward-signals self-test FAILED: {e}", file=sys.stderr)
+        return 1
     print(f"steward-signals self-test: {total} checks passed")
     return 0
 
@@ -188,8 +209,10 @@ def test_harness_contract(d):
     before = CHECKS
     ok(True, "harness: a true check passes")
     ok(CHECKS == before + 1, "harness: a pass is counted")
-    ok(raises(SystemExit, ok, False, "boom").code == "steward-signals self-test FAILED: boom", "harness: a false check names itself and exits")
-    ok("raised no KeyError" in raises(SystemExit, raises, KeyError, dict).code, "harness: raises fails when nothing is raised")
+    ok(str(raises(TestFailed, ok, False, "boom")) == "boom", "harness: a false check raises TestFailed naming itself")
+    ok("raised no KeyError" in str(raises(TestFailed, raises, KeyError, dict)), "harness: raises fails when nothing is raised")
+    ok(str(raises(TestFailed, raises, SystemExit, ok, False, "inner")) == "inner", "harness: raises does not absorb a failed check, even when it expects SystemExit")
+    ok(str(raises(TestFailed, capture, ok, False, "inside")) == "inside", "harness: capture does not absorb a failed check")
 
     def speak(status):
         print("to stdout")
@@ -201,6 +224,13 @@ def test_harness_contract(d):
     ok(read(write(d, "t.txt", "a\u2026b\n")) == "a\u2026b\n", "harness: write and read round-trip UTF-8")
     out, status, err = capture(main, ["self-test", "nosuch"])
     ok(status == 2 and out == "" and "no self-test section 'nosuch'" in err and "policy" in err, "harness: an unknown section is refused, naming the sections")
+    SECTIONS["failing"] = lambda root: ok(False, "boom")
+    try:
+        failed = capture(self_test, ["failing"])
+    finally:
+        del SECTIONS["failing"]
+    ok(failed == ("", 1, "steward-signals self-test FAILED: boom\n"), "harness: a failed check ends the self-test with status 1 and the FAILED line")
+    ok(os.environ["HOME"] == d, "harness: a failed section still restores the environment")
 
 
 def test_sections_are_isolated(d):
@@ -224,28 +254,26 @@ def test_policy_parses_spec_values(d):
     ok(p["nudges_per_item_day"] == 2 and p["busy_stuck_h"] == 2 and p["deaf_min"] == 15, "policy: nudge and deaf values")
     ok(p["tick_active_min"] == 15 and p["tick_idle_min"] == 60 and p["doorbell_delay_min"] == 5, "policy: ticks and delay")
     ok(p["summary_local_time"] == "07:30" and p["summary_tz"] == "America/Los_Angeles", "policy: summary time")
-    ok(all(isinstance(p[k], float) for k in ("price_in", "price_cache_write", "price_cache_read", "price_out")), "policy: prices are decimals")
     ok(p["nudge_gap_min"] == 30 and p["offer_items"] == 3 and p["offer_every_h"] == 2, "policy: nudge gap and offer limits")
     ok(p["sends_per_turn"] == 6 and p["sends_per_hour"] == 20 and p["ledger_kb"] == 8 and p["log_days"] == 14 and p["back_after_min"] == 30, "policy: send caps, ledger, logs, back-after")
-    ok(p["price_cache_read"] < p["price_in"] < p["price_cache_write"] < p["price_out"], "policy: prices are in the right columns")
-    ok(len(p) == 23, "policy: 23 keys")
+    ok(len(p) == 19, "policy: 19 keys")
     test = load_policy(os.path.join(REPO, "steward", "POLICY-test.md"))
     ok(type(p["stale_min"]) is int and type(test["busy_stuck_h"]) is float, "policy: whole numbers are ints, decimals floats")
+
+
+def table_with(table, key, row):
+    """The Markdown TABLE with the row for KEY replaced by ROW, which may be empty."""
+    return "".join(row if line.startswith(f"| {key} |") else line for line in table.splitlines(True))
 
 
 def test_policy_refuses_bad_values(d):
     # Each variant is written over d/POLICY.md and checked at once, before the next one replaces it.
     TABLE = read(os.path.join(REPO, "steward", "POLICY.md"))
-
-    def table_with(key, row):
-        """TABLE with the row for KEY replaced by ROW, which may be empty."""
-        return "".join(row if line.startswith(f"| {key} |") else line for line in TABLE.splitlines(True))
-
     bad = write(d, "POLICY.md", TABLE.replace("| stale_min | 45 |", "| stale_min | forty-five |"))
     ok(raises(PolicyError, load_policy, bad).key == "stale_min", "policy: non-numeric value names its key")
     e = raises(PolicyError, load_policy, bad)
-    ok(str(e) == f"steward-signals: POLICY.md: stale_min: {e.reason}" and "forty-five" in e.reason and "?" not in str(e), "policy: the message names the file, the key and the reason")
-    missing = write(d, "POLICY.md", table_with("idle_min", ""))
+    ok(str(e) == f"steward-signals: POLICY.md: stale_min: {e.reason}" and "forty-five" in e.reason, "policy: the message names the file, the key and the reason")
+    missing = write(d, "POLICY.md", table_with(TABLE, "idle_min", ""))
     ok(raises(PolicyError, load_policy, missing).key == "idle_min", "policy: missing key named")
     unknown = write(d, "POLICY.md", TABLE + "| idel_min | 20 | typo |\n")
     ok(raises(PolicyError, load_policy, unknown).key == "idel_min", "policy: unknown key named, no silent default")
@@ -257,16 +285,56 @@ def test_policy_refuses_bad_values(d):
     twice = write(d, "POLICY.md", TABLE + "| stale_min | 99 | again |\n")
     ok(raises(PolicyError, load_policy, twice).key == "stale_min", "policy: a key listed twice is refused, not resolved")
     for value in ("nan", "inf", "-5", "1e3", "45 min", "4,5"):
-        odd = write(d, "POLICY.md", table_with("deaf_min", f"| deaf_min | {value} | odd |\n"))
+        odd = write(d, "POLICY.md", table_with(TABLE, "deaf_min", f"| deaf_min | {value} | odd |\n"))
         ok(raises(PolicyError, load_policy, odd).key == "deaf_min", f"policy: {value!r} is not a number")
-    novalue = write(d, "POLICY.md", table_with("deaf_min", "| deaf_min |  | blank |\n"))
-    ok(raises(PolicyError, load_policy, novalue).key == "deaf_min", "policy: a number key with no value is refused")
-    notext = write(d, "POLICY.md", table_with("summary_tz", "| summary_tz |  | blank |\n"))
-    ok(raises(PolicyError, load_policy, notext).key == "summary_tz", "policy: a text key with no value is refused")
-    short = write(d, "POLICY.md", table_with("deaf_min", "| deaf_min |\n"))
-    ok(raises(PolicyError, load_policy, short).key == "deaf_min", "policy: a row with no value cell is refused, not a crash")
-    whole = write(d, "POLICY.md", table_with("price_in", "| price_in | 5 | whole dollars |\n"))
-    ok(type(load_policy(whole)["price_in"]) is float, "policy: a price written as a whole number is still a decimal")
+    novalue = write(d, "POLICY.md", table_with(TABLE, "deaf_min", "| deaf_min |  | blank |\n"))
+    e = raises(PolicyError, load_policy, novalue)
+    ok(e.key == "deaf_min" and e.reason == "no value", "policy: a number key with no value is refused as having no value")
+    notext = write(d, "POLICY.md", table_with(TABLE, "summary_tz", "| summary_tz |  | blank |\n"))
+    e = raises(PolicyError, load_policy, notext)
+    ok(e.key == "summary_tz" and e.reason == "no value", "policy: a text key with no value is refused as having no value")
+    short = write(d, "POLICY.md", table_with(TABLE, "deaf_min", "| deaf_min |\n"))
+    e = raises(PolicyError, load_policy, short)
+    ok(e.key == "deaf_min" and e.reason == "no value", "policy: a row with no value cell is refused as having no value, not a crash")
+
+
+def test_policy_header_and_stray_rows(d):
+    TABLE = read(os.path.join(REPO, "steward", "POLICY.md"))
+    capitalised = write(d, "POLICY.md", TABLE.replace("| key | value | meaning |", "| Key | Value | Meaning |"))
+    ok(load_policy(capitalised) == load_policy(os.path.join(REPO, "steward", "POLICY.md")), "policy: a capitalised header row is still a header")
+    for stray_key in ("Key", "key"):
+        stray = write(d, "POLICY.md", TABLE + f"| {stray_key} | 5 | stray |\n")
+        ok(raises(PolicyError, load_policy, stray).key == stray_key, f"policy: a row {stray_key!r} | 5 is refused as an unknown key, not skipped as a header")
+
+
+def test_policy_checks_values(d):
+    TABLE = read(os.path.join(REPO, "steward", "POLICY.md"))
+
+    def with_value(key, value):
+        """The path of a POLICY.md in which KEY has VALUE, written over d/POLICY.md and to be used at once."""
+        return write(d, "POLICY.md", table_with(TABLE, key, f"| {key} | {value} | odd |\n"))
+
+    for value in ("banana", "7:30", "24:00", "07:60", "0730", "07:30pm"):
+        ok(raises(PolicyError, load_policy, with_value("summary_local_time", value)).key == "summary_local_time", f"policy: {value!r} is not a time of day")
+    for value in ("00:00", "23:59"):
+        ok(load_policy(with_value("summary_local_time", value))["summary_local_time"] == value, f"policy: {value} is a time of day")
+    for value in ("America/Los_Angelas", "banana", "America/", "../etc/passwd"):
+        ok(raises(PolicyError, load_policy, with_value("summary_tz", value)).key == "summary_tz", f"policy: {value!r} is not a tz database name")
+    ok(load_policy(with_value("summary_tz", "UTC"))["summary_tz"] == "UTC", "policy: UTC is a tz database name")
+    for value in ("0", "0.0", "00"):
+        ok(raises(PolicyError, load_policy, with_value("tick_active_min", value)).key == "tick_active_min", f"policy: {value!r} is not above zero")
+    ok(load_policy(with_value("tick_active_min", "0.5"))["tick_active_min"] == 0.5, "policy: a fraction above zero is a number")
+
+
+def test_policy_message_has_no_question_mark(d):
+    TABLE = read(os.path.join(REPO, "steward", "POLICY.md"))
+    variants = (("a value", table_with(TABLE, "stale_min", "| stale_min | 45? | odd |\n"), "stale_min"),
+                ("a key", TABLE + "| idel_min? | 20 | typo |\n", "idel_min?"),
+                ("a time", table_with(TABLE, "summary_local_time", "| summary_local_time | soon? | odd |\n"), "summary_local_time"),
+                ("a zone", table_with(TABLE, "summary_tz", "| summary_tz | Mars/Olympus? | odd |\n"), "summary_tz"))
+    for what, text, key in variants:
+        e = raises(PolicyError, load_policy, write(d, "POLICY.md", text))
+        ok(e.key == key and "?" not in str(e) and key.replace("?", "") in str(e), f"policy: a question mark in {what} does not reach the message")
 
 
 @section("policy")
@@ -275,6 +343,9 @@ def section_policy(d):
     test_sections_are_isolated(d)
     test_policy_parses_spec_values(d)
     test_policy_refuses_bad_values(d)
+    test_policy_header_and_stray_rows(d)
+    test_policy_checks_values(d)
+    test_policy_message_has_no_question_mark(d)
 
 
 # ---- main ----

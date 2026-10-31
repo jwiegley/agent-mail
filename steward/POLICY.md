@@ -1,8 +1,8 @@
 # Steward policy
 
-The thresholds, self-caps and prices a topic steward works by, one row for each key. They live here and nowhere else: the steward reads this file at the start of every turn, and its instructions refer to the rows by key. John edits the copy in the conductor's directory, not the one in the checkout; a change takes effect at the steward's next turn.
+The thresholds and self-caps a topic steward works by, one row for each key. They live here and nowhere else: the steward reads this file at the start of every turn, and its instructions refer to the rows by key. John edits the copy in the conductor's directory, not the one in the checkout; a change takes effect at the steward's next turn.
 
-`steward-signals` refuses a file that lacks a key, lists a key twice, has a key it does not know, or gives a number key a value that is not a number, and it names the key. Nothing falls back to a default, so keep every row and spell each key exactly. The two summary rows are text; every other value is a number. The prices are dollars per million tokens at the list prices of Claude Opus 5.5, with cache writes at the 5-minute rate; change all four together if the stewards run another model.
+`steward-signals` refuses a file that lacks a key, lists a key twice, has a key it does not know, or gives a key a value it cannot use, and it names the key. Nothing falls back to a default, so keep every row and spell each key exactly. Every value is a number above zero, except the two summary rows: summary_local_time is a time of day as HH:MM, and summary_tz is a tz database name.
 
 | key | value | meaning |
 |---|---|---|
@@ -25,7 +25,3 @@ The thresholds, self-caps and prices a topic steward works by, one row for each 
 | tick_idle_min | 60 | Minutes between ticks otherwise |
 | summary_local_time | 07:30 | Local time, on a 24-hour clock, at or after which the first turn of the day posts the one-paragraph SUMMARY |
 | summary_tz | America/Los_Angeles | Time zone of summary_local_time, as a tz database name |
-| price_in | 4.00 | Dollars per million input tokens |
-| price_cache_write | 5.00 | Dollars per million cache-write tokens |
-| price_cache_read | 0.20 | Dollars per million cache-read tokens |
-| price_out | 20.00 | Dollars per million output tokens |
