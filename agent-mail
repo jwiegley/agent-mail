@@ -1373,7 +1373,8 @@ def collect(d, name, settings, state, max_bytes, now):
     elif state.get("since_all") is None:
         state["since_all"] = now - REPLAY
     record = read_member(member_path(d, name))
-    if record is not None and record["host"] != HOST and 0 <= now - parse_utc(record["checked"]) < DUPLICATE_READER:
+    # Within 10 minutes either way: another host's clock may run a little ahead of ours.
+    if record is not None and record["host"] != HOST and abs(now - parse_utc(record["checked"])) < DUPLICATE_READER:
         extra.append(f"agent-mail: another reader of {name} appears active on {escape(record['host'])}")
     done = False
     try:
@@ -3482,6 +3483,8 @@ def section_posts(t):
          "a failed write changes no seen set and copies nothing")
     t.mk(member_path(d, "a"), json.dumps({"v": 2, "name": "a", "host": "h2", "checked": utc(T0 - 60), "subs": ["fleet"]}))
     t.ok("another reader of a appears active on h2" in receive(d, "a", s, sink), "warns when the member record shows another host")
+    t.mk(member_path(d, "a"), json.dumps({"v": 2, "name": "a", "host": "h3", "checked": utc(T0 + 30), "subs": ["fleet"]}))
+    t.ok("another reader of a appears active on h3" in receive(d, "a", s, sink), "a record stamped a little ahead by another host's clock still warns")
 
     # Review Focus 3: bytes that are not UTF-8, or not printable, in names and bodies.
     raw = t.box("bytes")
