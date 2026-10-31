@@ -567,81 +567,172 @@ def parse_utc(text):
     return None
 
 
-def read_member(path):
-    """A member record, or None when it is missing, not ours, not a regular file or not valid.
-    Member records are peer-writable and only ever displayed or warned about."""
+def open_meta(d, rel, create=False):
+    """A descriptor for REL, one of the mailbox's own directories (.agent-mail,
+    .agent-mail/members or .agent-mail-presence), opened one component at a time without
+    following a symlink and made mode 0700 on the way when CREATE; None when it is missing
+    and CREATE is false. A symlink or a non-directory on the way is unsafe_mailbox, so a
+    planted link never steers a write outside the mailbox. The mailbox itself may be a
+    symlink, as ~/Products/mailbox is."""
+    fd, here = os.open(d, os.O_RDONLY | os.O_DIRECTORY), d
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        for part in rel.split("/"):
+            here = os.path.join(here, part)
+            if create:
+                with contextlib.suppress(FileExistsError):
+                    os.mkdir(part, 0o700, dir_fd=fd)
+            try:
+                sub = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except FileNotFoundError:
+                if create:
+                    raise
+                return None
+            except OSError as e:
+                if e.errno not in (errno.ELOOP, errno.ENOTDIR):
+                    raise
+                link = stat.S_ISLNK(os.stat(part, dir_fd=fd, follow_symlinks=False).st_mode)
+                raise MailError("unsafe_mailbox", f"{here} is {'a symlink' if link else 'not a directory'}; agent-mail uses only "
+                                                  "real directories inside the mailbox, so it refuses this mailbox until that is fixed") from None
+            os.close(fd)
+            fd = sub
+        opened, fd = fd, None
+        return opened
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def meta_fd(d, rel):
+    """open_meta for readers, which never create: None when REL is missing, unreadable or unsafe."""
+    try:
+        return open_meta(d, rel)
+    except (OSError, MailError):
+        return None
+
+
+def mailbox_problems(d):
+    """Why the mailbox's own directories are unsafe, one sentence each; empty when they are not."""
+    found = []
+    for rel in (".agent-mail/members", ".agent-mail-presence"):
+        try:
+            fd = open_meta(d, rel)
+        except MailError as e:
+            found.append(e.message)
+        except OSError:
+            pass
+        else:
+            if fd is not None:
+                os.close(fd)
+    return found
+
+
+def member_at(fd, name):
+    """NAME's record in the open members directory FD, or None when it is missing, not ours,
+    not a regular file or not valid. Member records are peer-writable and only ever
+    displayed or warned about."""
+    try:
+        mfd = os.open(f"{name}.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
     except OSError:
         return None
     try:
-        st = os.fstat(fd)
+        st = os.fstat(mfd)
         if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_size > 65536:
             return None
-        data = json.loads(os.read(fd, 65537).decode("utf-8"))
+        data = json.loads(os.read(mfd, 65537).decode("utf-8"))
     except (OSError, ValueError):
         return None
     finally:
-        os.close(fd)
+        os.close(mfd)
     if (isinstance(data, dict) and data.get("v") == 2 and isinstance(data.get("host"), str) and isinstance(data.get("subs"), list)
             and all(isinstance(s, str) for s in data["subs"]) and parse_utc(data.get("checked")) is not None):
         return data
     return None
 
 
+def read_member(d, name):
+    """NAME's member record (see member_at), or None, also when the members directory is
+    missing or unsafe."""
+    fd = meta_fd(d, ".agent-mail/members")
+    if fd is None:
+        return None
+    try:
+        return member_at(fd, name)
+    finally:
+        os.close(fd)
+
+
 def touch_member(d, name, subs, now, force=False):
     """Publish NAME's member record when its subscription list changes, when forced, or at
     most every 300 s, and touch the v1 presence file with it while v1 readers remain.
     Best effort: a mailbox that cannot be written is still read, and a mailbox that has
-    vanished is never re-created."""
+    vanished is never re-created. An unsafe directory on the way is unsafe_mailbox (see
+    open_meta), and every write and rename goes through a directory descriptor."""
     subs = sorted(subs)
-    path = member_path(d, name)
-    old = read_member(path)
+    old = read_member(d, name)
     if (not force and old is not None and old["host"] == HOST and old["subs"] == subs
             and 0 <= now - parse_utc(old["checked"]) < MEMBER_EVERY):
         return
     record = {"v": 2, "name": name, "host": HOST, "checked": utc(now), "subs": subs}
+    fds, tmp = [], None
     try:
-        for p in (os.path.join(d, ".agent-mail"), os.path.dirname(path), os.path.dirname(legacy_presence(d, name))):
-            with contextlib.suppress(FileExistsError):
-                os.mkdir(p, 0o700)
-        # A hidden .tmp name, which .stignore keeps on this host.
-        tmp = os.path.join(os.path.dirname(path), f".{name}.json.tmp")
-        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600), "w", encoding="utf-8") as f:
+        fds.append(open_meta(d, ".agent-mail/members", create=True))
+        fds.append(open_meta(d, ".agent-mail-presence", create=True))
+        folder, presence = fds
+        # A hidden .tmp name carrying our pid, which .stignore keeps on this host.
+        tmp = f".{name}.json.{os.getpid()}.tmp"
+        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=folder),
+                       "w", encoding="utf-8") as f:
             json.dump(record, f)
-        os.rename(tmp, path)
-        legacy = legacy_presence(d, name)
-        os.close(os.open(legacy, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600))
-        os.utime(legacy, (now, now))
+        os.rename(tmp, f"{name}.json", src_dir_fd=folder, dst_dir_fd=folder)
+        tmp = None
+        legacy = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=presence)
+        try:
+            os.utime(legacy, (now, now))
+        finally:
+            os.close(legacy)
     except OSError:
-        pass
+        if tmp is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp, dir_fd=fds[0])
+    finally:
+        for fd in fds:
+            os.close(fd)
 
 
 def members(d):
     """Every valid member record in the mailbox, by name."""
     out = {}
-    try:
-        entries = os.listdir(os.path.join(d, ".agent-mail", "members"))
-    except OSError:
+    fd = meta_fd(d, ".agent-mail/members")
+    if fd is None:
         return out
-    for entry in entries:
-        name = entry[:-len(".json")]
-        if entry.endswith(".json") and grammatical(name):
-            record = read_member(member_path(d, name))
-            if record is not None and record.get("name") == name:
-                out[name] = record
+    try:
+        for entry in os.listdir(fd):
+            name = entry[:-len(".json")]
+            if entry.endswith(".json") and grammatical(name):
+                record = member_at(fd, name)
+                if record is not None and record.get("name") == name:
+                    out[name] = record
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
     return out
 
 
 def last_checked(d, name):
     """When NAME's mail was last checked: its member record, else the v1 presence file."""
-    record = read_member(member_path(d, name))
+    record = read_member(d, name)
     if record is not None:
         return parse_utc(record["checked"])
+    fd = meta_fd(d, ".agent-mail-presence")
+    if fd is None:
+        return None
     try:
-        return os.lstat(legacy_presence(d, name)).st_mtime
+        return os.stat(name, dir_fd=fd, follow_symlinks=False).st_mtime
     except OSError:
         return None
+    finally:
+        os.close(fd)
 
 
 def runtime_dir():
@@ -1344,8 +1435,12 @@ def collect(d, name, settings, state, max_bytes, now):
 
     Only a message that will be printed counts against the budget, and a big one only as
     the part of it that is shown. Directory and stuck notices are remembered in STATE,
-    which only commit saves. If anything here fails, every claim goes back.
+    which only commit saves. If anything here fails, every claim goes back. An unsafe
+    mailbox is refused before anything is claimed.
     """
+    problems = mailbox_problems(d)
+    if problems:
+        raise MailError("unsafe_mailbox", problems[0])
     found, waiting, busy, dirs, settle = candidates(name, d, now)
     items, notices, stuck, more, size, settling = [], [], [], 0, 0, [] if settle is None else [settle]
     for entry, st in dirs:
@@ -1359,7 +1454,7 @@ def collect(d, name, settings, state, max_bytes, now):
         extra += [f"agent-mail: cursor rebuilt; older posts are in +{ch}/" for ch in sorted(subs)]
     elif state.get("since_all") is None:
         state["since_all"] = now - REPLAY
-    record = read_member(member_path(d, name))
+    record = read_member(d, name)
     # Within 10 minutes either way: another host's clock may run a little ahead of ours.
     if record is not None and record["host"] != HOST and abs(now - parse_utc(record["checked"])) < DUPLICATE_READER:
         extra.append(f"agent-mail: another reader of {name} appears active on {escape(record['host'])}")
@@ -2572,6 +2667,8 @@ def doctor(d, name, settings):
         lines.append(f"mailbox {d}: marked with {MARKER_V2}")
     else:
         finding(f"mailbox {d} has no {MARKER_V2}, so agent-mail refuses it; run agent-mail init there")
+    for problem in mailbox_problems(d):
+        finding(problem)
     kind = fs_type(d)
     nfs = kind is not None and kind.startswith("nfs")
     lines.append(f"file system: {escape(kind)}" if kind is not None else "file system: not checked (no /proc/self/mountinfo here)")
@@ -2627,7 +2724,7 @@ def doctor(d, name, settings):
         finally:
             os.close(fd)
     if name:
-        record = read_member(member_path(d, name))
+        record = read_member(d, name)
         if record is not None and record["host"] != HOST and abs(now - parse_utc(record["checked"])) < DUPLICATE_READER:
             finding(f"another reader of {name} appears active on {escape(record['host'])}")
     if settings.paused or os.path.exists(os.path.expanduser(PAUSE_PATH)):
@@ -3386,6 +3483,44 @@ def section_state(t):
     os.utime(legacy, (now - 50, now - 50))
     t.ok(last_checked(d, "nix") == os.stat(legacy).st_mtime, "last_checked falls back to the v1 presence file")
 
+    def snapshot(top):
+        return sorted((os.path.relpath(os.path.join(folder, f), top), open(os.path.join(folder, f), "rb").read())
+                      for folder, _, files in os.walk(top) for f in files)
+
+    for n, (case, kind) in enumerate(((".agent-mail", "a symlink"), (".agent-mail/members", "a symlink"),
+                                      (".agent-mail-presence", "a symlink"), (".agent-mail-presence", "not a directory"))):
+        unsafe = t.box(f"unsafe{n}")
+        outside = os.path.join(t.root, f"outside{n}")
+        os.makedirs(os.path.join(outside, "members"), 0o700)
+        t.mk(os.path.join(outside, "members", "pi.json"), "precious\n")
+        if case == ".agent-mail/members":
+            os.mkdir(os.path.join(unsafe, ".agent-mail"), 0o700)
+        if kind == "a symlink":
+            os.symlink(os.path.join(outside, "members") if case.endswith("members") else outside, os.path.join(unsafe, case))
+        else:
+            t.mk(os.path.join(unsafe, case), "not a directory\n")
+        waiting = t.direct(unsafe, "pi", "nix", "still here")
+        before = snapshot(outside)
+        e = t.raises(touch_member, unsafe, "pi", [], now)
+        out, code, err = t.run(["--dir", unsafe, "read", "pi"])
+        report, flagged, _ = t.run(["--dir", unsafe, "doctor", "pi"])
+        t.ok(getattr(e, "code", None) == "unsafe_mailbox" and code == 1 and f"{case} is {kind}" in err and not out
+             and os.path.exists(waiting) and snapshot(outside) == before and flagged == 1 and f"{case} is {kind}" in report,
+             f"{case} as {kind} is refused before anything is claimed, doctor names it, and nothing outside the mailbox is written")
+    members_dir = os.path.join(d, ".agent-mail", "members")
+    renamed, real_rename = [], os.rename
+
+    def failing_rename(src, dst, **kw):
+        renamed.append(src)
+        raise OSError(errno.EIO, "injected")
+
+    os.rename = failing_rename
+    try:
+        touch_member(d, "pi", ["other"], now + 302)
+    finally:
+        os.rename = real_rename
+    t.ok(renamed == [f".pi.json.{os.getpid()}.tmp"] and not [e for e in os.listdir(members_dir) if e.endswith(".tmp")],
+         "the member record's temporary name carries the pid, and a failed rename leaves no temporary file behind")
     a, b = ReaderLock(d, "pi"), ReaderLock(d, "pi")
     t.ok(a.acquire() and not b.acquire() and b.holder == f"{os.getpid()}@{HOST}", "a second lock on one name fails, even inside one process")
     a.release()
