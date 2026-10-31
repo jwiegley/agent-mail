@@ -214,8 +214,10 @@ def parse_msg(entry):
     m = MSG_RE.fullmatch(entry)
     if not m or not (grammatical(m.group("to")) and grammatical(m.group("from"))):
         return None
+    u = m.group("utc")  # YYYYMMDDTHHMMSS.ffffffZ, built directly: strptime is slow on every scan
     try:
-        when = datetime.datetime.strptime(m.group("utc"), "%Y%m%dT%H%M%S.%fZ").replace(tzinfo=datetime.timezone.utc)
+        when = datetime.datetime(int(u[0:4]), int(u[4:6]), int(u[6:8]), int(u[9:11]), int(u[11:13]), int(u[13:15]), int(u[16:22]),
+                                 tzinfo=datetime.timezone.utc)
     except ValueError:
         return None
     return Msg(m.group("to"), m.group("utc"), m.group("from"), m.group("uniq"), entry[:-len(".txt")], when.timestamp())
@@ -991,10 +993,14 @@ class Changed(Exception):
     pass
 
 
-def read_file(path):
+def read_file(path, dir_fd=None, limit=None):
+    """(text, fstat) of a regular file of ours with one link and at most LIMIT bytes
+    (1 MiB by default), opened relative to DIR_FD when given."""
+    limit = LIMIT if limit is None else limit
+    what = "the 1 MiB limit" if limit == LIMIT else f"the {limit}-byte limit"
     # O_NONBLOCK keeps a FIFO from blocking the open; O_NOFOLLOW refuses a symlink.
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
     except FileNotFoundError:
         raise
     except OSError as e:
@@ -1007,17 +1013,17 @@ def read_file(path):
             raise Rejected("owned by another user")
         if before.st_nlink > 1:
             raise Rejected(f"it has {before.st_nlink} hard links")
-        if before.st_size > LIMIT:
-            raise Rejected(f"{before.st_size} bytes, over the 1 MiB limit")
+        if before.st_size > limit:
+            raise Rejected(f"{before.st_size} bytes, over {what}")
         chunks, total = [], 0
-        while total <= LIMIT:
-            chunk = os.read(fd, min(65536, LIMIT + 1 - total))
+        while total <= limit:
+            chunk = os.read(fd, min(65536, limit + 1 - total))
             if not chunk:
                 break
             chunks.append(chunk)
             total += len(chunk)
-        if total > LIMIT:
-            raise Rejected("it grew past the 1 MiB limit while being read")
+        if total > limit:
+            raise Rejected(f"it grew past {what} while being read")
         after = os.fstat(fd)
         if (after.st_size, after.st_mtime_ns) != (before.st_size, before.st_mtime_ns):
             raise Changed()
@@ -1123,6 +1129,137 @@ def header_from(text):
     return None
 
 
+MARGIN = 600.0  # since's allowance for clock skew
+FUTURE = 86400.0  # a stamp further ahead than this is invalid
+POSTS_PER_SENDER = 10
+BROADCASTS_PER_SENDER = 3
+DUPLICATE_READER = 600.0
+
+
+def scan_shared(fd, d, name, kind, ch, since, seen, now):
+    """Unread posts of +CH (kind "post") or broadcasts at the top level (kind "broadcast")
+    in the open directory FD, oldest first, and notices for entries that are not mail."""
+    to, limit = (ch, POST_LIMIT) if kind == "post" else ("all", BROADCAST_LIMIT)
+    where = f" in +{ch}" if kind == "post" else ""
+    found, notices = [], []
+    for entry in os.listdir(fd):
+        if entry.startswith("."):
+            continue
+        if ".sync-conflict-" in entry:
+            if kind == "post" or entry.startswith(("all_", f"{name}_")):
+                notices.append(f"agent-mail: {escape(entry)}{where} is a Syncthing conflict copy, never mail; left in place")
+            continue
+        m = parse_msg(entry)
+        if m is None or m.to != to:
+            if kind == "post":
+                why = f"is misfiled (it is not named for +{ch})" if m is not None else "is not named as a post"
+                notices.append(f"agent-mail: {escape(entry)} in +{ch} {why}; left in place")
+            continue
+        if m.id in seen or m.sender == name or m.stamp < since - MARGIN:
+            continue
+        try:
+            st = os.stat(entry, dir_fd=fd, follow_symlinks=False)
+        except OSError:
+            continue
+        if 0 <= now - st.st_ctime < SETTLE:
+            continue
+        why = None
+        if m.stamp > now + FUTURE:
+            why = "it is stamped more than 24 hours ahead"
+        elif not stat.S_ISREG(st.st_mode):
+            why = "it is not a regular file"
+        elif st.st_uid != os.getuid():
+            why = "it is owned by another user"
+        elif st.st_nlink > 1:
+            why = f"it has {st.st_nlink} hard links"
+        elif st.st_size > limit:
+            why = f"{st.st_size} bytes, over the {limit}-byte limit for {kind}s"
+        if why:
+            notices.append(f"agent-mail: {escape(entry)}{where} was not read: {why}; left in place")
+            continue
+        path = os.path.join(d, f"+{ch}", entry) if kind == "post" else os.path.join(d, entry)
+        found.append((m.stamp, entry, Item(kind, m.id, entry, path, None, ch, m.sender, None, st.st_size, None, None)))
+    return [item for *_, item in sorted(found, key=lambda f: f[:2])], notices
+
+
+def unread_posts(d, name, state, subs, now):
+    """NAME's unread posts, by channel name, then its unread broadcasts, oldest first
+    within each, with notices for entries that are not mail. Items carry no text yet.
+    No side effects, so the doorbell and pending can call it."""
+    items, notices = [], []
+    seen = state.get("seen", {})
+    for ch in sorted(subs):
+        try:
+            fd = open_channel(d, ch)
+        except MailError:
+            if os.path.lexists(os.path.join(d, f"+{ch}")):
+                notices.append(f"agent-mail: subscribed channel +{ch} is not a channel (a symlink, not ours, or without its marker); it was not read")
+            else:
+                notices.append(f"agent-mail: subscribed channel +{ch} is missing")
+            continue
+        try:
+            found, bad = scan_shared(fd, d, name, "post", ch, subs[ch]["since"], set(seen.get(f"+{ch}", ())), now)
+        finally:
+            os.close(fd)
+        items += found
+        notices += bad
+    try:
+        fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        raise MailError("mailbox_missing", f"mailbox {d} does not exist") from None
+    try:
+        since_all = state.get("since_all")
+        found, bad = scan_shared(fd, d, name, "broadcast", None, now - REPLAY if since_all is None else since_all,
+                                 set(seen.get("all", ())), now)
+    finally:
+        os.close(fd)
+    return items + found, notices + bad
+
+
+def read_shared(d, item):
+    """The text of a post or broadcast, read again through a checked descriptor, or None
+    when it can no longer be read as mail."""
+    try:
+        fd = open_channel(d, item.channel) if item.kind == "post" else os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+    except (MailError, OSError):
+        return None
+    try:
+        return read_file(item.entry, dir_fd=fd, limit=POST_LIMIT if item.kind == "post" else BROADCAST_LIMIT)[0]
+    except (Rejected, Changed, OSError):
+        return None
+    finally:
+        os.close(fd)
+
+
+def frame_cost(item, copy):
+    """About what an item's two frame lines add to a delivery."""
+    return 100 + len(item.id) + len(item.sender) + len(copy) + len(item.channel or "")
+
+
+def write_copy(path, text):
+    """Keep a delivered post's text as an archive copy that no peer can change."""
+    folder, base = os.path.split(path)
+    tmp = os.path.join(folder, f".{base}.{os.getpid()}.tmp")
+    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), "w", encoding="utf-8") as f:
+        f.write(text)
+    os.rename(tmp, path if not os.path.lexists(path) else f"{path}.{secrets.token_hex(3)}")
+
+
+def shared_ids(d, key):
+    """The ids of the files now in a seen set's directory ("all" is the top level), or
+    None when that directory cannot be read as a channel or mailbox."""
+    try:
+        if key == "all":
+            return {m.id for m in map(parse_msg, os.listdir(d)) if m is not None and m.to == "all"}
+        fd = open_channel(d, key[1:])
+    except (MailError, OSError):
+        return None
+    try:
+        return {m.id for m in channel_posts(fd, key[1:])}
+    finally:
+        os.close(fd)
+
+
 def put_back(batch):
     """Return every claim in BATCH to its original name, unless that name is taken again."""
     for item in batch.items:
@@ -1146,11 +1283,24 @@ def collect(d, name, settings, state, max_bytes, now):
     for entry, st in dirs:
         if remember(state, f"dir:{st.st_ino}:{entry}"):
             notices.append(f"--- agent-mail: {escape(entry)} is a directory; left in place")
+    subs = effective_subs(state, settings, now)
+    extra = []
+    if state.get("_rebuilt"):
+        # Lost state, or this name's first run on this host: replay the last 24 hours once.
+        state["since_all"] = now - REPLAY
+        extra += [f"agent-mail: cursor rebuilt; older posts are in +{ch}/" for ch in sorted(subs)]
+    elif state.get("since_all") is None:
+        state["since_all"] = now - REPLAY
+    record = read_member(member_path(d, name))
+    if record is not None and record["host"] != HOST and 0 <= now - parse_utc(record["checked"]) < DUPLICATE_READER:
+        extra.append(f"agent-mail: another reader of {name} appears active on {escape(record['host'])}")
     done = False
     try:
         for i, (_, entry, original, st) in enumerate(found):
             cost = min(st.st_size, EXCERPT) if stat.S_ISREG(st.st_mode) and st.st_size <= LIMIT else 0
-            if items and cost and size + cost > max_bytes:
+            msg = parse_msg(original)
+            overhead = 100 + len(msg.id) + len(msg.sender) + len(os.path.join(archive_dir(d, name), original))
+            if items and cost and size + cost + overhead > max_bytes:
                 more = len(found) - i
                 break
             path = os.path.join(d, entry)
@@ -1193,7 +1343,6 @@ def collect(d, name, settings, state, max_bytes, now):
                 HELD.discard(hold)
                 notices.append(f"--- agent-mail: {escape(original)} was not read: {e}; it is now {os.path.join(d, escape(os.path.basename(where)))}")
                 continue
-            msg = parse_msg(original)
             copy = archive_target(d, name, original)
             shown_text = text
             if len(text.rstrip().encode("utf-8")) > max_bytes:
@@ -1201,12 +1350,32 @@ def collect(d, name, settings, state, max_bytes, now):
                 shown_text = f"{cut}\n[... {fst.st_size} bytes in all; the whole message is at {copy}]"
             items.append(Item("direct", msg.id, entry, os.path.join(d, original), hold, None, msg.sender,
                               shown_text, fst.st_size, header_from(text), copy))
-            size += min(fst.st_size, EXCERPT)
+            size += min(fst.st_size, EXCERPT) + frame_cost(items[-1], copy)
+        shared, shared_notices = unread_posts(d, name, state, subs, now)
+        notices += [notice for notice in shared_notices if remember(state, f"notice:{notice}")]
+        taken, full = collections.Counter(), False
+        for item in shared:
+            key = (item.kind, item.channel, item.sender)
+            if full or taken[key] >= (POSTS_PER_SENDER if item.kind == "post" else BROADCASTS_PER_SENDER):
+                more += 1
+                continue
+            copy = archive_target(d, name, item.entry)
+            cost = item.size + frame_cost(item, copy)
+            if items and size + cost > max_bytes:
+                full = True
+                more += 1
+                continue
+            text = read_shared(d, item)
+            if text is None:
+                continue
+            taken[key] += 1
+            items.append(item._replace(text=text, header_from=header_from(text), copy=copy))
+            size += cost
         done = True
     finally:
         if not done:
             put_back(Batch(items, notices, stuck, more, waiting, busy, []))
-    return Batch(items, notices, stuck, more, waiting, busy, [], sorted(effective_subs(state, settings, now)))
+    return Batch(items, notices, stuck, more, waiting, busy, extra, sorted(subs))
 
 
 def label(item):
@@ -1247,11 +1416,24 @@ def commit(d, name, batch, state, now):
                 dest = item.copy if not os.path.lexists(item.copy) else f"{item.copy}.{secrets.token_hex(3)}"
                 with contextlib.suppress(FileNotFoundError):
                     os.rename(item.hold, dest)
+            else:
+                write_copy(item.copy, item.text)
     finally:
         for item in batch.items:
             HELD.discard(item.hold)
+    seen = state.setdefault("seen", {})
+    for item in batch.items:
+        if item.kind != "direct":
+            ids = seen.setdefault(f"+{item.channel}" if item.kind == "post" else "all", [])
+            if item.id not in ids:
+                ids.append(item.id)
+    for key in list(seen):
+        present = shared_ids(d, key)
+        if present is not None:
+            seen[key] = [i for i in seen[key] if i in present]
     if batch.items:
         state["last_batch"] = {"at": now, "ids": [item.id for item in batch.items], "possibly_unseen": False}
+    state["_rebuilt"] = False
     if state_changed(state):
         save_state(d, name, state)
     touch_member(d, name, batch.subs, now)
@@ -1281,6 +1463,12 @@ def receive(d, name, settings, write, max_bytes=None, *, idle=True, again="run r
         now = clock()
         state = load_state(d, name)
         batch = collect(d, name, settings, state, max_bytes, now)
+    if not idle and not (batch.items or batch.notices or any(fresh for *_, fresh in batch.stuck)):
+        # A quiet pass of the claiming watch: nothing to show, so only the presence moves.
+        touch_member(d, name, batch.subs, now)
+        result = Received("")
+        result.batch = batch
+        return result
     written = False
     try:
         lines = [render(batch, name, f"{name}@{HOST}", again=again)]
@@ -1972,6 +2160,170 @@ def section_receive(t):
          and load_state(d, "pi")["last_batch"] == before, "a failed write puts the claim back and changes no state")
 
 
+def section_posts(t):
+    T0 = time.time() + 3600  # every file written below is settled under this clock
+    t.at(T0)
+
+    def sink(text):
+        pass
+
+    def opts(name, *pinned):
+        return load_settings({"channels": list(pinned)} if pinned else {}, {}, name)
+
+    def subscribed(d, name, *chs):
+        st = load_state(d, name)
+        for ch in chs:
+            subscribe(d, name, st, opts(name), ch, now=clock())
+        save_state(d, name, st)
+
+    def pid_of(path):
+        return parse_msg(os.path.basename(path)).id
+
+    s = opts("a")
+    d = t.box()
+    create_channel(d, "fleet", "fleet-wide notices")
+    for name in ("a", "b", "pi"):
+        subscribed(d, name, "fleet")
+    pid = pid_of(t.post(d, "fleet", "nix", "FIRST-POST"))
+    t.ok(pid in receive(d, "a", s, sink) and pid in receive(d, "b", s, sink), "two subscribers each get a post")
+    t.ok(pid not in receive(d, "a", s, sink), "a post is delivered once per reader")
+    t.ok(pid not in receive(d, "c", s, sink), "a non-subscriber gets nothing")
+    own = pid_of(t.post(d, "fleet", "pi", "MY-OWN-POST"))
+    t.ok(own not in receive(d, "pi", s, sink), "a sender does not receive its own post")
+    t.post(d, "fleet", "nix", "SECOND-POST", stamp=T0 + 60)
+    receive(d, "a", s, sink)
+    t.post(d, "fleet", "nix", "LATE-ARRIVAL", stamp=T0 - 120)
+    t.ok("LATE-ARRIVAL" in receive(d, "a", s, sink), "a late arrival stamped before posts already read is still delivered")
+
+    m = t.box("margin")
+    create_channel(m, "fleet", "p")
+    subscribed(m, "a", "fleet")
+    t.post(m, "fleet", "nix", "MARGIN-NINE", stamp=T0 - 540)
+    t.post(m, "fleet", "nix", "MARGIN-ELEVEN", stamp=T0 - 660)
+    out = receive(m, "a", s, sink)
+    t.ok("MARGIN-NINE" in out and "MARGIN-ELEVEN" not in out, "since keeps a 10-minute margin")
+
+    gone = t.post(d, "fleet", "nix", "TO-BE-DELETED")
+    receive(d, "a", s, sink)
+    kept = pid_of(gone) in load_state(d, "a")["seen"]["+fleet"]
+    os.unlink(gone)
+    receive(d, "a", s, sink)
+    t.ok(kept and pid_of(gone) not in load_state(d, "a")["seen"]["+fleet"], "a seen id leaves only once its file is gone")
+
+    lost = t.box("lost")
+    create_channel(lost, "fleet", "p")
+    t.post(lost, "fleet", "nix", "HOURS-23", stamp=T0 - 23 * 3600)
+    t.post(lost, "fleet", "nix", "HOURS-25", stamp=T0 - 25 * 3600)
+    out = receive(lost, "r", opts("r", "fleet"), sink)
+    t.ok("HOURS-23" in out and "HOURS-25" not in out and out.count("cursor rebuilt; older posts are in +fleet/") == 1
+         and "cursor rebuilt" not in receive(lost, "r", opts("r", "fleet"), sink), "lost state replays 24 hours once, with a notice")
+
+    cp = t.post(d, "fleet", "nix", "ORIGINAL-TEXT")
+    out = receive(d, "a", s, sink)
+    found = re.search(rf"id={pid_of(cp)} from=nix \(asserted\) copy=(\S+) ===", out)
+    with open(cp) as f:
+        original = f.read()
+    t.mk(cp, "CHANGED-TEXT\n")
+    with open(found.group(1) if found else os.devnull) as f:
+        t.ok(found is not None and f.read() == original, "the archive copy does not follow a changed original")
+
+    bpath = t.direct(d, "all", "nix", "BROADCAST-ONE")
+    bid = pid_of(bpath)
+    t.ok(bid in receive(d, "a", s, sink) and bid in receive(d, "b", s, sink) and os.path.exists(bpath) and bid not in receive(d, "a", s, sink),
+         "each reader reads a broadcast once and nobody claims it")
+
+    fair = t.box("fair")
+    create_channel(fair, "fleet", "p")
+    subscribed(fair, "r", "fleet")
+    for i in range(12):
+        t.post(fair, "fleet", "nix", f"FAIR-{i}", stamp=T0 + i)
+    first, second = receive(fair, "r", s, sink), receive(fair, "r", s, sink)
+    t.ok(first.count(" begin ") == 10 and second.count(" begin ") == 2, "10 posts per sender per channel per receive")
+    for i in range(4):
+        t.direct(fair, "all", "nix", f"BROADCAST-{i}", stamp=T0 + i)
+    b1, b2 = receive(fair, "r", s, sink), receive(fair, "r", s, sink)
+    t.ok(b1.count("broadcast id=") == 3 and b2.count("broadcast id=") == 1, "3 broadcasts per sender per receive")
+    misfiled = t.mk(os.path.join(fair, "+fleet", "other_20261030T000000.000000Z_from-x_0000000f.txt"), "misfiled\n")
+    conflict = t.mk(os.path.join(fair, "+fleet", "fleet_20261030T000000.000000Z_from-x_0000000e.sync-conflict-20261031-000000-ABCDEFG.txt"), "x\n")
+    o1, o2 = receive(fair, "r", s, sink), receive(fair, "r", s, sink)
+    t.ok(o1.count("misfiled") == 1 and "misfiled" not in o2 and os.path.exists(misfiled), "a misfiled post is reported once and left alone")
+    t.ok("sync-conflict" in o1 and "sync-conflict" not in o2 and os.path.exists(conflict), "a conflict copy is reported once and never delivered")
+
+    k = t.box("kinds")
+    create_channel(k, "a", "p")
+    create_channel(k, "b", "p")
+    subscribed(k, "r", "b", "a")
+    t.direct(k, "all", "nix", "KIND-BROADCAST")
+    t.post(k, "b", "nix", "KIND-B")
+    t.post(k, "a", "nix", "KIND-A")
+    t.direct(k, "r", "nix", "KIND-DIRECT")
+    kinds = re.findall(r" begin \d+/\d+ (direct|post \+\w+|broadcast) id=", receive(k, "r", s, sink))
+    t.ok(kinds == ["direct", "post +a", "post +b", "broadcast"], "direct mail, then posts by channel, then broadcasts")
+    t.post(k, "a", "nix", "UNSEEN")
+    seen_before = load_state(k, "r")["seen"]
+    copies_before = sorted(os.listdir(os.path.join(k, ".r-read")))
+
+    def broken(text):
+        raise BrokenPipeError()
+
+    code_out = getattr(t.raises(receive, k, "r", s, broken), "code", None)
+    t.ok(code_out == "output_failed" and load_state(k, "r")["seen"] == seen_before and sorted(os.listdir(os.path.join(k, ".r-read"))) == copies_before,
+         "a failed write changes no seen set and copies nothing")
+    t.mk(member_path(d, "a"), json.dumps({"v": 2, "name": "a", "host": "h2", "checked": utc(T0 - 60), "subs": ["fleet"]}))
+    t.ok("another reader of a appears active on h2" in receive(d, "a", s, sink), "warns when the member record shows another host")
+
+    # Review Focus 3: bytes that are not UTF-8, or not printable, in names and bodies.
+    raw = t.box("bytes")
+    create_channel(raw, "fleet", "p")
+    subscribed(raw, "r", "fleet")
+    try:
+        bad_name_path = os.path.join(os.fsencode(raw), b"+fleet", b"fleet_\xff.txt")
+        t.mk(bad_name_path, "odd\n")
+        expect = "\\xff"
+    except OSError:  # APFS refuses names that are not UTF-8; use control characters instead
+        bad_name_path = t.mk(os.path.join(raw, "+fleet", "fleet_\n‮.txt"), "odd\n")
+        expect = "\\x0a\\xe2\\x80\\xae"
+    t.mk(os.path.join(raw, "+fleet", f"fleet_{utc(T0, micro=True)}_from-nix_0000abcd.txt"), b"From: nix@h\nTo: +fleet\n\nok \xff\xfe end\n")
+    out_bad = receive(raw, "r", s, sink)
+    t.ok(expect in out_bad and os.path.exists(bad_name_path), "a name with invalid UTF-8 is escaped and left in place")
+    t.ok("ok �� end" in out_bad, "invalid UTF-8 in a body is replaced")
+
+    # Review Focus 4: a large backlog after a host was away.
+    big = t.box("backlog")
+    create_channel(big, "c1", "p")
+    create_channel(big, "c2", "p")
+    ids300 = [pid_of(t.post(big, ch, sender, f"BACKLOG-{i}", stamp=T0 - 3600 + i))
+              for i in range(50) for sender in ("s1", "s2", "s3") for ch in ("c1", "c2")]
+    delivered, outs = [], []
+    for _ in range(40):
+        out = receive(big, "r", opts("r", "c1", "c2"), sink)
+        got = re.findall(r" begin \d+/\d+ post \+c[12] id=(\S+) ", out)
+        if not got:
+            break
+        delivered += got
+        outs.append(out)
+    t.ok(sorted(delivered) == sorted(ids300) and all(len(o.encode()) <= 12000 + 8192 for o in outs), "a 300-post backlog from three senders arrives exactly once")
+
+    # Review Focus 5: a subscribed channel deleted, or replaced by a symlink.
+    g = t.box("gone")
+    create_channel(g, "a", "p")
+    create_channel(g, "b", "p")
+    subscribed(g, "r", "a", "b")
+    os.unlink(os.path.join(g, "+b", CHANNEL_MARKER))
+    os.rmdir(os.path.join(g, "+b"))
+    t.post(g, "a", "nix", "STILL-DELIVERED")
+    o_gone, o_again = receive(g, "r", s, sink), receive(g, "r", s, sink)
+    t.ok(o_gone.count("subscribed channel +b is missing") == 1 and "+b is missing" not in o_again and "STILL-DELIVERED" in o_gone,
+         "a deleted channel is reported once and receive goes on")
+    elsewhere = os.path.join(t.root, "elsewhere")
+    os.mkdir(elsewhere, 0o700)
+    t.mk(os.path.join(elsewhere, CHANNEL_MARKER), "a channel behind a symlink\n")
+    t.mk(os.path.join(elsewhere, f"a_{utc(T0, micro=True)}_from-nix_0000beef.txt"), "SECRET\n")
+    os.rename(os.path.join(g, "+a"), os.path.join(t.root, "a-real"))
+    os.symlink(elsewhere, os.path.join(g, "+a"))
+    t.ok("SECRET" not in receive(g, "r", s, sink), "a channel replaced by a symlink is never read")
+
+
 def section_send(t):
     t.patch("SETTLE", 0.0)
     root = t.root
@@ -2131,6 +2483,7 @@ SECTIONS = [
     ("state", section_state),
     ("channels", section_channels),
     ("receive", section_receive),
+    ("posts", section_posts),
     ("send", section_send),
     ("cli", section_cli),
 ]
