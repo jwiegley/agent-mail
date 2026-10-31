@@ -115,7 +115,7 @@ git commit -m "Add the steward policy table and the signals helper's skeleton"
 
 **Interfaces:**
 - Consumes: `load_policy` (Task 1).
-- Produces: `load_roster(topic_md: str) -> list[Member]` where `Member = (name, host, harness)` parsed from the `## Members` table in `TOPIC.md` (columns `name | host | harness`), refusing a name that fails the agent-mail grammar with `RosterError(name)`. `deck_rows(run: Callable, members, hera_host="hera") -> dict[name, Row]` where `Row = dict(status, substate, bg, last_activity, transcript_path, host_ok: bool)`; `run(argv) -> (stdout, returncode)` is injected so tests need no agent-deck. Local members come from `agent-deck list --json`; remote members from `agent-deck remote sessions <host> --json --with-errors`, one call per host. A failed host sets `host_ok=False` on every member of that host and leaves the other fields `None`. `bg` is `"shell"`, `"tool"`, `None` or `"unknown"`: shell-only background work (agent-deck 1.16.29's misreport) is `"shell"`, and the steward's instructions treat it as unknown (spec 6.5).
+- Produces: `load_roster(topic_md: str) -> list[Member]` where `Member = (name, host, harness)` parsed from the `## Members` table in `TOPIC.md` (columns `name | host | harness`), refusing a name that fails the agent-mail grammar with `RosterError(name)`. `deck_rows(run: Callable, members, hera_host="hera") -> dict[name, Row]` where `Row = dict(status, substate, bg, last_activity, host_ok: bool)`; `run(argv) -> (stdout, returncode)` is injected so tests need no agent-deck. Local members come from `agent-deck list --json`; remote members from `agent-deck remote sessions <host> --json --with-errors`, one call per host. A failed host sets `host_ok=False` on every member of that host and leaves the other fields `None`. `bg` is `"shell"`, `"tool"`, `None` or `"unknown"`: shell-only background work (agent-deck 1.16.29's misreport) is `"shell"`, and the steward's instructions treat it as unknown (spec 6.5).
 
 - [ ] **Step 1: Write the failing tests**, section `deck`:
 
@@ -126,9 +126,9 @@ def test_roster_parses_and_refuses(d):
     ok(raises(RosterError, load_roster, write(d, "T2.md", TOPIC_WITH_TABLE.replace("glm-5.2", "Glm_5.2"))).name == "Glm_5.2", "roster: refuses a bad name")
 
 def test_list_shapes(d):
-    rows = deck_rows(fake_run({"list": '[{"title":"omlx","status":"running","substate":"busy","background_work":{"task":"sleep"},"transcript_path":"/t/omlx.jsonl"}]',
+    rows = deck_rows(fake_run({"list": '[{"title":"omlx","status":"running","substate":"busy","background_work":{"task":"sleep"}}]',
                                "remote andoria-08": '{"sessions":[{"title":"pipeline","status":"waiting"}]}'}), members)
-    ok(rows["omlx"]["status"] == "running" and rows["omlx"]["bg"] == "shell" and rows["omlx"]["transcript_path"] == "/t/omlx.jsonl", "deck: local row read, shell background flagged")
+    ok(rows["omlx"]["status"] == "running" and rows["omlx"]["bg"] == "shell", "deck: local row read, shell background flagged")
     ok(rows["pipeline"]["status"] == "waiting" and rows["pipeline"]["substate"] is None and rows["pipeline"]["host_ok"], "deck: object-with-sessions shape and missing fields tolerated")
     ok(rows["glm-5.2"]["status"] is None and rows["glm-5.2"]["host_ok"], "deck: absent from a successful listing is None, not an error")
 
@@ -138,7 +138,7 @@ def test_failed_host_marks_unknown(d):
     ok(rows["omlx"]["host_ok"] is True, "deck: hera unaffected")
 ```
 
-Before writing `deck_rows`, capture real shapes read-only: `agent-deck list --json | python3 -c 'import json,sys; r=json.load(sys.stdin); r=r if isinstance(r,list) else r["sessions"]; print(sorted(r[0]))'` and `agent-deck remote sessions andoria-08 --json --with-errors | head -c 600`. Adapt the field names in `Row` to what they print (the operations report saw `status`, `substate`, `last_activity_at`, `background_work.task`; `transcript_path` is documented in `list --help`), and put a trimmed real row into the fixture.
+Before writing `deck_rows`, capture real shapes read-only: `agent-deck list --json | python3 -c 'import json,sys; r=json.load(sys.stdin); r=r if isinstance(r,list) else r["sessions"]; print(sorted(r[0]))'` and `agent-deck remote sessions andoria-08 --json --with-errors | head -c 600`. Adapt the field names in `Row` to what they print (the operations report saw `status`, `substate`, `last_activity_at`, `background_work.task`and put a trimmed real row into the fixture.
 
 - [ ] **Step 2: Run to verify it fails**
 
