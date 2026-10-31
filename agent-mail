@@ -81,6 +81,7 @@ Commands:
 import argparse
 import collections
 import contextlib
+import dataclasses
 import datetime
 import errno
 import hashlib
@@ -142,10 +143,6 @@ _CLOCK = None  # injected by the self-test only
 def clock():
     """The current time for every time-based decision."""
     return time.time() if _CLOCK is None else _CLOCK
-
-
-def default_dir():
-    return os.environ.get("AGENT_MAIL_DIR") or os.path.expanduser(DEFAULT_DIR)
 
 
 def require_mailbox(d):
@@ -239,6 +236,143 @@ def sanitize(text):
     and the "<" of a line that opens or closes a harness tag replaced by U+2039."""
     text = CONTROL_RE.sub("\ufffd", ANSI_RE.sub("", text))
     return TAG_LINE_RE.sub("\\1\u2039", text)
+
+
+# ---- settings ----
+
+CONFIG_PATH = "~/.config/agent-mail/config.json"  # or $AGENT_MAIL_CONFIG
+PAUSE_PATH = "~/.config/agent-mail/paused"
+POLL_RANGE = (1, 300)
+MAX_BYTES_RANGE = (1000, 24000)
+NOTIFY_MODES = ("auto", "on", "off")
+FILE_KEYS = frozenset({"dir", "poll_interval", "notify", "max_bytes"})
+TOP_KEYS = FILE_KEYS | {"hosts", "sessions"}
+SESSION_KEYS = FILE_KEYS | {"channels", "allow_broadcast"}
+# Each setting: its config key, its flag, its environment variable and its default.
+SETTINGS = {
+    "dir": ("dir", "dir", "AGENT_MAIL_DIR", None),
+    "poll": ("poll_interval", "poll", "AGENT_MAIL_POLL", 15),
+    "notify": ("notify", "notify", "AGENT_MAIL_NOTIFY", "auto"),
+    "channels": ("channels", "channels", "AGENT_MAIL_CHANNELS", ()),
+    "max_bytes": ("max_bytes", "max_bytes", "AGENT_MAIL_MAX_BYTES", MAX_BYTES),
+    "allow_broadcast": ("allow_broadcast", None, None, True),
+}
+
+
+@dataclasses.dataclass
+class Settings:
+    dir: str
+    poll: float
+    notify: str
+    channels: dict
+    max_bytes: int
+    allow_broadcast: bool
+    paused: bool
+    source: dict
+
+
+def read_config(path):
+    """The config file as a dict ({} when missing); bad_config when it is malformed or
+    holds a key this version does not know, at any level."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        raise MailError("bad_config", f"cannot read {path}: {e}") from None
+
+    def check(obj, allowed, where):
+        if not isinstance(obj, dict):
+            raise MailError("bad_config", f"{path}: {where} is not a JSON object")
+        for key in obj:
+            if key not in allowed:
+                raise MailError("bad_config", f"{path}: unknown key {key!r} in {where}")
+
+    check(data, TOP_KEYS, "the top level")
+    for group, allowed in (("hosts", FILE_KEYS), ("sessions", SESSION_KEYS)):
+        entries = data.get(group, {})
+        if not isinstance(entries, dict):
+            raise MailError("bad_config", f"{path}: {group} is not a JSON object")
+        for key, value in entries.items():
+            check(value, allowed, f"{group}.{key}")
+    return data
+
+
+def setting_value(key, value, label):
+    """VALUE checked and converted for setting KEY; bad_setting names LABEL, its source."""
+    def bad(why):
+        return MailError("bad_setting", f"{label} is {value!r}; {why}")
+
+    if key == "dir":
+        if not isinstance(value, str) or not value:
+            raise bad("it must be a directory path")
+        return os.path.expanduser(value)
+    if key in ("poll", "max_bytes"):
+        lo, hi = POLL_RANGE if key == "poll" else MAX_BYTES_RANGE
+        what = f"it must be a number from {lo} to {hi}" if key == "poll" else f"it must be a whole number from {lo} to {hi}"
+        number = value
+        if isinstance(value, str):
+            try:
+                number = int(value) if key == "max_bytes" else float(value)
+            except ValueError:
+                raise bad(what) from None
+        if isinstance(number, bool) or not isinstance(number, (int, float)) or (key == "max_bytes" and not float(number).is_integer()):
+            raise bad(what)
+        if not lo <= number <= hi:
+            raise bad(what)
+        return int(number) if key == "max_bytes" else number
+    if key == "notify":
+        if value not in NOTIFY_MODES:
+            raise bad("it must be auto, on or off")
+        return value
+    if key == "allow_broadcast":
+        if not isinstance(value, bool):
+            raise bad("it must be true or false")
+        return value
+    items = value.split(",") if isinstance(value, str) else value
+    if not isinstance(items, (list, tuple)):
+        raise bad("it must list channels as NAME or NAME:wake")
+    channels = {}
+    for item in items:
+        if not isinstance(item, str):
+            raise bad("it must list channels as NAME or NAME:wake")
+        ch, sep, mode = item.strip().partition(":")
+        if not ch and not sep:
+            continue
+        if sep and mode != "wake":
+            raise bad(f"{item!r} must be NAME or NAME:wake")
+        try:
+            check_name(ch, "channel")
+        except MailError as e:
+            raise bad(e.message) from None
+        channels[ch] = channels.get(ch, False) or bool(sep)
+    return channels
+
+
+def load_settings(flags, env, name, host=HOST):
+    """Settings by precedence: flag, environment, sessions.<name>, hosts.<host>, the
+    config file's top level, the default. flags holds only the flags given."""
+    path = env.get("AGENT_MAIL_CONFIG") or os.path.expanduser(CONFIG_PATH)
+    data = read_config(path)
+    layers = [("session", f"sessions.{name}.", data.get("sessions", {}).get(name, {}) if name else {}),
+              ("host", f"hosts.{host}.", data.get("hosts", {}).get(host, {})),
+              ("file", "", {k: v for k, v in data.items() if k in FILE_KEYS})]
+    values, source = {}, {}
+    for key, (cfg, flag, var, default) in SETTINGS.items():
+        if flag and flags.get(flag) is not None:
+            found = (flags[flag], "flag", f"--{flag.replace('_', '-')}")
+        elif var and env.get(var):
+            found = (env[var], "env", var)
+        else:
+            found = next(((layer[cfg], src, f"{prefix}{cfg} in {path}") for src, prefix, layer in layers if cfg in layer), None)
+        if found is None:
+            values[key] = os.path.expanduser(DEFAULT_DIR) if key == "dir" else (dict(default) if key == "channels" else default)
+            source[key] = "default"
+        else:
+            values[key] = setting_value(key, found[0], found[2])
+            source[key] = found[1]
+    return Settings(paused=os.path.exists(os.path.expanduser(PAUSE_PATH)), source=source, **values)
 
 
 def claim_name(name, original):
@@ -734,13 +868,19 @@ def main(argv):
     s.add_argument("file", nargs="?")
     r = sub.add_parser("read")
     r.add_argument("name")
-    r.add_argument("--max-bytes", type=int, default=MAX_BYTES)
-    sub.add_parser("pending").add_argument("name")
+    r.add_argument("--max-bytes", type=int)
+    r.add_argument("--channel", action="append", help="pin a channel, NAME or NAME:wake (repeatable)")
+    pe = sub.add_parser("pending")
+    pe.add_argument("name")
+    pe.add_argument("--channel", action="append", help="pin a channel, NAME or NAME:wake (repeatable)")
     w = sub.add_parser("watch")
     w.add_argument("name")
-    w.add_argument("--interval", type=float, default=15.0)
+    w.add_argument("--poll", type=float, help="seconds between scans, 1 to 300 (default 15)")
+    w.add_argument("--interval", dest="poll", type=float, help=argparse.SUPPRESS)  # the fleet's running watch lines use it
+    w.add_argument("--notify", help="auto, on or off")
+    w.add_argument("--channel", action="append", help="pin a channel, NAME or NAME:wake (repeatable)")
     w.add_argument("--forever", action="store_true")
-    w.add_argument("--max-bytes", type=int, default=MAX_BYTES)
+    w.add_argument("--max-bytes", type=int)
     w.add_argument("--parent", type=int, help="stop when this process (the session that started the watcher) is gone")
     sub.add_parser("self-test").add_argument("sections", nargs="*", metavar="SECTION")
     sub.add_parser("init")
@@ -758,21 +898,29 @@ def main(argv):
         return EXIT_STATUS.get(e.code, 1)
 
 
+def cli_settings(a, name):
+    flags = {"dir": a.dir, "poll": getattr(a, "poll", None), "notify": getattr(a, "notify", None),
+             "max_bytes": getattr(a, "max_bytes", None), "channels": getattr(a, "channel", None)}
+    return load_settings({k: v for k, v in flags.items() if v is not None}, os.environ, name)
+
+
 def dispatch(a):
     if a.cmd == "self-test":
         return self_test(a.sections)
-    d = a.dir or default_dir()
     if a.cmd == "init":
-        return cmd_init(d)
-    require_mailbox(d)
+        return cmd_init(cli_settings(a, None).dir)
     if a.cmd == "send":
-        return cmd_send(check_name(a.sender), check_name(a.to), a.subject, a.id, a.file, d)
+        sender, to = check_name(a.sender, "sender"), check_name(a.to)
+        d = require_mailbox(cli_settings(a, sender).dir)
+        return cmd_send(sender, to, a.subject, a.id, a.file, d)
     name = check_name(a.name)
+    s = cli_settings(a, name)
+    d = require_mailbox(s.dir)
     if a.cmd == "read":
-        return cmd_read(name, d, max(1000, a.max_bytes))
+        return cmd_read(name, d, s.max_bytes)
     if a.cmd == "pending":
         return cmd_pending(name, d)
-    return cmd_watch(name, d, max(1.0, a.interval), a.forever, max(1000, a.max_bytes), parent=a.parent)
+    return cmd_watch(name, d, s.poll, a.forever, s.max_bytes, parent=a.parent)
 
 
 # ---- self-test ----
@@ -1072,6 +1220,42 @@ def section_grammar(t):
     t.ok("only the v1 marker" in t.run(["--dir", v1dir, "read", "pi"])[2], "refuses a directory with only the v1 marker")
 
 
+def section_settings(t):
+    cfg = os.path.join(t.root, ".config", "agent-mail", "config.json")
+    os.makedirs(os.path.dirname(cfg), 0o700)
+
+    def config(data):
+        t.mk(cfg, data if isinstance(data, str) else json.dumps(data))
+
+    config({"poll_interval": 11, "hosts": {HOST: {"poll_interval": 10}}, "sessions": {"pi": {"poll_interval": 9, "allow_broadcast": False}}})
+    t.ok(load_settings({"poll": 7}, {"AGENT_MAIL_POLL": "8"}, "pi").poll == 7, "a flag beats everything")
+    t.ok(load_settings({}, {"AGENT_MAIL_POLL": "8"}, "pi").poll == 8, "the environment beats the file")
+    t.ok([load_settings({}, {}, n).poll for n in ("pi", "nix")] == [9, 10], "sessions.<name> beats hosts.<host>")
+    settings_pi, settings_nix = load_settings({}, {}, "pi"), load_settings({}, {}, "nix")
+    config({"poll_interval": 11})
+    top_only = load_settings({}, {}, "pi")
+    config({})
+    empty_file = load_settings({}, {}, "pi")
+    t.ok(top_only.poll == 11 and empty_file.poll == 15, "the top level beats the default of 15")
+    t.ok(load_settings({}, {"AGENT_MAIL_CHANNELS": "nix:wake,ops"}, "pi").channels == {"nix": True, "ops": False}, "parses pinned channels")
+    for bad in ({"poll": 0}, {"poll": 301}, {"max_bytes": 999}, {"max_bytes": 24001}, {"notify": "maybe"}):
+        t.ok(getattr(t.raises(load_settings, bad, {}, "pi"), "code", None) == "bad_setting", f"refuses {bad}")
+    config({"poll": 5})
+    t.ok("'poll'" in getattr(t.raises(load_settings, {}, {}, "pi"), "message", ""), "an unknown key in config.json is named")
+    config("{not json")
+    t.ok(getattr(t.raises(load_settings, {}, {}, "pi"), "code", None) == "bad_config", "a malformed config.json is bad_config")
+    other = t.mk(os.path.join(t.root, "other.json"), json.dumps({"sessions": {"pi": {"notify": "on"}}}))
+    s = load_settings({"poll": 7}, {"AGENT_MAIL_MAX_BYTES": "9000", "AGENT_MAIL_CONFIG": other}, "pi")
+    t.ok((s.notify, s.max_bytes, s.poll) == ("on", 9000, 7) and s.source["notify"] == "session" and s.source["max_bytes"] == "env"
+         and s.source["poll"] == "flag" and s.source["dir"] == "default", "AGENT_MAIL_CONFIG names the file, and source records each setting's origin")
+    config({})
+    t.ok(not settings_pi.allow_broadcast and settings_nix.allow_broadcast, "allow_broadcast is per session and true by default")
+    t.mk(os.path.join(t.root, ".config", "agent-mail", "paused"), "")
+    t.ok(load_settings({}, {}, "pi").paused, "the pause file pauses the host")
+    _, code, err = t.run(["--dir", t.box(), "read", "pi", "--max-bytes", "999"])
+    t.ok(code == 1 and "--max-bytes is 999" in err, "the CLI passes its flags through load_settings")
+
+
 def section_send(t):
     t.patch("SETTLE", 0.0)
     root = t.root
@@ -1199,6 +1383,7 @@ def section_cli(t):
 SECTIONS = [
     ("core", section_core),
     ("grammar", section_grammar),
+    ("settings", section_settings),
     ("send", section_send),
     ("cli", section_cli),
 ]
