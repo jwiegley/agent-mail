@@ -14,12 +14,21 @@ name that is not an agent-mail name or is listed twice, or a member with no host
 so is a file with no such heading. Each member's agent-deck row comes from one read-only listing for each host; a host
 that does not answer leaves its members unknown, never stopped.
 
+The census lists names and ctimes only: the message files named in the mailbox's top level and in +CHANNEL/, never a message's text.
+A file counts only when its whole name is a message's, agent-mail's TO_UTC_from-FROM_HEX8.txt, and names are compared whole, so pi
+is never pipeline. With the steward's SENT.log (two phases: `intent <seq> <UTC> <to> <subject> <body-sha>` before each send, `sent
+<seq> <id>` after) and NOTES.log (`<UTC> <id>` for each direct mail a NOTE named) it shows each member's unread mail and the age of its
+oldest, the steward's own NUDGEs still unread, the files in the steward's name that SENT.log does not account for (no sent line, and
+no intent for the same recipient within 10 seconds of the stamp), the mail from one member to another that no NOTE names, and how many
+posts the channel has had since a time, by ctime.
+
 Commands:
   self-test [SECTION ...]
       Run the built-in checks, each section in a fresh temporary home.
 """
 
 import argparse
+import builtins
 import collections
 import contextlib
 import datetime
@@ -27,8 +36,10 @@ import io
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
+import time
 import zoneinfo
 
 REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))  # the directory that holds steward/
@@ -42,6 +53,11 @@ TIME_RE = re.compile(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]")
 NAME_RE = re.compile(r"[a-z0-9](?:[a-z0-9.]|-(?!-))*")  # agent-mail's NAME_PAT; see grammatical
 BACKGROUND_SUBSTATES = ("background-work", "watching")  # the substates agent-deck gives a session whose pane shows background work
 SHELL_WORDS = ("sleep", "watch", "sh -c", "bash -c", "tail")  # in a background task's text they mark a shell command
+# A message file's name: agent-mail's MSG_RE, with groups for the recipient, the stamp and the sender, and none for the hex tail. The
+# first character of a name is a letter or a digit, so no hidden name (a claimed file, a marker) matches.
+MSG_RE = re.compile(rf"(?P<to>{NAME_RE.pattern})_(?P<stamp>[0-9]{{8}}T[0-9]{{6}}\.[0-9]{{6}}Z)_from-(?P<sender>{NAME_RE.pattern})_[0-9a-f]{{8}}\.txt")
+STAMP_RE = re.compile(r"([0-9]{4})([0-9]{2})([0-9]{2})T([0-9]{2})([0-9]{2})([0-9]{2})(?:\.([0-9]{6}))?Z")  # a file name's stamp; SENT.log's has no fraction
+INTENT_WINDOW_S = 10  # how near, in seconds, an intent line's time must be to a file's stamp for the intent to account for the file
 
 
 # ---- policy ----
@@ -273,6 +289,178 @@ def deck_rows(run, members, hera_host="hera"):
     return rows
 
 
+# ---- census ----
+
+Entry = collections.namedtuple("Entry", "dir name to sender stamp ctime")  # dir is "top" or "channel"
+Intent = collections.namedtuple("Intent", "seq utc to subject sha id")  # id is None when no sent line names the seq
+
+
+def stamp_time(stamp):
+    """The time of STAMP, YYYYMMDDTHHMMSS.ffffffZ in UTC (the fraction may be left out), as epoch seconds; None when STAMP is not a
+    time."""
+    m = STAMP_RE.fullmatch(stamp)
+    if m is None:
+        return None
+    year, month, day, hour, minute, second, micro = (int(part or 0) for part in m.groups())
+    try:
+        return datetime.datetime(year, month, day, hour, minute, second, micro, tzinfo=datetime.timezone.utc).timestamp()
+    except ValueError:
+        return None
+
+
+def scan_entries(where, path):
+    """The Entries (see list_entries) for the message files in the directory PATH, which WHERE, "top" or "channel", says it is,
+    oldest stamp first."""
+    found = []
+    with os.scandir(path) as scan:
+        for item in scan:
+            m = MSG_RE.fullmatch(item.name)
+            if m is None:
+                continue
+            try:
+                ctime = item.stat(follow_symlinks=False).st_ctime
+            except OSError:  # the member's reader claimed the file since the listing
+                continue
+            found.append(Entry(where, item.name, m["to"], m["sender"], m["stamp"], ctime))
+    return sorted(found, key=lambda e: (e.stamp, e.name))
+
+
+def list_entries(mailbox, channel):
+    """The message files named in the directory MAILBOX and in its subdirectory +CHANNEL, as Entry(dir, name, to, sender, stamp,
+    ctime): the top level first, then the channel, each oldest stamp first (the stamp is the writer's word; a file's ctime says when
+    it arrived here). A name that does not fully match MSG_RE is skipped, so hidden names, the channel's own directory, notes and
+    every other name stay out. Only names and metadata are read: no file is opened and no symlink is followed (a ctime is the
+    entry's own, from lstat; MAILBOX itself is taken as given, since it may be a link, but a +CHANNEL that is a symlink is no
+    channel, as agent-mail has it), and a file gone by the time it is asked about, claimed by its reader, is left out. A channel
+    that is not a directory has no posts; a directory that cannot be listed otherwise raises OSError."""
+    entries = scan_entries("top", mailbox)
+    where = os.path.join(mailbox, f"+{channel}")
+    if not os.path.islink(where):
+        with contextlib.suppress(FileNotFoundError, NotADirectoryError):  # no such channel
+            entries += scan_entries("channel", where)
+    return entries
+
+
+def read_sent_log(path):
+    """(intents, sent_ids) from the SENT.log at PATH, which the steward writes in two phases: `intent <seq> <UTC> <to> <subject>
+    <body-sha>` before a send and `sent <seq> <id>` after it. The subject is every word between the recipient and the sha, so it may
+    hold spaces. An Intent carries the id of the sent line that names its seq, or None when none does; sent_ids holds the id of every
+    sent line, with or without an intent before it. A line of any other shape is skipped, a damaged byte is replaced, and a missing
+    file holds nothing."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+    except FileNotFoundError:
+        return [], set()
+    intents, sent_ids, latest = [], set(), {}  # latest: seq -> the place of its last intent in intents
+    for line in lines:
+        words = line.split()
+        if len(words) >= 6 and words[0] == "intent":
+            latest[words[1]] = len(intents)
+            intents.append(Intent(words[1], words[2], words[3], " ".join(words[4:-1]), words[-1], None))
+        elif len(words) == 3 and words[0] == "sent":
+            sent_ids.add(words[2])
+            if words[1] in latest:
+                k = latest[words[1]]
+                intents[k] = intents[k]._replace(id=words[2])
+    return intents, sent_ids
+
+
+def nudge_ids(intents):
+    """The ids of the NUDGEs the steward sent: those of the INTENTS whose subject starts with NUDGE and that a sent line names."""
+    return {i.id for i in intents if i.subject.startswith("NUDGE") and i.id}
+
+
+def read_notes_log(path):
+    """The ids in the NOTES.log at PATH, each the direct mail a NOTE named, from its lines `<UTC> <id>`. A line of any other shape is
+    skipped, a damaged byte is replaced, and a missing file holds none."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            rows = [line.split() for line in f]
+    except FileNotFoundError:
+        return set()
+    return {row[1] for row in rows if len(row) == 2}
+
+
+def entry_id(entry):
+    """The message id of the Entry ENTRY: its file name without .txt."""
+    return entry.name.removesuffix(".txt")
+
+
+def entry_age(entry, now):
+    """The seconds from the time of the Entry ENTRY's stamp to NOW; from its ctime to NOW when the stamp is not a time."""
+    when = stamp_time(entry.stamp)
+    return now - (entry.ctime if when is None else when)
+
+
+def intent_times(intents):
+    """The times of the INTENTS, in epoch seconds, by the recipient each names; an intent whose UTC is not a time has none."""
+    times = {}
+    for intent in intents:
+        when = stamp_time(intent.utc)
+        if when is not None:
+            times.setdefault(intent.to, []).append(when)
+    return times
+
+
+def announced(entry, planned):
+    """Whether an intent among PLANNED (the times intent_times gives) names the recipient of the Entry ENTRY, a channel as +NAME, at a
+    time within INTENT_WINDOW_S seconds of its stamp. An entry whose stamp is not a time has no such intent."""
+    when = stamp_time(entry.stamp)
+    recipient = entry.to if entry.dir == "top" else f"+{entry.to}"
+    return when is not None and any(abs(t - when) <= INTENT_WINDOW_S for t in planned.get(recipient, ()))
+
+
+class Census:
+    """What the names in a listing show about a topic; census() makes one. Its fields:
+    unread: {member name: (how many top-level files are addressed to it, the age in seconds of the oldest)}, (0, None) for a member
+        with none;
+    nudges_unread: [(id, age in seconds)], one for each NUDGE of the steward's still at the top level;
+    unmatched_own: [id], one for each file from the steward that SENT.log does not account for;
+    transit_without_note: how many top-level files from one member to another no NOTE names;
+    post_ctimes: the ctime of each file in the channel, which posts_since counts. Each list is in the order of the entries."""
+
+    def __init__(self, unread, nudges_unread, unmatched_own, transit_without_note, post_ctimes):
+        self.unread = unread
+        self.nudges_unread = nudges_unread
+        self.unmatched_own = unmatched_own
+        self.transit_without_note = transit_without_note
+        self.post_ctimes = post_ctimes
+
+    def posts_since(self, ts):
+        """How many files in the channel have a ctime at or after TS, in epoch seconds."""
+        return sum(ctime >= ts for ctime in self.post_ctimes)
+
+
+def census(entries, members, steward, sent, notes, nudge_ids, now):
+    """The Census of ENTRIES (from list_entries) for a topic whose members are the Members MEMBERS and whose steward is the name
+    STEWARD, as of NOW in epoch seconds. SENT is read_sent_log's (intents, sent_ids), NOTES read_notes_log's set of ids and
+    NUDGE_IDS the set of the steward's NUDGE ids (see nudge_ids). A file's id is its name without .txt, and its age is NOW less the
+    time of its stamp, or less its ctime when the stamp is not a time. Names are compared whole, never by prefix, so pi is not
+    pipeline. A file from STEWARD is accounted for by a sent line that names its id, or by an intent that names its recipient (a
+    channel as +NAME) within INTENT_WINDOW_S seconds of its stamp; a stamp that is not a time matches no intent. Only names and
+    metadata are used: no file is opened."""
+    intents, sent_ids = sent
+    ages = {m.name: [] for m in members}  # the ages of the top-level files addressed to each member
+    nudges_unread, unmatched_own, transit_without_note, post_ctimes = [], [], 0, []
+    planned = intent_times(intents)
+    for e in entries:
+        ident = entry_id(e)
+        if e.dir == "channel":
+            post_ctimes.append(e.ctime)
+        else:
+            if e.to in ages:
+                ages[e.to].append(entry_age(e, now))
+                if e.sender in ages and ident not in notes:
+                    transit_without_note += 1
+            if ident in nudge_ids:
+                nudges_unread.append((ident, entry_age(e, now)))
+        if e.sender == steward and ident not in sent_ids and not announced(e, planned):
+            unmatched_own.append(ident)
+    unread = {name: (len(waited), max(waited, default=None)) for name, waited in ages.items()}
+    return Census(unread, nudges_unread, unmatched_own, transit_without_note, post_ctimes)
+
+
 # ---- self-test ----
 
 SECTIONS = {}  # name -> function(d), in the order the sections are defined
@@ -327,6 +515,56 @@ def read(path):
     """The text of the UTF-8 file at PATH."""
     with open(path, encoding="utf-8") as f:
         return f.read()
+
+
+STAMP_BASE = datetime.datetime(2026, 11, 2, 20, 0, 0, tzinfo=datetime.timezone.utc)
+
+
+def stamp(i):
+    """A message file name's stamp that differs for each integer I: the time I seconds after 2026-11-02T20:00:00Z, as
+    YYYYMMDDTHHMMSS.ffffffZ."""
+    return (STAMP_BASE + datetime.timedelta(seconds=i)).strftime("%Y%m%dT%H%M%S.%fZ")
+
+
+def members_named(*names):
+    """A Member for each of NAMES, all on hera and running claude."""
+    return [Member(name, "hera", "claude") for name in names]
+
+
+def mailbox(d, top=(), channel=None, members_checked=None):
+    """Build the mailbox D/mailbox afresh (one already there is removed) and return its path: an empty file for each name in TOP;
+    when CHANNEL is (name, files), the directory +name with an empty file for each of files; and, for each name in MEMBERS_CHECKED
+    (name -> epoch seconds), a member record .agent-mail/members/name.json whose mtime is that time. The files are empty because
+    the census opens none."""
+    box = os.path.join(d, "mailbox")
+    if os.path.lexists(box):
+        shutil.rmtree(box)
+    os.makedirs(box)
+    for name in top:
+        write(box, name, "")
+    if channel:
+        name, files = channel
+        where = os.path.join(box, f"+{name}")
+        os.makedirs(where, exist_ok=True)
+        for file in files:
+            write(where, file, "")
+    if members_checked:
+        records = os.path.join(box, ".agent-mail", "members")
+        os.makedirs(records, exist_ok=True)
+        for name, epoch in members_checked.items():
+            os.utime(write(records, f"{name}.json", "{}\n"), (epoch, epoch))
+    return box
+
+
+def entries_named(*names, channel=None, ctime=None):
+    """The Entry that list_entries would give for each message file name in NAMES: a channel entry when the name is to CHANNEL, a
+    top-level one otherwise. Its ctime is CTIME, or the time of its own stamp when CTIME is None."""
+    entries = []
+    for name in names:
+        m = MSG_RE.fullmatch(name)
+        entries.append(Entry("channel" if m["to"] == channel else "top", name, m["to"], m["sender"], m["stamp"],
+                             stamp_time(m["stamp"]) if ctime is None else ctime))
+    return entries
 
 
 def section(name):
@@ -792,6 +1030,327 @@ def section_deck(d):
     test_last_activity_is_utc(d)
     test_archived_flag(d)
     test_a_title_listed_twice_reads_as_its_best_row(d)
+
+
+# ---- self-test section: census ----
+
+STEWARD = "conductor-ingest-steward"
+NOW = STAMP_BASE.timestamp() + 7200  # 2026-11-02T22:00:00Z, later than every stamp the checks use
+CENSUS_MEMBERS = members_named("lfm3", "kimi-linear", "glm-5.2", "muse-spark", "pipeline", "glm-5.3-flash")
+KIMI_ID = "kimi-linear_20261102T204047.551200Z_from-conductor-ingest-steward_d17f5c20"
+# SENT.log as the steward writes it: intent 7 went out, and intent 8, a NUDGE, has no sent line.
+SENT_LOG = ("intent 7 20261102T204044Z kimi-linear DECISION_ingest-3 ab12\n"
+            f"sent 7 {KIMI_ID}\n"
+            "intent 8 20261102T204100Z lfm3 NUDGE_glm53-fp8 cd34\n")
+
+
+def test_helpers_build_what_the_checks_name(d):
+    ok(stamp(0) == "20261102T200000.000000Z" and stamp(61) == "20261102T200101.000000Z" and len({stamp(i) for i in range(5000)}) == 5000,
+       "census: stamp(i) is a message stamp that differs for each i")
+    box = mailbox(d, top=["a.md"], channel=("ingest", ["b.md"]), members_checked={"pipeline": NOW - 7200})
+    record = os.path.join(box, ".agent-mail", "members", "pipeline.json")
+    ok(box == os.path.join(d, "mailbox") and os.path.getsize(os.path.join(box, "a.md")) == 0 and os.path.isfile(os.path.join(box, "+ingest", "b.md")),
+       "census: mailbox builds empty top-level files and a channel directory, and returns its path")
+    ok(abs(os.path.getmtime(record) - (NOW - 7200)) < 1, "census: mailbox gives a member record the mtime it was asked for")
+    ok(os.listdir(mailbox(d, top=["c.md"])) == ["c.md"], "census: mailbox starts afresh each time it is called")
+    ok(members_named("pi", "omlx") == [Member("pi", "hera", "claude"), Member("omlx", "hera", "claude")], "census: members_named puts members on hera")
+
+
+def test_names_are_exact(d):
+    box = mailbox(d, top=[f"pipeline_{stamp(1)}_from-glm-5.2_aaaaaaaa.txt", f"pi_{stamp(2)}_from-nix_bbbbbbbb.txt", ".pipeline-claimed-1-x-y.txt", "pipeline.md"],
+                  channel=("ingest", [f"ingest_{stamp(3)}_from-glm-5.3-flash_cccccccc.txt"]))
+    e = list_entries(box, "ingest")
+    ok([x.name for x in e if x.dir == "top"] == [f"pipeline_{stamp(1)}_from-glm-5.2_aaaaaaaa.txt", f"pi_{stamp(2)}_from-nix_bbbbbbbb.txt"], "census: hidden and malformed names skipped")
+    ok([(x.to, x.sender) for x in e] == [("pipeline", "glm-5.2"), ("pi", "nix"), ("ingest", "glm-5.3-flash")], "census: names with dots, digits and hyphens are read whole")
+    c = census(e, members_named("pipeline", "glm-5.2", "glm-5.3-flash"), "conductor-ingest-steward", ([], set()), set(), set(), NOW)
+    ok(c.unread["pipeline"][0] == 1 and "pi" not in c.unread, "census: pi's mail is not pipeline's")
+
+
+def test_sent_log_two_phase(d):
+    intents, ids = read_sent_log(write(d, "SENT.log", SENT_LOG))
+    ok(len(intents) == 2 and ids == {KIMI_ID}, "census: two-phase log parsed")
+    ok(intents[0] == Intent("7", "20261102T204044Z", "kimi-linear", "DECISION_ingest-3", "ab12", KIMI_ID),
+       "census: an intent holds its seq, UTC, recipient, subject and sha, and the id its sent line gave")
+    ok(intents[1] == Intent("8", "20261102T204100Z", "lfm3", "NUDGE_glm53-fp8", "cd34", None), "census: an intent with no sent line has no id")
+
+
+def test_sent_log_edges(d):
+    ok(read_sent_log(os.path.join(d, "no-such-SENT.log")) == ([], set()), "census: a missing SENT.log holds nothing")
+    first = f"lfm3_{stamp(1)}_from-{STEWARD}_00000001"
+    orphan = f"pipeline_{stamp(200)}_from-{STEWARD}_00000003"
+    summary = f"ingest_{stamp(401)}_from-{STEWARD}_00000006"
+    log = "\n".join(["",                                                               # a blank line
+                     "intent 1 20261102T200000Z lfm3 NUDGE glm-5.3 no update ab12",   # a subject of several words
+                     f"sent 1 {first}",
+                     "intent 2 20261102T200100Z pipeline DUPLICATE_a_b cd34",         # no sent line follows it
+                     f"sent 3 {orphan}",                                              # no intent line comes before it
+                     "intent 4 20261102T200300Z lfm3 cd34",                           # no subject
+                     "sent 4",                                                        # no id
+                     "sent 5 one two",                                                # a word too many
+                     "intent",
+                     "gibberish about an intent and what was sent",
+                     "intent 6 20261102T200400Z +ingest SUMMARY_+ingest ef56",        # a post: its recipient is +channel
+                     f"sent 6 {summary}", ""])
+    path = write(d, "SENT-edges.log", log)
+    intents, ids = read_sent_log(path)
+    ok(intents == [Intent("1", "20261102T200000Z", "lfm3", "NUDGE glm-5.3 no update", "ab12", first),
+                   Intent("2", "20261102T200100Z", "pipeline", "DUPLICATE_a_b", "cd34", None),
+                   Intent("6", "20261102T200400Z", "+ingest", "SUMMARY_+ingest", "ef56", summary)],
+       "census: an intent's subject is the words between its recipient and its sha; lines of any other shape are skipped")
+    ok(ids == {first, orphan, summary}, "census: sent_ids holds every id a sent line names, with or without an intent before it")
+    again = write(d, "SENT-again.log", f"intent 9 20261102T200000Z lfm3 NUDGE_a ab12\nintent 9 20261102T200100Z lfm3 NUDGE_b cd34\nsent 9 {first}\n")
+    ok([i.id for i in read_sent_log(again)[0]] == [None, first], "census: a sent line names the latest intent with its seq")
+    with open(path, "wb") as f:
+        f.write(b"intent 1 20261102T200000Z lfm3 NUDGE_\xff cd34\n")
+    ok(len(read_sent_log(path)[0]) == 1, "census: a damaged byte in SENT.log does not stop the reader")
+
+
+def test_nudge_ids(d):
+    a, b, c = (f"{to}_{stamp(i)}_from-{STEWARD}_0000000{i}" for i, to in ((1, "lfm3"), (3, "kimi-linear"), (4, "lfm3")))
+    log = (f"intent 1 20261102T200000Z lfm3 NUDGE_glm53-fp8 cd34\nsent 1 {a}\n"
+           "intent 2 20261102T200100Z pipeline NUDGE_x ab12\n"                                  # never sent
+           f"intent 3 20261102T200200Z kimi-linear DECISION_ingest-3 ef56\nsent 3 {b}\n"        # sent, but not a NUDGE
+           f"intent 4 20261102T200300Z lfm3 NUDGE glm-5.3 no update 0123\nsent 4 {c}\n")
+    ok(nudge_ids(read_sent_log(write(d, "SENT.log", log))[0]) == {a, c}, "census: the NUDGE ids are those of the sent intents whose subject starts with NUDGE")
+
+
+def test_notes_log(d):
+    ok(read_notes_log(os.path.join(d, "no-such-NOTES.log")) == set(), "census: a missing NOTES.log holds no ids")
+    a, b, c = (f"pipeline_{stamp(i)}_from-lfm3_0000000{i}" for i in (1, 2, 3))
+    log = f"20261102T204101Z {a}\n\nstray\n20261102T204102Z {b} extra\n20261102T204103Z {c}\n"
+    path = write(d, "NOTES.log", log)
+    ok(read_notes_log(path) == {a, c}, "census: NOTES.log gives the id on each line of two words, and skips the rest")
+    with open(path, "wb") as f:
+        f.write(b"20261102T204101Z lfm3_x\xff\n")
+    ok(len(read_notes_log(path)) == 1, "census: a damaged byte in NOTES.log does not stop the reader")
+
+
+def test_stamp_time(d):
+    base = STAMP_BASE.timestamp()
+    ok(stamp_time("20261102T200000.000000Z") == base and stamp_time("20261102T200000Z") == base, "census: a stamp, with a fraction or without, is a UTC time")
+    ok(stamp_time("20261102T200000.250000Z") == base + 0.25, "census: the fraction counts")
+    arabic_indic = "".join(chr(0x0660 + int(digit)) for digit in "20261102") + "T200000Z"  # int() reads these digits, so only the pattern can refuse them
+    for odd in ("20261340T250000.000000Z", "20261102T200060.000000Z", "2026-11-02T20:00:00Z", "", "20261102T200000.5Z", arabic_indic):
+        ok(stamp_time(odd) is None, f"census: {odd!r} is not a stamp")
+
+
+def test_list_entries_fields_and_order(d):
+    # The stamps run lfm3, pipeline, glm-5.2: neither the names' order nor its reverse, nor the order the files are made in.
+    one, two, three = f"lfm3_{stamp(1)}_from-nix_00000001.txt", f"pipeline_{stamp(2)}_from-nix_00000002.txt", f"glm-5.2_{stamp(3)}_from-dsv41f_00000003.txt"
+    post = f"ingest_{stamp(4)}_from-lfm3_00000004.txt"
+    box = mailbox(d, top=[three, one, two], channel=("ingest", [post]))
+    e = list_entries(box, "ingest")
+    ok([(x.dir, x.name) for x in e] == [("top", one), ("top", two), ("top", three), ("channel", post)], "census: the top level lists first, then the channel, each oldest stamp first")
+    ok([(x.to, x.sender, x.stamp) for x in e] == [("lfm3", "nix", stamp(1)), ("pipeline", "nix", stamp(2)), ("glm-5.2", "dsv41f", stamp(3)), ("ingest", "lfm3", stamp(4))],
+       "census: an entry holds the recipient, sender and stamp its name gives")
+    ok(all(x.ctime == os.lstat(os.path.join(box, "+ingest" if x.dir == "channel" else "", x.name)).st_ctime for x in e), "census: an entry's ctime is its file's")
+
+
+def test_only_whole_message_names_are_listed(d):
+    good = f"pipeline_{stamp(1)}_from-nix_0123abcd.txt"
+    held = [".pi-claimed-999999-ab12cd34-pi_20261029T235955.000000Z_from-nix_77777775.txt",  # what agent-mail makes of a message a reader holds or refuses
+            ".pi-claimed-pi_20261029T235957.000000Z_from-nix_88888888.txt",
+            ".pi-rejected-pi_20261030T000703.000000Z_from-nix_aaaa0004.txt"]
+    odd = [good + ".bak", good.removesuffix(".txt"), good.replace("0123abcd", "89ABCDEF"), good.replace("0123abcd", "0123abc"), good.replace("0123abcd", "0123abcde"),
+           "PI_20261030T000004.000000Z_from-nyx-ai_bbbbbbbb.txt", good.replace("pipeline", "pipe--line"), good.replace(".000000Z", "Z"),
+           "pipeline--20261030T000002Z--from-catalog.md"]  # no two of these differ only in case, which a case-insensitive filesystem would merge
+    box = mailbox(d, top=[*held, *odd, good])
+    ok([x.name for x in list_entries(box, "ingest")] == [good], "census: only a name that is wholly a message's is listed, not a held file or a near miss")
+
+
+def test_list_entries_follows_no_symlink(d):
+    name, post = f"pipeline_{stamp(1)}_from-nix_00000001.txt", f"ingest_{stamp(2)}_from-nix_00000002.txt"
+    box = mailbox(d)
+    link = os.path.join(box, name)
+    os.symlink(os.path.join(d, "nowhere"), link)
+    e = list_entries(box, "ingest")
+    ok([x.name for x in e] == [name] and e[0].ctime == os.lstat(link).st_ctime, "census: a symlink with a message's name is listed by its own ctime, never followed")
+    elsewhere = os.path.join(d, "elsewhere")
+    os.mkdir(elsewhere)
+    write(elsewhere, post, "")
+    os.symlink(elsewhere, os.path.join(box, "+ingest"))
+    ok([x.name for x in list_entries(box, "ingest")] == [name], "census: a channel that is a symlink is no channel, so it lists nothing")
+    shortcut = os.path.join(d, "shortcut")
+    os.symlink(box, shortcut)
+    ok([x.name for x in list_entries(shortcut, "ingest")] == [name], "census: the mailbox itself may be reached through a symlink")
+
+
+@contextlib.contextmanager
+def listing_as(change):
+    """Within the block, os.scandir lists a directory through CHANGE(path, found): CHANGE gets the DirEntries the real scandir found
+    as a list, may change the directory, and returns the list the caller will see. It hands the census a listing in any order, or
+    one that has gone out of date."""
+    scandir = os.scandir
+
+    def changed(path):
+        return contextlib.nullcontext(iter(change(path, list(scandir(path)))))
+
+    os.scandir = changed
+    try:
+        yield
+    finally:
+        os.scandir = scandir
+
+
+def test_listing_order_is_the_stamps_not_the_filesystems(d):
+    names = [f"pipeline_{stamp(5)}_from-nix_00000002.txt", f"lfm3_{stamp(5)}_from-nix_00000001.txt", f"glm-5.2_{stamp(3)}_from-nix_00000003.txt",
+             f"omlx_{stamp(9)}_from-nix_00000004.txt"]
+    box = mailbox(d, top=names)
+    expected = [names[2], names[1], names[0], names[3]]  # by stamp, and by name where the stamps are one
+    forward = [x.name for x in list_entries(box, "ingest")]
+    with listing_as(lambda path, found: found[::-1]):
+        backward = [x.name for x in list_entries(box, "ingest")]
+    ok(forward == backward == expected, "census: the order of the entries is by stamp, then name, whatever order the filesystem lists them in")
+
+
+def test_list_entries_in_a_changing_mailbox(d):
+    gone, kept = f"pipeline_{stamp(1)}_from-nix_00000001.txt", f"pipeline_{stamp(2)}_from-nix_00000002.txt"
+    box = mailbox(d, top=[gone, kept])
+    ok([x.name for x in list_entries(box, "nosuch")] == [gone, kept], "census: a channel that does not exist has no posts, and is no error")
+    write(box, "+file", "")
+    ok([x.name for x in list_entries(box, "file")] == [gone, kept], "census: nor is a +channel that is a file, not a directory")
+
+    def claim(path, found):
+        if os.path.lexists(os.path.join(path, gone)):
+            os.remove(os.path.join(path, gone))  # the member's reader claims it before the census asks about it
+        return found
+
+    with listing_as(claim):
+        names = [x.name for x in list_entries(box, "nosuch")]
+    ok(names == [kept], "census: a file that is claimed after the listing is left out, not an error")
+
+
+def test_listing_opens_no_file(d):
+    box = mailbox(d, top=[f"pipeline_{stamp(i)}_from-lfm3_{i:08x}.txt" for i in range(20)], channel=("ingest", [f"ingest_{stamp(i)}_from-lfm3_{i:08x}.txt" for i in range(20)]))
+    opened = []
+
+    def refuse(*args, **kwargs):
+        opened.append(args)
+        raise OSError("a file was opened")
+
+    real_open, real_os_open = builtins.open, os.open
+    builtins.open, os.open = refuse, refuse
+    try:
+        c = census(list_entries(box, "ingest"), CENSUS_MEMBERS, STEWARD, ([], set()), set(), set(), NOW)
+    finally:
+        builtins.open, os.open = real_open, real_os_open
+    ok(opened == [] and c.unread["pipeline"][0] == 20 and c.posts_since(0) == 20, "census: listing and counting open no file")
+
+
+def test_unmatched_own_files(d):
+    sent = read_sent_log(write(d, "SENT.log", SENT_LOG))
+    e = entries_named("lfm3_20261102T204103.000000Z_from-conductor-ingest-steward_e1e1e1e1.txt",   # matches intent 8 (lfm3, within 10 s)
+                      "muse-spark_20261102T210000.000000Z_from-conductor-ingest-steward_f2f2f2f2.txt")  # no intent, no sent line
+    c = census(e, CENSUS_MEMBERS, STEWARD, sent, set(), set(), NOW)
+    ok(c.unmatched_own == ["muse-spark_20261102T210000.000000Z_from-conductor-ingest-steward_f2f2f2f2"], "census: an intent within 10 s matches; the rest is disputed")
+
+
+def test_own_files_match_intents_by_recipient_and_time(d):
+    sent = read_sent_log(write(d, "SENT.log", "intent 1 20261102T200000Z lfm3 NUDGE_a ab12\nintent 2 20261102T200100Z +ingest SUMMARY_x cd34\n"))
+
+    def own(to, when, tail):
+        return f"{to}_{when}_from-{STEWARD}_{tail}.txt"
+
+    def ids(*names):
+        return [name.removesuffix(".txt") for name in names]
+
+    direct = [own("lfm3", stamp(10), "00000001"),     # exactly 10 s after the intent to lfm3: within it
+              own("lfm3", stamp(-5), "00000002"),     # 5 s before it: within it too
+              own("lfm3", stamp(11), "00000003"),     # 11 s after it: not
+              own("lfm3-2", stamp(1), "00000004"),    # lfm3's intent is not lfm3-2's
+              own("lfm", stamp(1), "00000005"),       # nor lfm's
+              own("ingest", stamp(61), "00000006")]   # nor mail to ingest's: the intent names +ingest
+    posts = [own("ingest", stamp(61), "00000007"),    # 1 s after the intent for +ingest: within it
+             own("ingest", stamp(100), "00000008")]   # 40 s after it: not
+    c = census(entries_named(*direct) + entries_named(*posts, channel="ingest"), CENSUS_MEMBERS, STEWARD, sent, set(), set(), NOW)
+    ok(c.unmatched_own == ids(*direct[2:], posts[1]), "census: an intent matches by whole recipient (+channel for a post) and by time, 10 s either way")
+    elsewhere = [f"lfm3_{stamp(500)}_from-{STEWARD}-2_00000009.txt",  # a sender that only starts with the steward's name
+                 f"lfm3_{stamp(600)}_from-nix_0000000a.txt"]          # another sender
+    accounted = own("pipeline", stamp(700), "0000000b")               # no intent, but a sent line names it
+    c = census(entries_named(accounted, *elsewhere), CENSUS_MEMBERS, STEWARD, ([], set(ids(accounted))), set(), set(), NOW)
+    ok(c.unmatched_own == [], "census: a file from another sender, or one a sent line names, is not disputed")
+    odd = own("lfm3", "20261340T250000.000000Z", "0000000c")
+    c = census(entries_named(odd, ctime=STAMP_BASE.timestamp()), CENSUS_MEMBERS, STEWARD, sent, set(), set(), NOW)
+    ok(c.unmatched_own == ids(odd), "census: a stamp that is not a time matches no intent, whatever its ctime")
+
+
+def test_nudges_and_notes(d):
+    nudge = f"lfm3_{stamp(10)}_from-conductor-ingest-steward_11111111"
+    noted = f"kimi-linear_{stamp(10)}_from-glm-5.2_22222222"
+    bare = f"lfm3_{stamp(10)}_from-glm-5.2_33333333"
+    c = census(entries_named(f"{nudge}.txt", f"{noted}.txt", f"{bare}.txt"), CENSUS_MEMBERS, STEWARD, ([], {nudge}), notes={noted}, nudge_ids={nudge}, now=NOW)
+    ok(len(c.nudges_unread) == 1 and c.transit_without_note == 1, "census: unread NUDGE found; one member mail in transit lacks a NOTE")
+    ok(c.nudges_unread == [(nudge, 7190.0)] and c.unmatched_own == [], "census: an unread NUDGE has the age of its stamp, and a sent line accounts for it")
+    post = f"ingest_{stamp(11)}_from-conductor-ingest-steward_44444444"
+    c = census(entries_named(f"{post}.txt", channel="ingest"), CENSUS_MEMBERS, STEWARD, ([], {post}), set(), {post}, NOW)
+    ok(c.nudges_unread == [], "census: only a file at the top level can be an unread NUDGE")
+
+
+def test_transit_counts_member_to_member_mail_only(d):
+    members = members_named("pipeline", "lfm3")
+    noted = f"lfm3_{stamp(2)}_from-pipeline_00000002"
+    e = entries_named(f"pipeline_{stamp(1)}_from-lfm3_00000001.txt",                # member to member, no NOTE
+                      f"{noted}.txt",                                               # member to member, with its NOTE
+                      f"pipeline_{stamp(3)}_from-pi_00000003.txt",                  # pi is not pipeline
+                      f"pi_{stamp(4)}_from-lfm3_00000004.txt",                      # nor is the recipient pi
+                      f"pipeline_{stamp(5)}_from-{STEWARD}_00000005.txt",           # the steward is not a member
+                      f"ingest_{stamp(6)}_from-lfm3_00000006.txt", channel="ingest")  # a post is not mail in transit
+    c = census(e, members, STEWARD, ([], set()), {noted}, set(), NOW)
+    ok(c.transit_without_note == 1, "census: only top-level mail from one member to another, with no NOTE, is counted")
+
+
+def test_unread_counts_and_ages(d):
+    e = entries_named(f"pipeline_{stamp(0)}_from-lfm3_00000001.txt", f"pipeline_{stamp(600)}_from-nix_00000002.txt",
+                      f"dsv41f_{stamp(100)}_from-lfm3_00000003.txt", f"pi_{stamp(50)}_from-lfm3_00000004.txt",
+                      f"ingest_{stamp(0)}_from-lfm3_00000005.txt", channel="ingest", ctime=NOW - 5)  # all arrived here 5 s ago
+    c = census(e, members_named("pipeline", "dsv41f", "lfm3"), STEWARD, ([], set()), set(), set(), NOW)
+    ok(c.unread == {"pipeline": (2, 7200.0), "dsv41f": (1, 7100.0), "lfm3": (0, None)},
+       "census: unread is each member's count of top-level files and the age in seconds of the oldest, (0, None) with none; posts and other names' mail are not counted")
+
+
+def test_age_falls_back_to_ctime(d):
+    odd = "pipeline_20261340T250000.000000Z_from-lfm3_00000001"  # in the shape of a stamp, but month 13 is not a time
+    c = census(entries_named(f"{odd}.txt", ctime=NOW - 90), members_named("pipeline"), STEWARD, ([], set()), set(), {odd}, NOW)
+    ok(c.unread["pipeline"] == (1, 90.0) and c.nudges_unread == [(odd, 90.0)], "census: a stamp that is not a time gives the age from the file's ctime")
+
+
+def test_posts_since(d):
+    e = [x for i, ctime in enumerate((100.0, 200.0, 300.0)) for x in entries_named(f"ingest_{stamp(i)}_from-lfm3_{i:08x}.txt", channel="ingest", ctime=ctime)]
+    e += entries_named(f"pipeline_{stamp(9)}_from-lfm3_00000009.txt", ctime=400.0)
+    c = census(e, CENSUS_MEMBERS, STEWARD, ([], set()), set(), set(), NOW)
+    ok([c.posts_since(ts) for ts in (0, 100, 101, 300, 301)] == [3, 3, 2, 1, 0], "census: posts_since counts the channel's files with a ctime at or after it, and never direct mail")
+
+
+def test_census_scales(d):
+    box = mailbox(d, top=[f"glm-5.2_{stamp(i)}_from-lfm3_{i:08x}.txt" for i in range(500)], channel=("ingest", [f"ingest_{stamp(i)}_from-lfm3_{i:08x}.txt" for i in range(5000)]))
+    t = time.monotonic(); e = list_entries(box, "ingest"); ok(time.monotonic() - t < 1.0 and len(e) == 5500, "census: 5,500 names listed under a second without opening a file")
+    t = time.monotonic(); c = census(e, members_named("glm-5.2"), STEWARD, ([], set()), set(), set(), NOW)
+    ok(time.monotonic() - t < 1.0 and c.unread["glm-5.2"][0] == 500 and c.posts_since(0) == 5000, "census: and counted in under a second")
+
+
+@section("census")
+def section_census(d):
+    test_helpers_build_what_the_checks_name(d)
+    test_names_are_exact(d)
+    test_sent_log_two_phase(d)
+    test_sent_log_edges(d)
+    test_nudge_ids(d)
+    test_notes_log(d)
+    test_stamp_time(d)
+    test_list_entries_fields_and_order(d)
+    test_only_whole_message_names_are_listed(d)
+    test_list_entries_follows_no_symlink(d)
+    test_listing_order_is_the_stamps_not_the_filesystems(d)
+    test_list_entries_in_a_changing_mailbox(d)
+    test_listing_opens_no_file(d)
+    test_unmatched_own_files(d)
+    test_own_files_match_intents_by_recipient_and_time(d)
+    test_nudges_and_notes(d)
+    test_transit_counts_member_to_member_mail_only(d)
+    test_unread_counts_and_ages(d)
+    test_age_falls_back_to_ctime(d)
+    test_posts_since(d)
+    test_census_scales(d)
 
 
 # ---- main ----
