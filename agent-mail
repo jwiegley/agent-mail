@@ -407,7 +407,7 @@ def sort_key(entry, st):
 def alive(pid):
     try:
         os.kill(pid, 0)
-    except ProcessLookupError:
+    except (ProcessLookupError, OverflowError):  # no process has a pid the kernel cannot hold
         return False
     except PermissionError:
         return True
@@ -2134,6 +2134,23 @@ def bell_path(d, name, parent):
     return os.path.join(runtime_dir(), f"{dirkey(d)}-{name}-{parent}.bell")
 
 
+BELL_RE = re.compile(r"[0-9a-f]{12}-.+-([0-9]+)\.bell")
+
+
+def sweep_slots(run):
+    """Remove the doorbell slots in the runtime directory RUN whose parent process has gone,
+    since no doorbell can take them again; return how many it removed. Never raises."""
+    removed = 0
+    with contextlib.suppress(OSError):
+        for entry in os.listdir(run):
+            m = BELL_RE.fullmatch(entry)
+            if m and not alive(int(m.group(1))):
+                with contextlib.suppress(OSError):
+                    os.unlink(os.path.join(run, entry))
+                    removed += 1
+    return removed
+
+
 def update_slot(path, change):
     """Apply CHANGE to a doorbell slot's data under a short flock, writing it back when CHANGE
     returns true, and return the data."""
@@ -2192,6 +2209,9 @@ def bell_pass(d, name, settings, slot, now):
 def doorbell(d, name, settings, parent, forever, waiter=None, max_passes=None):
     """Ring a content-free line when mail for NAME starts waiting; never claim, never write
     anything but its slot and the log, never print anything but ring lines, never touch stderr.
+    Slots do not pile up: a doorbell removes its slot when its parent has gone, and at start
+    it removes every slot whose parent has gone. A slot outlives a ring, so a restarted
+    doorbell still rings once per id.
 
     Returns 10 after a ring (without forever), 0 when a newer doorbell took the slot or the
     parent has gone, and 1 on an error or a vanished mailbox; diagnostics go to the log.
@@ -2199,6 +2219,7 @@ def doorbell(d, name, settings, parent, forever, waiter=None, max_passes=None):
     own = waiter is None
     try:
         slot = bell_path(d, name, parent)
+        sweep_slots(os.path.dirname(slot))
         gen = start_bell(slot)
         if own:
             waiter = Waiter(lambda: watch_dirs(d, name, settings), settings.poll, settings.notify)
@@ -2210,6 +2231,8 @@ def doorbell(d, name, settings, parent, forever, waiter=None, max_passes=None):
         while True:
             if not alive(parent):
                 log(f"doorbell for {name}: process {parent} has gone")
+                with contextlib.suppress(OSError):
+                    os.unlink(slot)
                 return 0
             if update_slot(slot, lambda data: False)["gen"] != gen:
                 log(f"doorbell for {name}: a newer doorbell took the slot")
@@ -4280,6 +4303,19 @@ def section_doorbell(t):
     orphaned = t.capture(doorbell, d, "orphan", s, child.pid, False, waiter=fake_waiter(), max_passes=5)
     t.ok(not alive(child.pid) and orphaned == ("", 0, "") and f"process {child.pid} has gone" in logged()[len(before):],
          "a doorbell exits 0 without ringing when its parent has gone, though mail waits")
+    t.ok(not os.path.lexists(bell_path(d, "orphan", child.pid)), "a doorbell whose parent has gone removes its slot")
+    run = runtime_dir()
+    gone = [bell_path(d, "x", child.pid), bell_path(t.box("other-box"), "y-2", child.pid), os.path.join(run, f"{'0' * 12}-z-{10 ** 30}.bell")]
+    live = [bell_path(d, "x", ppid2), os.path.join(run, "notes.txt"), os.path.join(run, f"{dirkey(d)}-x.reader")]
+    for path in gone + live:
+        t.mk(path, "{}")
+    swept = t.capture(doorbell, d, "sweeper", s, ppid, False, waiter=fake_waiter(), max_passes=1)
+    t.ok(swept == ("", 0, "") and not any(os.path.lexists(p) for p in gone) and all(os.path.exists(p) for p in live),
+         "a starting doorbell removes every slot whose parent has gone, a pid too large to exist included, and nothing else")
+    huge = 10 ** 20
+    out, code, err = t.run(["--dir", d, "watch", "pi", "--doorbell", "--parent", str(huge)])
+    t.ok((code, out, err) == (0, "", "") and not os.path.lexists(bell_path(d, "pi", huge)),
+         "a doorbell whose --parent is too large to be a pid stops as when its parent has gone, without a traceback")
 
     class Scripted(FakeBackend):
         """Runs the next of its actions at each wait."""
