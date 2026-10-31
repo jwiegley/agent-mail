@@ -84,6 +84,7 @@ import contextlib
 import dataclasses
 import datetime
 import errno
+import fcntl
 import hashlib
 import io
 import json
@@ -121,7 +122,6 @@ MARKER_V2 = ".agent-mail-mailbox-v2"
 DEFAULT_DIR = "~/Mailbox"
 HOST = socket.gethostname().split(".")[0].lower()
 HOSTTAG = hashlib.sha256(HOST.encode()).hexdigest()[:8]
-PRESENCE_EVERY = 60.0
 IDENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 STAMP = re.compile(r"(\d{8}T\d{6})(?:\.(\d{6}))?Z")
 EXIT_STATUS = {"stuck": 2, "output_failed": 3, "not_reader": 4}
@@ -424,48 +424,291 @@ def too_long(name):
     return len(os.fsencode(name)) > NAME_MAX
 
 
-def state_path(d, name, kind):
-    key = hashlib.sha256(os.path.realpath(d).encode()).hexdigest()[:12]
-    return os.path.join(os.path.expanduser("~/.cache/agent-mail"), f"{key}-{name}.{kind}")
+# ---- host-local state, members and the reader lock ----
+
+STATE_DIR = "~/.local/state/agent-mail"
+MEMBER_EVERY = 300.0
+REMEMBER_MAX = 500
+SEND_WINDOW = 3600.0
+POSTS_PER_HOUR = 20
+BROADCAST_EVERY = 900.0
+DUPLICATE_WINDOW = 600.0
 
 
-def save_json(path, data):
-    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-    tmp = f"{path}.{os.getpid()}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f)
-    os.replace(tmp, path)
+def dirkey(d):
+    """The first 12 hex digits of SHA-256 of the mailbox's real path."""
+    return hashlib.sha256(os.fsencode(os.path.realpath(d))).hexdigest()[:12]
 
 
-def load_json(path):
+def state_file(d, name, suffix=""):
+    """~/.local/state/agent-mail/<dirkey>-<name><suffix>.json, which never leaves this host."""
+    return os.path.join(os.path.expanduser(STATE_DIR), f"{dirkey(d)}-{name}{suffix}.json")
+
+
+def read_json(path):
     try:
         with open(path, encoding="utf-8") as f:
             return json.load(f)
-    except (FileNotFoundError, ValueError):
+    except (OSError, ValueError):
         return None
 
 
-def presence_path(d, name):
+def write_json(path, data):
+    """Write DATA to a hidden temporary file beside PATH, then rename it into place."""
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    tmp = os.path.join(os.path.dirname(path), f".{os.path.basename(path)}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def fresh_state():
+    return {"v": 2, "since_all": None, "subs": {}, "seen": {}, "last_batch": {}, "last_prune": 0, "reported": []}
+
+
+def valid_state(data):
+    return (isinstance(data, dict) and data.get("v") == 2
+            and all(isinstance(data.get(k, kind()), kind) for k, kind in (("subs", dict), ("seen", dict), ("last_batch", dict), ("reported", list))))
+
+
+def load_state(d, name):
+    """NAME's reader state: the file, else its .bak, else an empty state with _rebuilt set."""
+    path = state_file(d, name)
+    for p in (path, path + ".bak"):
+        data = read_json(p)
+        if valid_state(data):
+            return {**fresh_state(), **data, "_rebuilt": False}
+    return {**fresh_state(), "_rebuilt": True}
+
+
+def save_state(d, name, state):
+    """Save NAME's state atomically, after copying a valid previous file to .bak.
+    Only the live reader of NAME calls this."""
+    path = state_file(d, name)
+    previous = read_json(path)
+    if valid_state(previous):
+        write_json(path + ".bak", previous)
+    write_json(path, {**{k: v for k, v in state.items() if not k.startswith("_")}, "v": 2})
+
+
+def remember(state, key):
+    """True the first time KEY is seen; the state keeps the last REMEMBER_MAX keys."""
+    reported = state.setdefault("reported", [])
+    if key in reported:
+        return False
+    reported.append(key)
+    del reported[:-REMEMBER_MAX]
+    return True
+
+
+def note_send(d, sender, target, body, now):
+    """Record a send in SENDER's one-hour window on this host, or refuse it.
+
+    rate_limited: a 21st post to one channel within an hour, or a second broadcast within
+    15 minutes. duplicate: the same body to the same target within 10 minutes. Direct mail
+    has no count cap. The window changes only under an flock, because CLI and MCP senders
+    run in separate processes.
+    """
+    path = state_file(d, sender, ".send")
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    digest = hashlib.sha256(body.encode("utf-8", "surrogateescape")).hexdigest()[:16]
+    fd = os.open(path[:-len(".json")] + ".lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        window = [e for e in (read_json(path) or []) if isinstance(e, list) and len(e) == 3
+                  and isinstance(e[0], (int, float)) and now - e[0] < SEND_WINDOW]
+        for at, tgt, h in window:
+            if tgt == target and h == digest and now - at < DUPLICATE_WINDOW:
+                raise MailError("duplicate", f"{sender} sent the same text to {target} {int(now - at)} seconds ago; "
+                                             "an identical message to one target waits 10 minutes")
+        if target.startswith("+"):
+            times = sorted(at for at, tgt, _ in window if tgt == target)
+            if len(times) >= POSTS_PER_HOUR:
+                again = utc(times[-POSTS_PER_HOUR] + SEND_WINDOW)
+                raise MailError("rate_limited", f"{sender} has posted {len(times)} times to {target} in the last hour; posting there is allowed again at {again}")
+        elif target == "all":
+            times = [at for at, tgt, _ in window if tgt == "all" and now - at < BROADCAST_EVERY]
+            if times:
+                raise MailError("rate_limited", f"{sender} broadcast at {utc(max(times))}; one broadcast is allowed every 15 minutes, "
+                                                f"so the next is allowed at {utc(max(times) + BROADCAST_EVERY)}")
+        window.append([now, target, digest])
+        write_json(path, window)
+    finally:
+        os.close(fd)
+
+
+def member_path(d, name):
+    return os.path.join(d, ".agent-mail", "members", f"{name}.json")
+
+
+def legacy_presence(d, name):
     return os.path.join(d, ".agent-mail-presence", name)
 
 
-def touch_presence(d, name):
-    # At most once a minute, so a shared (NFS or synced) mailbox is not rewritten on every poll.
-    p = presence_path(d, name)
+def parse_utc(text):
+    """Epoch seconds for a UTC stamp in either standard form, or None."""
+    for fmt in ("%Y%m%dT%H%M%SZ", "%Y%m%dT%H%M%S.%fZ"):
+        try:
+            return datetime.datetime.strptime(text, fmt).replace(tzinfo=datetime.timezone.utc).timestamp()
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def read_member(path):
+    """A member record, or None when it is missing, not ours, not a regular file or not valid.
+    Member records are peer-writable and only ever displayed or warned about."""
     try:
-        if clock() - os.stat(p).st_mtime < PRESENCE_EVERY:
-            return
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
-        pass
+        return None
     try:
-        # mkdir, not makedirs: a mailbox that has vanished must not be re-created here.
-        with contextlib.suppress(FileExistsError):
-            os.mkdir(os.path.dirname(p), 0o700)
-        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_size > 65536:
+            return None
+        data = json.loads(os.read(fd, 65537).decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    finally:
         os.close(fd)
-        os.utime(p, None)
+    if (isinstance(data, dict) and data.get("v") == 2 and isinstance(data.get("host"), str) and isinstance(data.get("subs"), list)
+            and all(isinstance(s, str) for s in data["subs"]) and parse_utc(data.get("checked")) is not None):
+        return data
+    return None
+
+
+def touch_member(d, name, subs, now, force=False):
+    """Publish NAME's member record when its subscription list changes, when forced, or at
+    most every 300 s, and touch the v1 presence file with it while v1 readers remain.
+    Best effort: a mailbox that cannot be written is still read, and a mailbox that has
+    vanished is never re-created."""
+    subs = sorted(subs)
+    path = member_path(d, name)
+    old = read_member(path)
+    if (not force and old is not None and old["host"] == HOST and old["subs"] == subs
+            and 0 <= now - parse_utc(old["checked"]) < MEMBER_EVERY):
+        return
+    record = {"v": 2, "name": name, "host": HOST, "checked": utc(now), "subs": subs}
+    try:
+        for p in (os.path.join(d, ".agent-mail"), os.path.dirname(path), os.path.dirname(legacy_presence(d, name))):
+            with contextlib.suppress(FileExistsError):
+                os.mkdir(p, 0o700)
+        # A hidden .tmp name, which .stignore keeps on this host.
+        tmp = os.path.join(os.path.dirname(path), f".{name}.json.tmp")
+        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600), "w", encoding="utf-8") as f:
+            json.dump(record, f)
+        os.rename(tmp, path)
+        legacy = legacy_presence(d, name)
+        os.close(os.open(legacy, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600))
+        os.utime(legacy, (now, now))
     except OSError:
         pass
+
+
+def members(d):
+    """Every valid member record in the mailbox, by name."""
+    out = {}
+    try:
+        entries = os.listdir(os.path.join(d, ".agent-mail", "members"))
+    except OSError:
+        return out
+    for entry in entries:
+        name = entry[:-len(".json")]
+        if entry.endswith(".json") and grammatical(name):
+            record = read_member(member_path(d, name))
+            if record is not None and record.get("name") == name:
+                out[name] = record
+    return out
+
+
+def last_checked(d, name):
+    """When NAME's mail was last checked: its member record, else the v1 presence file."""
+    record = read_member(member_path(d, name))
+    if record is not None:
+        return parse_utc(record["checked"])
+    try:
+        return os.lstat(legacy_presence(d, name)).st_mtime
+    except OSError:
+        return None
+
+
+def runtime_dir():
+    """$AGENT_MAIL_RUNTIME_DIR, else /tmp/agent-mail-<uid> (or under the system temporary
+    directory when /tmp is missing): local, mode 0700, ours, never a symlink."""
+    path = os.environ.get("AGENT_MAIL_RUNTIME_DIR")
+    if not path:
+        base = "/tmp" if os.path.isdir("/tmp") else tempfile.gettempdir()
+        path = os.path.join(base, f"agent-mail-{os.getuid()}")
+    try:
+        with contextlib.suppress(FileExistsError):
+            os.mkdir(path, 0o700)
+        st = os.lstat(path)
+    except OSError as e:
+        raise MailError("unsafe_runtime_dir", f"cannot use the runtime directory {path}: {e.strerror}") from None
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
+        raise MailError("unsafe_runtime_dir", f"the runtime directory {path} is a symlink, not a directory, not ours, or open to others")
+    return path
+
+
+class ReaderLock:
+    """The flock held by the live reader of a name on this host; it dies with the process."""
+
+    def __init__(self, d, name):
+        self.path = os.path.join(runtime_dir(), f"{dirkey(d)}-{name}.reader")
+        self.fd = None
+        self.ino = None
+        self.holder = None
+
+    @property
+    def held(self):
+        return self.fd is not None
+
+    def acquire(self):
+        if self.fd is not None:
+            return self.revalidate()
+        try:
+            fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        except OSError as e:
+            self.holder = f"unknown ({e.strerror})"
+            return False
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            try:
+                self.holder = os.pread(fd, 128, 0).decode("utf-8", "replace").strip() or "unknown"
+            except OSError:
+                self.holder = "unknown"
+            os.close(fd)
+            return False
+        st = os.fstat(fd)
+        self.holder = f"{os.getpid()}@{HOST}"
+        with contextlib.suppress(OSError):
+            os.ftruncate(fd, 0)
+            os.pwrite(fd, f"{self.holder}\n".encode(), 0)
+        self.fd, self.ino = fd, (st.st_dev, st.st_ino)
+        return True
+
+    def revalidate(self):
+        """True while the path still names the locked file; otherwise let go and try the file it names now."""
+        if self.fd is not None:
+            try:
+                st = os.lstat(self.path)
+                if (st.st_dev, st.st_ino) == self.ino:
+                    return True
+            except OSError:
+                pass
+            self.release()
+        return self.acquire()
+
+    def release(self):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = self.ino = None
 
 
 class Rejected(Exception):
@@ -696,16 +939,6 @@ def deliver(d, name, result, max_bytes, write):
             pass
 
 
-def remember_stuck(d, name, stuck):
-    """Return the stuck notices not reported before by any reader, and remember them."""
-    path = state_path(d, name, "stuck")
-    seen = set(load_json(path) or [])
-    fresh = [(k, msg) for k, msg in stuck if k not in seen]
-    if fresh:
-        save_json(path, sorted(seen | {k for k, _ in fresh})[-200:])
-    return fresh
-
-
 def stdout_write(text):
     if sys.stdout is None:  # descriptor 1 was closed when Python started
         raise OSError(errno.EBADF, "standard output is closed")
@@ -725,7 +958,8 @@ def cmd_read(name, d, max_bytes, write=None):
     write = write or stdout_write
     if not os.path.isdir(d):
         raise MailError("mailbox_missing", f"mailbox {d} does not exist")
-    touch_presence(d, name)
+    state = load_state(d, name)
+    touch_member(d, name, state["subs"], clock())
     prune(d, name, clock())
     result = poll(name, d, max_bytes)
     if not (result["deliveries"] or result["notices"]) and result["waiting"]:
@@ -740,9 +974,11 @@ def cmd_read(name, d, max_bytes, write=None):
             lines.append(f"agent-mail: nothing ready for {name}: {result['busy']} message(s) are being read by another reader of {name}")
         elif not result["stuck"]:
             lines.append(f"agent-mail: no mail for {name}")
-    lines.extend(msg for _, msg in remember_stuck(d, name, result["dirs"]))
-    remember_stuck(d, name, result["stuck"])
+    lines.extend(msg for key, msg in result["dirs"] if remember(state, key))
+    for key, _ in result["stuck"]:
+        remember(state, key)
     lines.extend(msg for _, msg in result["stuck"])
+    save_state(d, name, state)
     if lines:
         emit(write, "\n".join(lines) + "\n")
     return EXIT_STATUS["stuck"] if result["stuck"] else 0
@@ -750,6 +986,7 @@ def cmd_read(name, d, max_bytes, write=None):
 
 def cmd_watch(name, d, interval, forever, max_bytes, max_polls=None, parent=None, write=None):
     write = write or stdout_write
+    state = load_state(d, name)
     polls = 0
     while True:
         if parent is not None and not alive(parent):
@@ -758,10 +995,12 @@ def cmd_watch(name, d, interval, forever, max_bytes, max_polls=None, parent=None
         if not os.path.isdir(d):
             emit(write, f"agent-mail: mailbox {d} is missing; the watcher for {name} has stopped\n")
             return 1
-        touch_presence(d, name)
+        touch_member(d, name, state["subs"], clock())
         prune(d, name, clock())
         result = poll(name, d, max_bytes)
-        fresh = remember_stuck(d, name, result["dirs"]) + remember_stuck(d, name, result["stuck"])
+        fresh = [(key, msg) for key, msg in result["dirs"] + result["stuck"] if remember(state, key)]
+        if fresh:
+            save_state(d, name, state)
         if result["deliveries"] or result["notices"] or fresh:
             deliver(d, name, result, max_bytes, write)
             for _, msg in fresh:
@@ -776,30 +1015,26 @@ def cmd_watch(name, d, interval, forever, max_bytes, max_polls=None, parent=None
 
 
 def cmd_pending(name, d, write=None):
-    touch_presence(d, name)
     now = clock()
+    touch_member(d, name, load_state(d, name)["subs"], now)
     found, _, _, _ = candidates(name, d, now)
     ident = [f"{e}:{st.st_ino}:{st.st_mtime_ns}:{st.st_ctime_ns}" for _, e, _, st in found]
     digest = hashlib.sha256("\n".join(sorted(ident)).encode()).hexdigest()[:12] if ident else None
-    path = state_path(d, name, "pending")
-    state = load_json(path)
-    if state is None:
-        try:
-            with open(state_path(d, name, "last"), encoding="utf-8") as f:
-                line = f.read().rstrip()
-        except FileNotFoundError:
-            line = ""
-        state = {"line": line, "digest": None, "announced": 0, "changed": 0, "reminders": 0}
+    # pending's announce state is a file of its own: the reader state has one writer.
+    path = state_file(d, name, ".pending")
+    state = read_json(path)
+    if not (isinstance(state, dict) and {"line", "digest", "announced", "changed", "reminders"} <= state.keys()):
+        state = {"line": "", "digest": None, "announced": 0, "changed": 0, "reminders": 0}
     if digest and digest != state["digest"]:
         names = ", ".join(original for _, _, original, _ in found)
         state.update(digest=digest, announced=now, changed=now, reminders=0,
                      line=f"agent-mail: mail for {name} announced {utc(now)} [{digest}]: {names}")
-        save_json(path, state)
+        write_json(path, state)
     elif digest and now - state["announced"] > REMIND_AFTER and now - state["changed"] > REMIND_EVERY:
         state["reminders"] += 1
         state["changed"] = now
         state["line"] = re.sub(r" \(still unread; reminder \d+\)$", "", state["line"]) + f" (still unread; reminder {state['reminders']})"
-        save_json(path, state)
+        write_json(path, state)
     if state["line"]:
         emit(write, state["line"] + "\n")
     return 0
@@ -847,12 +1082,11 @@ def cmd_send(sender, to, subject, ident, src, d, write=None):
             pass
         raise
     emit(write, f"{final}\n")
-    try:
-        age = clock() - os.stat(presence_path(d, to)).st_mtime
-        if age > PRESENCE_STALE:
-            print(f"agent-mail: warning: {to}'s mail was last checked {int(age // 60)} minutes ago; the message waits until it is read", file=sys.stderr)
-    except FileNotFoundError:
+    checked = last_checked(d, to)
+    if checked is None:
         print(f"agent-mail: warning: no reader has checked {to}'s mail yet; the message waits until one does", file=sys.stderr)
+    elif clock() - checked > PRESENCE_STALE:
+        print(f"agent-mail: warning: {to}'s mail was last checked {int((clock() - checked) // 60)} minutes ago; the message waits until it is read", file=sys.stderr)
     return 0
 
 
@@ -1080,7 +1314,7 @@ def section_core(t):
     t.ok("not for pi: pi-2_" in t.capture(cmd_read, "pi-2", d, 100000)[0], "pi-2 gets the mail that pi left alone")
     t.ok("not for pi: pi.v2_" in t.capture(cmd_read, "pi.v2", d, 100000)[0], "pi.v2 gets its own mail too")
     t.ok("not for pi" not in t.capture(cmd_read, "clio", d, 100000)[0], "clio takes none of clio-pi's mail")
-    t.ok(os.path.exists(presence_path(d, "pi")), "records that pi's mail was checked")
+    t.ok(last_checked(d, "pi") is not None and os.path.exists(member_path(d, "pi")), "records that pi's mail was checked")
 
     for i in range(3):
         mk(f"pi_20261030T00010{i}.000000Z_from-nix_1111111{i}.txt", f"part {i} " + "y" * 5000 + "\n")
@@ -1256,6 +1490,66 @@ def section_settings(t):
     t.ok(code == 1 and "--max-bytes is 999" in err, "the CLI passes its flags through load_settings")
 
 
+def section_state(t):
+    d = t.box()
+    save_state(d, "pi", {"v": 2, "seen": {"all": ["x"]}})
+    save_state(d, "pi", {"v": 2, "seen": {"all": ["y"]}})
+    path = state_file(d, "pi")
+
+    def corrupt(p):
+        t.mk(p, "{not json")
+
+    corrupt(path)
+    t.ok(load_state(d, "pi")["seen"]["all"] == ["x"] and not load_state(d, "pi")["_rebuilt"], "a corrupt state file falls back to .bak")
+    corrupt(path + ".bak")
+    t.ok(load_state(d, "pi")["_rebuilt"], "losing both marks the state rebuilt")
+    state = load_state(d, "pi")
+    t.ok(remember(state, "k0") and not remember(state, "k0") and all(remember(state, f"k{i}") for i in range(1, 600))
+         and len(state["reported"]) == 500 and remember(state, "k0"), "remember is true the first time and keeps the last 500 keys")
+
+    now = time.time()
+    for i in range(20):
+        note_send(d, "pi", "+fleet", f"b{i}", now)
+    e = t.raises(note_send, d, "pi", "+fleet", "b20", now)
+    t.ok(getattr(e, "code", None) == "rate_limited" and utc(now + 3600)[:13] in e.message, "the 21st post in an hour names when posting is allowed again")
+    t.ok(t.raises(note_send, d, "pi", "all", "x", now) is None and getattr(t.raises(note_send, d, "pi", "all", "y", now + 60), "code", None) == "rate_limited",
+         "one broadcast per 15 minutes")
+    note_send(d, "pi", "nix", "same", now)
+    t.ok(getattr(t.raises(note_send, d, "pi", "nix", "same", now + 599), "code", None) == "duplicate"
+         and t.raises(note_send, d, "pi", "nix", "same", now + 601) is None, "an identical body to one target waits 10 minutes")
+
+    member = os.path.join(d, ".agent-mail", "members", "pi.json")
+
+    def mtime_after(when, subs=()):
+        touch_member(d, "pi", list(subs), when)
+        st = os.stat(member)
+        return st.st_ino, st.st_mtime_ns
+
+    first = mtime_after(now)
+    t.ok(mtime_after(now + 299) == first and mtime_after(now + 300) != first, "presence is rewritten at most every 300 s")
+    touch_member(d, "pi", ["fleet"], now + 301)
+    t.ok(members(d)["pi"]["subs"] == ["fleet"], "a subscription change rewrites the member record at once")
+    os.makedirs(os.path.join(d, ".agent-mail-presence"), 0o700, exist_ok=True)
+    legacy = t.mk(os.path.join(d, ".agent-mail-presence", "nix"), "")
+    os.utime(legacy, (now - 50, now - 50))
+    t.ok(last_checked(d, "nix") == os.stat(legacy).st_mtime, "last_checked falls back to the v1 presence file")
+
+    a, b = ReaderLock(d, "pi"), ReaderLock(d, "pi")
+    t.ok(a.acquire() and not b.acquire() and b.holder == f"{os.getpid()}@{HOST}", "a second lock on one name fails, even inside one process")
+    a.release()
+    t.ok(b.acquire(), "the lock passes on once released")
+    os.unlink(b.path)
+    c = ReaderLock(d, "pi")
+    t.ok(c.acquire() and not b.revalidate() and c.revalidate(), "a lock whose file was replaced revalidates against the new file")
+    c.release()
+    run = os.environ["AGENT_MAIL_RUNTIME_DIR"]
+    os.chmod(run, 0o755)
+    try:
+        t.ok(getattr(t.raises(runtime_dir), "code", None) == "unsafe_runtime_dir", "refuses a runtime directory others can read")
+    finally:
+        os.chmod(run, 0o700)
+
+
 def section_send(t):
     t.patch("SETTLE", 0.0)
     root = t.root
@@ -1293,10 +1587,10 @@ def section_send(t):
     t.ok(not t.capture(cmd_send, "pi", "nix", "s", None, body, d)[2], "no warning once the recipient reads")
     line2 = t.capture(cmd_pending, "nix", d)[0]
     t.ok(line2 != line1 and "announced" in line2, "pending changes on new mail")
-    st = load_json(state_path(d, "nix", "pending"))
+    st = read_json(state_file(d, "nix", ".pending"))
     st["announced"] -= 1000
     st["changed"] -= 1000
-    save_json(state_path(d, "nix", "pending"), st)
+    write_json(state_file(d, "nix", ".pending"), st)
     line3 = t.capture(cmd_pending, "nix", d)[0]
     t.ok(line3 != line2 and "reminder 1" in line3, "pending reminds about unread mail")
     t.ok(t.capture(cmd_pending, "nix", d)[0] == line3, "and does not repeat the reminder at once")
@@ -1384,6 +1678,7 @@ SECTIONS = [
     ("core", section_core),
     ("grammar", section_grammar),
     ("settings", section_settings),
+    ("state", section_state),
     ("send", section_send),
     ("cli", section_cli),
 ]
