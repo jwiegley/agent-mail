@@ -83,6 +83,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unicodedata
 
@@ -4193,12 +4194,19 @@ def section_identity(t):
     t.ok(not background_job({"CLAUDE_JOB_DIR": "/x"}, ppid, home), "a foreground record beats a leaked CLAUDE_JOB_DIR")
     write_record(ppid, kind="bg")
     t.ok(background_job({"CLAUDE_JOB_DIR": "/x"}, ppid, home), "a bg record stays a background job")
+    t.mk(os.path.join(home, ".claude", "sessions", f"{ppid}.json"), json.dumps({"pid": ppid + 1, "kind": "interactive"}))
+    t.ok(background_job({"CLAUDE_JOB_DIR": "/x"}, ppid, home), "a foreground session record counts only when it names the parent's pid")
     t.ok(check_me("PI", "pi") is None and getattr(t.raises(check_me, "nix", "pi"), "code", None) == "name_mismatch", "me is compared without case")
     # Task 11b (decision 24): a Pi session gets only AGENTDECK_INSTANCE_ID.
     t.ok(resolve_identity(None, {"AGENTDECK_INSTANCE_ID": "eae28c17-1793375361"}, home).name == "nix", "a Pi session is named from agent-deck's identity file for its instance id")
     t.ok(all(resolve_identity(None, {"AGENTDECK_INSTANCE_ID": bad}, home).name is None
              for bad in ("../eae28c17-1793375361", "x/../eae28c17-1793375361", "eae28c17-1793375361/..", "a..b", "/etc")),
          "an instance id holding / or .. names nothing")
+    dotted = os.path.join(home, IDENTITY_DIR, "a..b")
+    os.makedirs(dotted, 0o700)
+    t.mk(os.path.join(dotted, "identity.md"), "- title: dotted\n")
+    t.ok(resolve_identity(None, {"AGENTDECK_INSTANCE_ID": "a..b"}, home).name is None,
+         "an instance id holding .. names nothing, even when agent-deck's identity directory has an entry of that name")
     other_dir = os.path.join(home, IDENTITY_DIR, "0123abcd-1")
     os.makedirs(other_dir, 0o700)
     other = t.mk(os.path.join(other_dir, "identity.md"), "- title: Pi\n")
@@ -4253,6 +4261,62 @@ def section_doorbell(t):
     t.direct(d, "pz", "nix", "PAUSED-DIRECT")
     paused_out = t.capture(doorbell, d, "pz", dataclasses.replace(s, paused=True), ppid, False, waiter=fake_waiter(), max_passes=1)[0]
     t.ok(broadcast_out == "" and paused_out == "", "a broadcast never rings, and a paused host never rings")
+
+    def logged():
+        try:
+            with open(os.path.join(os.path.expanduser(STATE_DIR), "log"), encoding="utf-8") as f:
+                return f.read()
+        except FileNotFoundError:
+            return ""
+
+    superseding, before = Superseding([]), logged()
+    superseded = t.capture(doorbell, d, "pi", s, ppid, False, waiter=fake_waiter(backend=superseding), max_passes=50)
+    t.ok(superseded == ("", 0, "") and superseding.waits == 1 and "a newer doorbell took the slot" in logged()[len(before):],
+         "a superseded doorbell exits 0 at its next wake, not when its passes run out")
+    child = subprocess.Popen([sys.executable, "-I", "-c", "pass"])
+    child.wait()
+    t.direct(d, "orphan", "nix", "WAITS-FOR-A-DOORBELL-WHOSE-PARENT-HAS-GONE")
+    before = logged()
+    orphaned = t.capture(doorbell, d, "orphan", s, child.pid, False, waiter=fake_waiter(), max_passes=5)
+    t.ok(not alive(child.pid) and orphaned == ("", 0, "") and f"process {child.pid} has gone" in logged()[len(before):],
+         "a doorbell exits 0 without ringing when its parent has gone, though mail waits")
+
+    class Scripted(FakeBackend):
+        """Runs the next of its actions at each wait."""
+
+        def __init__(self, actions):
+            super().__init__([])
+            self.actions = list(actions)
+
+        def wait(self, timeout):
+            if self.actions:
+                self.actions.pop(0)()
+            return super().wait(timeout)
+
+    pause = os.path.expanduser(PAUSE_PATH)
+    os.makedirs(os.path.dirname(pause), 0o700, exist_ok=True)
+
+    def pause_then_mail():
+        t.mk(pause, "")
+        t.direct(d, "pausing", "nix", "ARRIVES-WHILE-THE-HOST-IS-PAUSED")
+
+    scripted = Scripted([pause_then_mail, lambda: os.unlink(pause)])
+    try:
+        out_p, code_p, _ = t.capture(doorbell, d, "pausing", s, ppid, False, waiter=fake_waiter(backend=scripted), max_passes=5)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(pause)
+    t.ok(re.fullmatch(RING_RE, out_p) is not None and code_p == 10 and scripted.waits == 2,
+         "the pause file is checked on every pass: mail that came while it existed rings once it is gone")
+    fifo_box = t.box("fifo")
+    os.mkfifo(os.path.join(fifo_box, f"pf_{utc(T0 - 60, micro=True)}_from-nix_0000f1f0.txt"))
+    fifo_out = t.capture(doorbell, fifo_box, "pf", s, ppid, False, waiter=fake_waiter(fifo_box), max_passes=1)
+    t.ok(fifo_out == ("", 0, "") and pending_line(fifo_box, "pf", s, "context") == ""
+         and pending_line(fifo_box, "pf", s, "human") == "agent-mail: no mail for pf",
+         "only regular files ring: a FIFO with a mail name never rings, and pending does not count it")
+    t.at(rung_at + 1799)
+    early = t.capture(doorbell, d, "pi", s, ppid, False, waiter=fake_waiter(), max_passes=1)[0]
+    t.ok(early == "", "the one reminder comes 30 minutes after a ring: none at 29 minutes 59 seconds")
     t.at(rung_at + 1801)
     reminder = t.capture(doorbell, d, "pi", s, ppid, False, waiter=fake_waiter(), max_passes=1)[0]
     second_reminder = t.capture(doorbell, d, "pi", s, ppid, False, waiter=fake_waiter(), max_passes=1)[0]
@@ -4299,6 +4363,24 @@ def json_lines(text):
         return [json.loads(line) for line in text.splitlines()]
     except ValueError:
         return None
+
+
+@contextlib.contextmanager
+def mcp_process(d, name, env):
+    """Test only: agent-mail mcp for NAME on mailbox D, a subprocess with environment ENV, to
+    ask through ask_line. On exit its input is closed, and it is killed after 10 s."""
+    proc = subprocess.Popen([sys.executable, "-I", SCRIPT, "mcp", "--dir", d, "--name", name], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
+    try:
+        yield proc
+    finally:
+        proc.stdin.close()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        proc.stdout.close()
 
 
 def ask_line(proc, msg, timeout=10):
@@ -4358,25 +4440,31 @@ def section_mcp(t):
     loose = os.path.join(t.root, "loose-run")
     os.mkdir(loose)
     os.chmod(loose, 0o755)  # open to others, so making the reader lock fails at start
-    proc = subprocess.Popen([sys.executable, "-I", SCRIPT, "mcp", "--dir", d, "--name", "t"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                            stderr=subprocess.DEVNULL, env={**os.environ, "AGENT_MAIL_RUNTIME_DIR": loose})
-    try:
-        call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "receive", "arguments": {"me": "t"}}}
+    call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "receive", "arguments": {"me": "t"}}}
+    with mcp_process(d, "t", {**os.environ, "AGENT_MAIL_RUNTIME_DIR": loose}) as proc:
         refused = ask_line(proc, call)["result"]
         os.chmod(loose, 0o700)
         taken = ask_line(proc, {**call, "id": 2})["result"]
-    finally:
-        proc.stdin.close()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
     why = refused["content"][0]["text"]
     t.ok(refused["isError"] and "not_reader" in why and f"the runtime directory {loose}" in why and "open to others" in why and "background job" not in why,
          "a server that could not make its reader lock at start gives that reason, not a background job")
     t.ok(not taken["isError"] and "no mail for t" in taken["content"][0]["text"],
          "and it takes the lock at its next receive once the runtime directory is fixed")
+    # The parent's session record is looked up under this section's HOME, never the real one.
+    plain = {k: v for k, v in os.environ.items() if k != "CLAUDE_CONFIG_DIR"}
+    jobs = {}
+    for job in (True, False):
+        with mcp_process(d, "jobber", {**plain, "CLAUDE_JOB_DIR": os.path.join(t.root, "job")} if job else plain) as proc:
+            ask_line(proc, {"jsonrpc": "2.0", "id": 1, "method": "ping"})  # serving, so it has tried the lock
+            probe = ReaderLock(d, "jobber")
+            free = probe.acquire()
+            probe.release()
+            answer = ask_line(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                                     "params": {"name": "receive", "arguments": {"me": "jobber"}}})["result"]
+        jobs[job] = (free, answer["isError"], answer["content"][0]["text"])
+    t.ok(jobs[True][:2] == (True, True) and "background job" in jobs[True][2]
+         and jobs[False][:2] == (False, False) and "no mail for jobber" in jobs[False][2],
+         "the server takes the reader lock at start only when it is not a background job")
 
 
 def section_tools(t):
@@ -4480,6 +4568,51 @@ def section_tools(t):
     t.ok(all(r["isError"] and "unsafe_mailbox" in text(r) and ".agent-mail-presence is a symlink" in text(r) for r in refused)
          and t.saved(unsafe, "pi") == before and sorted(load_state(unsafe, "pi")["subs"]) == ["fleet"] and not os.listdir(outside),
          "the subscribe and unsubscribe tools, refused as unsafe_mailbox, change neither the state nor the member record")
+    # b holds its lock and subscribes to +fleet; b2, a second server for b, is send-only.
+    kept = load_state(d, "b")["subs"]
+    r = tool(b2, "unsubscribe", channel="fleet")
+    t.ok(r["isError"] and "not_reader" in text(r) and "fleet" in kept and load_state(d, "b")["subs"] == kept,
+         "unsubscribe changes state only under the lock")
+    tool(b, "receive", me="b")
+    tool(a, "send", to="b", subject="to cancel", body="CANCEL-BODY")
+    cancel_me = tool(b, "receive", me="b")
+    for rid in (receive_id, t._ids + 1000):  # an earlier answered receive, and no request at all
+        b.handle({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": rid}})
+    t.ok("CANCEL-BODY" in text(cancel_me) and "may not have reached you" not in text(tool(b, "pending")),
+         "only a cancel naming the last answered receive marks that batch")
+    for i in range(3):
+        tool(a, "send", to="b", subject=f"budget {i}", body=f"BUDGET-{i} " + "x" * 700)
+    small = text(tool(b, "receive", me="b", max_bytes=1000))
+    rest = text(tool(b, "receive", me="b"))
+    t.ok(small.count(" begin ") == 1 and "; 2 more waiting, so call receive again" in small and rest.count(" begin ") == 2,
+         "receive honours max_bytes")
+    from_lines = {}
+    for ident in ("eae28c17-1793375361", "not an id"):
+        os.environ["AGENTDECK_INSTANCE_ID"] = ident
+        try:
+            r = tool(a, "send", to="b", subject="from line", body=f"FROM-LINE {ident}")
+        finally:
+            del os.environ["AGENTDECK_INSTANCE_ID"]
+        m = re.search(r"sent (\S+) to b", text(r))
+        path = os.path.join(d, f"{m.group(1)}.txt") if m else os.devnull
+        with open(path if os.path.exists(path) else os.devnull) as f:
+            from_lines[ident] = f.readline()
+    t.ok(from_lines == {"eae28c17-1793375361": f"From: a@{HOST} (agent-deck eae28c17-1793375361)\n", "not an id": f"From: a@{HOST}\n"},
+         "the send tool puts AGENTDECK_INSTANCE_ID in the From line when it is an agent-deck id, and leaves any other value out")
+    bound_pi = t.server(d, "pi")
+    prefix = tool(bound_pi, "receive", me="p")
+    t.ok(prefix["isError"] and "name_mismatch" in text(prefix) and not tool(bound_pi, "receive", me="pi")["isError"],
+         "me must equal the bound name: a prefix such as p for pi is refused")
+    waiting = send(d, "a", "b", "s", "AFTER-THE-LOCK-FILE-WAS-REPLACED", load_settings({}, {}, "a")).path
+    os.unlink(b.lock.path)
+    usurper = ReaderLock(d, "b")
+    took = usurper.acquire()
+    try:
+        r = tool(b, "receive", me="b")
+    finally:
+        usurper.release()
+    t.ok(took and r["isError"] and "not_reader" in text(r) and "holds its lock" in text(r) and os.path.exists(waiting),
+         "receive revalidates a lock it already holds: once its lock file is replaced and another holds the new one, it claims nothing")
 
 
 def section_doctor(t):
@@ -4521,6 +4654,32 @@ def section_doctor(t):
     t.run(["--dir", d, "doctor", "pi"])
     tree_after = tree()
     t.ok(tree_before == tree_after, "doctor writes nothing")
+    conflict = "pi_20261030T000000.000000Z_from-nix_00000002.sync-conflict-20261031-000000-ABCDEFG.txt"
+    t.ok(f"finding: Syncthing conflict copy, never mail: {conflict}" in text and f"top level, never mail: {conflict}" not in text,
+         "doctor reports a top-level conflict copy as a conflict copy, not as a legacy name")
+    pause = os.path.expanduser(PAUSE_PATH)
+    os.makedirs(os.path.dirname(pause), 0o700, exist_ok=True)
+    t.mk(pause, "")
+    try:
+        paused_text, paused_n = doctor(clean, None, s)
+        paused_code = t.run(["--dir", clean, "doctor"])[1]
+    finally:
+        os.unlink(pause)
+    t.ok(paused_n == 1 and "finding: paused: " in paused_text and paused_code == 1, "a paused host counts as a finding")
+    t.mk(os.path.join(box, ".stignore"), "")
+
+    def missing_on(platform):
+        real = sys.platform
+        sys.platform = platform
+        try:
+            report = doctor(box, None, s)[0]
+        finally:
+            sys.platform = real
+        return [line.split("missing from .stignore: ", 1)[1] for line in report.splitlines() if "missing from .stignore: " in line]
+
+    five = [".*-claimed-*", ".*-read", ".*-rejected-*", ".*.tmp", "(?d).nfs*"]
+    t.ok(missing_on("darwin") == five + ["(?d).DS_Store"] and missing_on("linux") == five,
+         "doctor requires nix's ignore lines in ~/Mailbox's .stignore, and (?d).DS_Store on macOS only")
 
 
 def subcommands(parser, prefix=""):
@@ -4698,6 +4857,41 @@ def section_send(t):
         os.chmod(locked, 0o700)
     t.ok(getattr(e, "code", None) == "send_failed" and "was not sent" in e.message and code == 1 and "was not sent" in err and not out
          and sorted(os.listdir(locked)) == [MARKER_V2], "a read-only mailbox makes send fail with send_failed, never a raw OSError, and leaves nothing behind")
+    # Two senders of one name, one body: the first holds its window's flock while it writes.
+    entered, gate, outcomes = [], threading.Event(), []
+    real_write_new = write_new
+
+    def gated(fd, file, data):
+        entered.append(file)
+        gate.wait(10)
+        return real_write_new(fd, file, data)
+
+    def twin():
+        try:
+            outcomes.append(send(d, "twin", "nix", "s", "ONE BODY FROM TWO SENDERS", s).id)
+        except MailError as e:
+            outcomes.append(e.code)
+
+    t.patch("write_new", gated)
+    twins = [threading.Thread(target=twin, daemon=True) for _ in range(2)]
+    try:
+        twins[0].start()
+        until = time.monotonic() + 10
+        while not entered and time.monotonic() < until:  # the first is writing, inside its window
+            time.sleep(0.01)
+        twins[1].start()
+        until = time.monotonic() + 0.5
+        while len(entered) < 2 and time.monotonic() < until:  # without the flock the second gets this far too
+            time.sleep(0.01)
+    finally:
+        gate.set()
+        for th in twins:
+            th.join(10)
+        t.patch("write_new", real_write_new)
+    # The two finish in either order: the refusal can come before the first send returns.
+    kinds = sorted("sent" if str(o).startswith("nix_") else str(o) for o in outcomes)
+    t.ok(len(entered) == 1 and kinds == ["duplicate", "sent"],
+         "the window's flock, held through the write, stops two senders of one name both passing the duplicate check")
 
 
 def section_cli(t):
