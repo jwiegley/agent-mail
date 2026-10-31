@@ -1,0 +1,56 @@
+# Handoff: per-topic stewards, plan execution
+
+Frozen plan: `docs/superpowers/plans/2026-10-31-agent-mail-stewards.md` (approved by John 2026-10-31, decision 19, subagent-driven). Spec: `docs/superpowers/specs/2026-10-31-agent-mail-conductors-design.md`. Branch `work/conductor` in the worktree `/Users/johnw/Products/agent-mail-conductor`, base `main`. The SDD ledger, authoritative for per-task state, is `.superpowers/sdd/2026-10-31-agent-mail-stewards/progress.md` (git-ignored); this file is the durable mirror. Session: agent-deck `mail-conductor` (76ddb389-1793466041), mailbox name `mail-conductor`, woken by `agent-mail watch mail-conductor --parent $PPID` (check with `pgrep -f 'agent-mail watch mail-conductor( |$)'` at every turn start; re-read the change and rerun `agent-mail self-test` whenever the live tree's HEAD moves). John's `/wiggum` instruction (2026-10-31 14:4x PDT): "Complete the implementation plan as documented."
+
+## Refocus checkpoint
+
+- Last check: 2026-10-31 14:42 PDT. Goal: the twelve plan tasks, nothing beyond `steward/`, the two patches, the runbook and one pointer paragraph in the top-level README. On track: Task 1's implementer is running. No scope creep. Next deadline: 15:42 PDT. Next step: probe the runner's history isolation for fess audits, then review Task 1 when its report lands.
+
+## Definition of Done (frozen)
+
+1. Tasks 1 to 12 complete in the SDD ledger, each with a clean task review (spec and quality) or parked findings with rulings at the cap.
+2. `python3 -I steward/steward-signals self-test` and `python3 -I ./agent-mail self-test` pass, with the output shown.
+3. The SDD final whole-branch review is clean (one fix wave at most), and the last work commit has passed a fess audit.
+4. No actionable partner observation outstanding (none exist: no `doc/observations/`).
+5. `work/conductor` rebased cleanly onto `main`, locally; nothing pushed or merged without John.
+
+## Status
+
+| Task | State | Commits | Review | fess |
+|---|---|---|---|---|
+| 1 POLICY.md and parser | implementer running (BASE 3f0c52a) | | | |
+| 2 roster and agent-deck readers | | | | |
+| 3 census | | | | |
+| 4 probe | | | | |
+| 5 usage and metrics | | | | |
+| 6 signals command | | | | |
+| 7 CLAUDE.md and docs check | | | | |
+| 8 SHARED.md, HEARTBEAT_RULES.md | | | | |
+| 9 WORKER.md | | | | |
+| 10 scanner patch | | | | |
+| 11 bridge patch | | | | |
+| 12 README, runbook, pointer | | | | |
+
+## Attempt counts (reset when the gate passes)
+
+- None open.
+
+## Independence probe
+
+- 2026-10-31 14:44 PDT: a fresh general-purpose subagent (haiku) dispatched with the Agent tool (non-fork, the runner's no-history mode) returned PARENT_HISTORY_ABSENT; `verify-history-isolation.py` passed. Non-fork Agent dispatches count as independent for fess audits and reviews; re-probe if the runner, model or dispatch configuration changes.
+
+## Rulings (mirror of the ledger's `Ruling:` lines)
+
+- R1 "/setup-mailbox" became "the mailbox join command" in the design and runbook, both forms named once (wiggum's heads-up, nix-config 55f1d6bd).
+- R2 the self-test harness owns the shared test helpers; later tasks add the ones their tests name.
+- R3 Tasks 10 and 11 patch copies with John's venv; BLOCKED if the venv cannot run the tests.
+- R4 pre-flight scan clean; T10's placeholder test names resolved by the implementer.
+- R5 patch scratch copies under `/Users/johnw/Products/steward-patch-scratch/`, not `/tmp`.
+- R6 the SDD workspace stays in the git-ignored `.superpowers/sdd/`.
+- R7 implementers commit their own task; the controller runs no git write while one is active; reviewers and auditors are read-only.
+
+## How to resume
+
+1. Re-read the wiggum and refocus skills, the frozen plan, the spec's section 11, this file and the SDD ledger; refocus; check the watcher and the live tree's HEAD.
+2. Baseline: `python3 -I ./agent-mail self-test` and, once Task 1 exists, `python3 -I steward/steward-signals self-test`; `git log --oneline main..HEAD`.
+3. Resume the SDD loop at the first task without a `complete` line in the ledger (a task whose last line is a fix round resumes at the next round). Dispatch the fess audit for any completed task whose row above has no fess entry.
