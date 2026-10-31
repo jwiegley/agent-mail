@@ -513,13 +513,16 @@ def remember(state, key):
     return True
 
 
-def note_send(d, sender, target, body, now):
-    """Record a send in SENDER's one-hour window on this host, or refuse it.
+@contextlib.contextmanager
+def send_window(d, sender, target, body, now):
+    """Hold SENDER's one-hour window on this host around writing one send: refuse it first
+    when it breaks a limit, and record it only once the with-block has written the message.
+    The with-block gets a list, which holds a warning afterwards if recording failed.
 
     rate_limited: a 21st post to one channel within an hour, or a second broadcast within
     15 minutes. duplicate: the same body to the same target within 10 minutes. Direct mail
-    has no count cap. The window changes only under an flock, because CLI and MCP senders
-    run in separate processes.
+    has no count cap. The window is read and changed only under an flock, held through the
+    write, because CLI and MCP senders run in separate processes.
     """
     path = state_file(d, sender, ".send")
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
@@ -543,10 +546,22 @@ def note_send(d, sender, target, body, now):
             if times:
                 raise MailError("rate_limited", f"{sender} broadcast at {utc(max(times))}; one broadcast is allowed every 15 minutes, "
                                                 f"so the next is allowed at {utc(max(times) + BROADCAST_EVERY)}")
+        late = []
+        yield late
         window.append([now, target, digest])
-        write_json(path, window)
+        try:
+            write_json(path, window)
+        except OSError as e:
+            # The message is already in place, so failing the send now would invite a second copy.
+            late.append(f"this send was not recorded on this host ({e.strerror}), so the duplicate and rate checks will not count it")
     finally:
         os.close(fd)
+
+
+def note_send(d, sender, target, body, now):
+    """Record a send in SENDER's window, or refuse it: send_window with nothing to write."""
+    with send_window(d, sender, target, body, now):
+        pass
 
 
 def member_path(d, name):
@@ -1045,11 +1060,11 @@ def send(d, sender, to, subject, body, settings, in_reply_to=None, ident=None):
             raise MailError("too_large", f"the {word} is {len(data)} bytes, over {what}; send a file path instead")
         if looks_like_secret(f"{subject}\n{body}"):
             raise MailError("looks_like_secret", "the message looks like it holds a private key or a token; never put secrets in mail")
-        note_send(d, sender, to, body, now)
-        write_new(fd, file, data)
+        with send_window(d, sender, to, body, now) as late:
+            write_new(fd, file, data)
     finally:
         os.close(fd)
-    warnings = []
+    warnings = list(late)
     if kind == "direct":
         checked = last_checked(d, name_to)
         if checked is None:
@@ -4376,6 +4391,35 @@ def section_send(t):
     t.ok(f"\nIn-Reply-To: {r.id}\nX-Agent-Mail: 2\n\n" in reply_text
          and getattr(t.raises(send, d, "nix", "pi", "s", "other", s, in_reply_to="not an id"), "code", None) == "invalid_id",
          "In-Reply-To carries a message id and nothing else")
+
+    window = state_file(d, "rl", ".send")
+    for i in range(19):
+        send(d, "rl", "+fleet", "s", f"post {i}", s)
+    before = read_json(window)
+    os.chmod(os.path.join(d, "+fleet"), 0o500)
+    try:
+        try:
+            send(d, "rl", "+fleet", "s", "post 19", s)
+            failed = False
+        except (MailError, OSError):
+            failed = True
+    finally:
+        os.chmod(os.path.join(d, "+fleet"), 0o700)
+    t.ok(failed and read_json(window) == before and send(d, "rl", "+fleet", "s", "post 19", s).id
+         and getattr(t.raises(send, d, "rl", "+fleet", "s", "post 20", s), "code", None) == "rate_limited",
+         "a send that fails to write leaves the duplicate and rate windows as they were, and the retry goes through")
+    real_write_json = write_json
+
+    def disk_full(path, data):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    t.patch("write_json", disk_full)
+    try:
+        r = send(d, "rl", "nix", "s", "sent anyway", s)
+    finally:
+        t.patch("write_json", real_write_json)
+    t.ok(os.path.exists(r.path) and any("was not recorded" in w for w in r.warnings),
+         "a send whose window cannot be saved afterwards still returns the message it wrote, with a warning")
 
 
 def section_cli(t):
