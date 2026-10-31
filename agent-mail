@@ -1133,6 +1133,23 @@ BROADCASTS_PER_SENDER = 3
 DUPLICATE_READER = 600.0
 
 
+def post_problem(m, st, kind, now):
+    """Why a standard-named post or broadcast is not valid mail, or None: stamped more than
+    24 hours ahead, not a regular file of ours with one link, or over its size limit."""
+    limit = POST_LIMIT if kind == "post" else BROADCAST_LIMIT
+    if m.stamp > now + FUTURE:
+        return "it is stamped more than 24 hours ahead"
+    if not stat.S_ISREG(st.st_mode):
+        return "it is not a regular file"
+    if st.st_uid != os.getuid():
+        return "it is owned by another user"
+    if st.st_nlink > 1:
+        return f"it has {st.st_nlink} hard links"
+    if st.st_size > limit:
+        return f"{st.st_size} bytes, over the {limit}-byte limit for {kind}s"
+    return None
+
+
 def scan_shared(fd, d, name, kind, ch, since, seen, now, settling=None):
     """Unread posts of +CH (kind "post") or broadcasts at the top level (kind "broadcast")
     in the open directory FD, oldest first, and notices for entries that are not mail.
@@ -1163,17 +1180,7 @@ def scan_shared(fd, d, name, kind, ch, since, seen, now, settling=None):
             if settling is not None:
                 settling.append(st.st_ctime + SETTLE)
             continue
-        why = None
-        if m.stamp > now + FUTURE:
-            why = "it is stamped more than 24 hours ahead"
-        elif not stat.S_ISREG(st.st_mode):
-            why = "it is not a regular file"
-        elif st.st_uid != os.getuid():
-            why = "it is owned by another user"
-        elif st.st_nlink > 1:
-            why = f"it has {st.st_nlink} hard links"
-        elif st.st_size > limit:
-            why = f"{st.st_size} bytes, over the {limit}-byte limit for {kind}s"
+        why = post_problem(m, st, kind, now)
         if why:
             notices.append(f"agent-mail: {escape(entry)}{where} was not read: {why}; left in place")
             continue
@@ -2560,6 +2567,99 @@ def run_mcp(a):
         server.close()
 
 
+# ---- doctor ----
+
+# nix's .stignore lines for ~/Mailbox (decision 10); (?d).DS_Store is written on the Macs only.
+STIGNORE = (".*-claimed-*", ".*-read", ".*-rejected-*", ".*.tmp", "(?d).nfs*", "(?d).DS_Store")
+
+
+def doctor(d, name, settings):
+    """A read-only report on the mailbox D, one line per fact, and the number of findings
+    (problems worth acting on). It writes nothing: no state, no member record, no log."""
+    now = clock()
+    lines, findings = [], []
+
+    def finding(text):
+        findings.append(text)
+        lines.append(f"finding: {text}")
+
+    if not os.path.isdir(d):
+        finding(f"mailbox {d} does not exist")
+        return "\n".join([f"agent-mail doctor: {len(findings)} finding(s)"] + lines), len(findings)
+    is_default = os.path.realpath(d) == os.path.realpath(os.path.expanduser(DEFAULT_DIR))
+    if is_default:
+        lines.append(f"mailbox {d}: ~/Mailbox, which needs no marker")
+    elif os.path.isfile(os.path.join(d, MARKER_V2)):
+        lines.append(f"mailbox {d}: marked with {MARKER_V2}")
+    else:
+        finding(f"mailbox {d} has no {MARKER_V2}, so agent-mail refuses it; run agent-mail init there")
+    kind = fs_type(d)
+    nfs = kind is not None and kind.startswith("nfs")
+    lines.append(f"file system: {escape(kind)}" if kind is not None else "file system: not checked (no /proc/self/mountinfo here)")
+    backend = probe_backend("auto")
+    if nfs:
+        lines.append(f"watch: notify=auto would use {backend}, but the mailbox is on NFS, where those events miss other hosts' writes; "
+                     f"polling every {settings.poll:g} s covers them")
+    else:
+        lines.append(f"watch: notify=auto would use {backend}" + (" (native events, with polling underneath)" if backend in ("kqueue", "inotify") else ""))
+    if is_default:
+        want = [line for line in STIGNORE if line != "(?d).DS_Store" or sys.platform == "darwin"]
+        try:
+            have = {line.strip() for line in read_small(os.path.join(d, ".stignore")).decode("utf-8", "replace").splitlines()}
+        except OSError:
+            finding("~/Mailbox has no readable .stignore, so Syncthing would carry claims, archives and temporary files")
+        else:
+            for line in want:
+                if line not in have:
+                    finding(f"missing from .stignore: {line}")
+    entries = sorted(os.listdir(d))
+    for e in entries:
+        if ".sync-conflict-" in e:
+            finding(f"Syncthing conflict copy, never mail: {escape(e)}")
+        elif not e.startswith((".", "+")) and parse_msg(e) is None:
+            what = " (a directory)" if stat.S_ISDIR(os.lstat(os.path.join(d, e)).st_mode) else ""
+            finding(f"legacy or nonstandard name at the top level, never mail: {escape(e)}{what}")
+    for e in entries:
+        if not e.startswith("+"):
+            continue
+        try:
+            fd = open_channel(d, e[1:])
+        except MailError:
+            finding(f"{escape(e)} is not a channel: not a channel name, a symlink, someone else's, or without its marker")
+            continue
+        try:
+            for entry in sorted(os.listdir(fd)):
+                path = f"{escape(e)}/{escape(entry)}"
+                if entry.startswith("."):
+                    continue
+                if ".sync-conflict-" in entry:
+                    finding(f"Syncthing conflict copy, never mail: {path}")
+                    continue
+                m = parse_msg(entry)
+                if m is None:
+                    finding(f"not named as a post: {path}")
+                elif m.to != e[1:]:
+                    finding(f"misfiled: {path} is not named for {escape(e)}")
+                else:
+                    with contextlib.suppress(OSError):
+                        why = post_problem(m, os.stat(entry, dir_fd=fd, follow_symlinks=False), "post", now)
+                        if why:
+                            finding(f"invalid post {path}: {why}")
+        finally:
+            os.close(fd)
+    if name:
+        record = read_member(member_path(d, name))
+        if record is not None and record["host"] != HOST and abs(now - parse_utc(record["checked"])) < DUPLICATE_READER:
+            finding(f"another reader of {name} appears active on {escape(record['host'])}")
+    if settings.paused or os.path.exists(os.path.expanduser(PAUSE_PATH)):
+        finding(f"paused: {PAUSE_PATH} exists, so this host sends nothing and rings no doorbell")
+    else:
+        lines.append("paused: no")
+    config = os.environ.get("AGENT_MAIL_CONFIG") or os.path.expanduser(CONFIG_PATH)
+    lines.append(f"config: {config} ({'read' if os.path.isfile(config) else 'absent, so the defaults apply'})")
+    return "\n".join([f"agent-mail doctor: {len(findings)} finding(s)"] + lines), len(findings)
+
+
 def stdout_write(text):
     if sys.stdout is None:  # descriptor 1 was closed when Python started
         raise OSError(errno.EBADF, "standard output is closed")
@@ -2772,6 +2872,7 @@ def build_parser():
     us = sub.add_parser("unsubscribe")
     us.add_argument("name")
     us.add_argument("channel")
+    sub.add_parser("doctor").add_argument("name", nargs="?")
     m = sub.add_parser("mcp")
     m.add_argument("--name")
     m.add_argument("--dir", dest="mcp_dir")
@@ -2825,6 +2926,12 @@ def dispatch(a):
         name = check_name(a.name) if a.name else None
         s = cli_settings(a, name)
         return cmd_channels(require_mailbox(s.dir), name, s)
+    if a.cmd == "doctor":
+        name = check_name(a.name) if a.name else None
+        s = cli_settings(a, name)
+        text, findings = doctor(s.dir, name, s)
+        emit(None, text + "\n")
+        return 0 if findings == 0 else 1
     if a.cmd == "watch" and a.doorbell:
         return run_doorbell(a)
     if a.cmd == "watch" and not a.name:
@@ -3971,6 +4078,47 @@ def section_tools(t):
     t.ok("structuredContent" not in json.dumps(results), "no result carries structuredContent")
 
 
+def section_doctor(t):
+    T0 = time.time() + 3600
+    t.at(T0)
+    s = load_settings({}, {}, "pi")
+    d = t.box()
+    t.mk(os.path.join(d, "pi.md"), "a legacy name\n")
+    t.mk(os.path.join(d, "PI_20261030T000000.000000Z_from-nix_00000001.txt"), "upper case\n")
+    t.mk(os.path.join(d, "pi_20261030T000000.000000Z_from-nix_00000002.sync-conflict-20261031-000000-ABCDEFG.txt"), "a conflict copy\n")
+    create_channel(d, "fleet", "fleet-wide notices; short posts that point to paths or commits")
+    t.mk(os.path.join(d, "+fleet", "other_20261030T000000.000000Z_from-x_00000003.txt"), "misfiled\n")
+    os.makedirs(os.path.join(d, ".agent-mail", "members"), 0o700, exist_ok=True)
+    t.mk(member_path(d, "pi"), json.dumps({"v": 2, "name": "pi", "host": "h2", "checked": utc(T0 - 60), "subs": []}))
+    text, n = doctor(d, "pi", s)
+    t.ok("legacy" in text and "pi.md" in text and n >= 1, "doctor lists legacy-named files")
+    t.ok("sync-conflict" in text and "misfiled" in text, "doctor lists conflict copies")
+    box = os.path.join(t.root, "Mailbox")  # ~/Mailbox, since HOME is the section's root
+    os.mkdir(box, 0o700)
+    t.mk(os.path.join(box, ".stignore"), "".join(line + "\n" for line in STIGNORE if line != ".*-read"))
+    text_default_box = doctor(box, None, s)[0]
+    t.ok("missing from .stignore: .*-read" in text_default_box and "missing from .stignore: .*.tmp" not in text_default_box, "doctor checks .stignore on ~/Mailbox")
+    clean = t.box("clean")
+    real_fs_type = fs_type
+    t.patch("fs_type", lambda path: "nfs4")
+    nfs_text = doctor(clean, None, s)[0]
+    t.patch("fs_type", real_fs_type)
+    t.ok("nfs" in nfs_text and "native" not in nfs_text, "doctor never calls an NFS mailbox native")
+    t.ok("another reader of pi appears active on h2" in text, "doctor warns about the same name on another host")
+    t.ok(doctor(clean, None, s)[1] == 0 and t.run(["--dir", clean, "doctor"])[1] == 0 and t.run(["--dir", d, "doctor", "pi"])[1] == 1,
+         "a clean mailbox exits 0")
+
+    def tree():
+        return sorted((os.path.relpath(os.path.join(folder, f), t.root), os.lstat(os.path.join(folder, f)).st_mtime_ns)
+                      for folder, _, files in os.walk(t.root) for f in files)
+
+    tree_before = tree()
+    doctor(d, "pi", s)
+    t.run(["--dir", d, "doctor", "pi"])
+    tree_after = tree()
+    t.ok(tree_before == tree_after, "doctor writes nothing")
+
+
 def section_send(t):
     t.patch("SETTLE", 0.0)
     root = t.root
@@ -4156,7 +4304,7 @@ def section_cli(t):
 
 # ---- FakeSync: Syncthing replicas, simulated (test only) ----
 
-IGNORE = (".*-claimed-*", ".*-read", ".*-rejected-*", ".*.tmp", "(?d).nfs*", "(?d).DS_Store")  # nix's .stignore lines
+IGNORE = STIGNORE  # nix's .stignore lines
 
 
 def ignored(path, ignore=IGNORE):
@@ -4342,6 +4490,7 @@ SECTIONS = [
     ("mcp", section_mcp),
     ("tools", section_tools),
     ("sync", section_sync),
+    ("doctor", section_doctor),
     ("send", section_send),
     ("cli", section_cli),
 ]
