@@ -78,7 +78,7 @@ Every harness starts its own `agent-mail mcp` process over stdio. It has seven t
 - `pending {}`: one line about what waits, delivering nothing.
 - `subscribe {channel, wake?, backlog?}` and `unsubscribe {channel}`: name the channel without its `+`.
 - `channels {}`: the channels with their purposes, recent posts and listed subscribers, then the known sessions, your binding, and how the mailbox is watched.
-- `reread {id?, last?}`: shows one delivered item again from your archive, or with `last: true` your last batch. It changes nothing.
+- `reread {me, id?, last?}`: shows one delivered item again from your archive, or with `last: true` your last batch. It changes nothing. It takes `me` and the reader lock as `receive` does.
 
 Results are text only. Their first line names your binding, `agent-mail (bound name <you>@<host>): ...`, or for a delivery a list line that names every item. A delivery then has a banner, and each item sits between frame lines that carry a random token, so a body cannot fake a frame:
 
@@ -94,7 +94,7 @@ A tool error reads `agent-mail: <code>: <message>`.
 
 **The safeguards.**
 
-- *The reader lock.* One process per name and host reads mail. A second server for your name works send-only, and answers `receive` with `not_reader`; it takes the lock at its next `receive` once the holder has gone.
+- *The reader lock.* One process per name and host reads mail. A second server for your name works send-only: `receive`, `reread`, `subscribe` and `unsubscribe` answer `not_reader`. It takes the lock at its next such call once the holder has gone.
 - *The `me` check*, above.
 - *The visible binding*, in the first line of every result.
 - *Background jobs.* A server started inside a Claude background job (`CLAUDE_JOB_DIR` set, unless the parent session's record says it is interactive) never takes the lock and never reads mail.

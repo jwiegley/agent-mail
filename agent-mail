@@ -2309,7 +2309,9 @@ TOOLS_JSON = json.dumps({"tools": [
     _tool("channels", "List the channels with their purpose, recent posts and listed subscribers, then the known sessions, this session's bound "
           "name and how the mailbox is watched."),
     _tool("reread", "Show again, from this session's own archive, one delivered item by id, or the last delivered batch with last=true. "
-          "Changes nothing.", {"id": {"type": "string"}, "last": {"type": "boolean"}}),
+          "Changes nothing. Pass your own agent-deck session name as me.",
+          {"me": {"type": "string", "description": "your own agent-deck session name"}, "id": {"type": "string"}, "last": {"type": "boolean"}},
+          ("me",)),
 ]})
 TOOLS = json.loads(TOOLS_JSON)["tools"]
 MAX_LINE = 8 << 20
@@ -2582,8 +2584,12 @@ class McpServer:
         return channels_text(self.ready(need_name=False), self.identity.name, self.settings, clock()), None, None
 
     def tool_reread(self, args, mid):
+        """Mail already delivered is still mail: the me check and the reader lock apply as
+        they do to receive, so a wrong name, a background job or a second server sees nothing."""
         d = self.ready()
         name = self.identity.name
+        check_me(args["me"], name)
+        self.reader()
         if args.get("last"):
             ids = (load_state(d, name).get("last_batch") or {}).get("ids") or []
             if not ids:
@@ -4358,7 +4364,21 @@ def section_tools(t):
     receive_id = t._ids
     m = re.match(r"agent-mail \[([0-9a-f]{8})\]", text(first))
     tok_first = m.group(1) if m else None
-    again = tool(b, "reread", last=True)
+
+    def reread_as(srv, me):
+        r = t.call(srv, "tools/call", {"name": "reread", "arguments": {"me": me, "last": True}})
+        return r.get("result") or {"isError": False, "content": [{"type": "text", "text": json.dumps(r.get("error"))}]}
+
+    wrong = reread_as(b, "a")
+    t.ok(wrong["isError"] and "name_mismatch" in text(wrong) and "REREAD-BODY" not in text(wrong), "reread refuses a wrong me and shows nothing")
+    background = McpServer(load_settings({"dir": d}, {}, "b"), Identity("b", "--name", None), None)
+    job = reread_as(background, "b")
+    t.ok(job["isError"] and "not_reader" in text(job) and "background job, which never reads mail" in text(job) and "REREAD-BODY" not in text(job),
+         "reread refuses in a server inside a background job and shows nothing")
+    held = reread_as(b2, "b")
+    t.ok(held["isError"] and "not_reader" in text(held) and "holds its lock" in text(held) and "REREAD-BODY" not in text(held),
+         "reread refuses while another reader holds the name's lock and shows nothing")
+    again = tool(b, "reread", me="b", last=True)
     m = re.match(r"agent-mail \[([0-9a-f]{8})\]", text(again))
     tok_reread = m.group(1) if m else None
     t.ok(tok_first and tok_reread and tok_reread != tok_first and "REREAD-BODY" in text(again), "reread last re-renders the last batch with a fresh token")
