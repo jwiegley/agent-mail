@@ -10,20 +10,22 @@ appear on another host; Syncthing's own temporary files are hidden names, so rea
 ignore them. Each mailbox name still has exactly one reader, on one host.
 
 Name: a session's mailbox name is its agent-deck title in lower case: lower-case letters,
-digits, "." and "-", starting with a letter or digit, with no "_" and no "--". Always pass it explicitly;
-inherited environment variables can name another session. Each mailbox name should have
-exactly one reader.
+digits, "." and "-", starting with a letter or digit, with no "_" and no "--", at most 64
+characters and not ending in "-". These are reserved and name no session, sender or
+channel: all, everyone, john, johnw, jwiegley, user, human, operator, owner, admin, root,
+system, claude, anthropic, codex, agent-deck, agent-mail, and any name beginning with
+"john-". Always pass the name explicitly; inherited environment variables can name another
+session. Each mailbox name should have exactly one reader.
 
 Message: a regular file named TO_UTC_from-FROM_UNIQUE.txt, for example
 nix_20261030T050102.123456Z_from-pi_3f9a1c2e.txt, owned by you and mode 0600. It begins
 with From, To, UTC and Subject header lines, then a blank line, then the body. A sender
 writes it to a hidden file in the mailbox and renames it into place.
 
-Ownership: a file named in the standard form belongs to exactly the name before its first
-"_". A file without that shape belongs to NAME in one of the older forms: NAME followed by
-"--", by "-" and a YYYYMMDDT timestamp, or by ".md"/".txt" ending the name. So "pi"
-never takes "clio-pi", "pi-2", "pi.v2" or "pipeline" mail. Names starting with "." are
-never mail.
+Ownership: a file is NAME's mail only when its whole name is in the standard form with NAME
+before the first "_". So "pi" never takes "clio-pi", "pi-2", "pi.v2" or "pipeline" mail.
+Older forms (pi.md, pi--..., pi-<stamp>...) and upper-case names are not mail: readers
+leave them in place. Names starting with "." are never mail.
 
 Receiving:
 - A file is read once its inode has gone 2 seconds unchanged (ctime, which a sender cannot
@@ -37,9 +39,12 @@ Receiving:
   about 12 KB (--max-bytes). A bigger message is shown in part, with the path of its
   copy. Mail not delivered stays waiting, and read says so.
 - A file that changes while being read is put back for later.
-- Symlinks, FIFOs, directories, hard-linked files, other users' files and files over
-  1 MiB (or that grow past it while being read) are not read:
-  they become .NAME-rejected-FILE and are reported once.
+- Symlinks, FIFOs, hard-linked files, other users' files and files over 1 MiB (or that
+  grow past it while being read) are not read: they become .NAME-rejected-FILE and are
+  reported once. A directory is never renamed: it is reported once and left in place.
+- Printed text has ANSI sequences removed and control and bidi characters replaced, and a
+  line that opens or closes a system-reminder, channel or command-output tag has its "<"
+  replaced. Names in notices show every other byte than letters, digits and "._+-" as \\xNN.
 - A file that cannot be claimed at all (for example, the mailbox is read-only to this
   reader) is reported once and left where it is; read exits with status 2.
 - If printing fails, the claimed messages are put back.
@@ -64,15 +69,17 @@ Commands:
       read, and again as a reminder while that mail stays unread. It does not change
       when mail is read.
   init
-      Create the mailbox directory (mode 0700) and its .agent-mail-mailbox marker. Every
+      Create the mailbox directory (mode 0700) and its .agent-mail-mailbox-v2 marker. Every
       mailbox other than ~/Mailbox needs the marker, so that a wrong --dir or
-      $AGENT_MAIL_DIR cannot claim a project's files. ~/Mailbox itself is refused, since
-      Syncthing creates it.
+      $AGENT_MAIL_DIR cannot claim a project's files; a directory with only the v1 marker,
+      .agent-mail-mailbox, is refused until init runs there. ~/Mailbox itself is refused,
+      since Syncthing creates it.
   self-test [SECTION ...]
       Run the built-in checks, every section or the named ones, each in a fresh
       temporary home.
 """
 import argparse
+import collections
 import contextlib
 import datetime
 import errno
@@ -99,9 +106,17 @@ NAME_MAX = 255
 REMIND_AFTER = 120.0
 REMIND_EVERY = 300.0
 PRESENCE_STALE = 3600.0
-NAME = re.compile(r"[a-z0-9](?:[a-z0-9.]|-(?!-))*")
-RECIPIENT = re.compile(NAME.pattern, re.IGNORECASE)
+NAME_PAT = r"[a-z0-9](?:[a-z0-9.]|-(?!-))*"
+NAME_RE = re.compile(NAME_PAT)
+MSG_RE = re.compile(rf"(?P<to>{NAME_PAT})_(?P<utc>[0-9]{{8}}T[0-9]{{6}}\.[0-9]{{6}}Z)_from-(?P<from>{NAME_PAT})_(?P<uniq>[0-9a-f]{{8}})\.txt")
+RESERVED = frozenset({"all", "everyone", "john", "johnw", "jwiegley", "user", "human", "operator", "owner", "admin",
+                      "root", "system", "claude", "anthropic", "codex", "agent-deck", "agent-mail"})
+RESERVED_PREFIX = "john-"
+# The characters a name in a notice may show as they are. "_" joins the parts of every
+# message name, so it is kept; every other byte is written as \xNN.
+SAFE = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._+-" "_")
 MARKER = ".agent-mail-mailbox"
+MARKER_V2 = ".agent-mail-mailbox-v2"
 DEFAULT_DIR = "~/Mailbox"
 HOST = socket.gethostname().split(".")[0].lower()
 HOSTTAG = hashlib.sha256(HOST.encode()).hexdigest()[:8]
@@ -138,9 +153,11 @@ def require_mailbox(d):
     if not os.path.isdir(d):
         raise MailError("mailbox_missing", f"mailbox {d} does not exist")
     default = os.path.realpath(os.path.expanduser(DEFAULT_DIR))
-    if os.path.realpath(d) != default and not os.path.isfile(os.path.join(d, MARKER)):
-        raise MailError("not_mailbox", f"{d} is not an agent-mail mailbox (it has no {MARKER}); check --dir and $AGENT_MAIL_DIR, or run init there")
-    return d
+    if os.path.realpath(d) == default or os.path.isfile(os.path.join(d, MARKER_V2)):
+        return d
+    if os.path.isfile(os.path.join(d, MARKER)):
+        raise MailError("not_mailbox", f"{d} is not an agent-mail 2 mailbox: it has only the v1 marker; run agent-mail init there")
+    raise MailError("not_mailbox", f"{d} is not an agent-mail mailbox (it has no {MARKER_V2}); check --dir and $AGENT_MAIL_DIR, or run init there")
 
 
 def cmd_init(d, write=None):
@@ -157,39 +174,71 @@ def cmd_init(d, write=None):
         os.makedirs(d, mode=0o700, exist_ok=True)
     except FileExistsError:
         raise MailError("not_a_directory", f"{d} exists but is not a directory")
-    marker = os.path.join(d, MARKER)
+    marker = os.path.join(d, MARKER_V2)
     if not os.path.exists(marker):
         os.close(os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
     emit(write, f"{d}\n")
     return 0
 
 
-def check_name(name):
-    if not NAME.fullmatch(name) or len(name) > 64 or name.endswith("-"):
+NAME_KINDS = {"session": "mailbox name", "sender": "sender name", "channel": "channel name"}
+
+
+def grammatical(name):
+    return NAME_RE.fullmatch(name) is not None and len(name) <= 64 and not name.endswith("-")
+
+
+def check_name(name, kind="session"):
+    """Return NAME when it follows the grammar and is not reserved; kind shapes the message."""
+    what = NAME_KINDS[kind]
+    if not grammatical(name):
         hint = " (for sessions on several hosts, share one mailbox directory)" if "@" in name else ""
-        if NAME.fullmatch(name.lower()):
+        if name != name.lower() and grammatical(name.lower()):
             hint = f" (names are lower case: use {name.lower()!r})"
-        raise MailError("invalid_name", f"invalid mailbox name {name!r}{hint}")
+        raise MailError("invalid_name", f"invalid {what} {name!r}{hint}")
+    if name in RESERVED or name.startswith(RESERVED_PREFIX):
+        raise MailError("reserved_name", f"the {what} {name!r} is reserved")
     return name
 
 
-def owns(name):
-    """A predicate: is this mailbox entry NAME's mail?
+Msg = collections.namedtuple("Msg", "to utc sender uniq id stamp")
 
-    In the standard form the recipient is everything before the first "_", and names cannot
-    contain "_", so that part alone decides. Older forms count only for entries without
-    that shape.
+
+def parse_msg(entry):
+    """The message an entry's name denotes, or None when the name is not standard.
+
+    stamp is the name's UTC time in epoch seconds.
     """
-    legacy = re.compile(re.escape(name) + r"(?:--|-\d{8}T|\.(?:md|txt)$|$)", re.IGNORECASE)
-    lowered = name.lower()
+    m = MSG_RE.fullmatch(entry)
+    if not m or not (grammatical(m.group("to")) and grammatical(m.group("from"))):
+        return None
+    try:
+        when = datetime.datetime.strptime(m.group("utc"), "%Y%m%dT%H%M%S.%fZ").replace(tzinfo=datetime.timezone.utc)
+    except ValueError:
+        return None
+    return Msg(m.group("to"), m.group("utc"), m.group("from"), m.group("uniq"), entry[:-len(".txt")], when.timestamp())
 
-    def is_mine(entry):
-        to, sep, _ = entry.partition("_")
-        if sep and RECIPIENT.fullmatch(to):
-            return to.lower() == lowered
-        return legacy.match(entry) is not None
 
-    return is_mine
+def escape(text):
+    """TEXT for a notice: each byte of its UTF-8 form outside SAFE becomes \\xNN."""
+    try:
+        data = text.encode("utf-8", "surrogateescape")
+    except UnicodeEncodeError:
+        data = text.encode("utf-8", "surrogatepass")
+    return "".join(chr(b) if chr(b) in SAFE else f"\\x{b:02x}" for b in data)
+
+
+ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b\n]*(?:\x07|\x1b\\)?|[@-Z\\-_])")
+# C0 and C1 controls other than tab and newline, and the bidi controls that can reorder text.
+CONTROL_RE = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+TAG_LINE_RE = re.compile(r"^([ \t]*)<(?=/?(?:system-reminder|channel|command-output)(?:[\s>/]|$))", re.IGNORECASE | re.MULTILINE)
+
+
+def sanitize(text):
+    """Printed text: ANSI sequences removed, control and bidi characters replaced by U+FFFD,
+    and the "<" of a line that opens or closes a harness tag replaced by U+2039."""
+    text = CONTROL_RE.sub("\ufffd", ANSI_RE.sub("", text))
+    return TAG_LINE_RE.sub("\\1\u2039", text)
 
 
 def claim_name(name, original):
@@ -331,11 +380,12 @@ def read_file(path):
 def candidates(name, d, now):
     """NAME's deliverable entries, oldest first: settled mail and abandoned claims.
 
-    Returns (entries, waiting, busy): entries are (sort key, entry, original, lstat);
-    waiting counts mail still being written, busy counts claims a live reader holds.
+    Returns (entries, waiting, busy, dirs): entries are (sort key, entry, original, lstat);
+    waiting counts mail still being written, busy counts claims a live reader holds, and
+    dirs lists (entry, lstat) for directories with NAME's mail names, which are never moved.
+    Only names in the standard form are NAME's mail.
     """
-    is_mine = owns(name)
-    found, waiting, busy = [], 0, 0
+    found, waiting, busy, dirs = [], 0, 0, []
     try:
         entries = os.listdir(d)
     except (FileNotFoundError, NotADirectoryError):
@@ -344,13 +394,19 @@ def candidates(name, d, now):
         claim = parse_claim(name, entry)
         if claim:
             pid, tag, original = claim
-        elif entry.startswith(".") or not is_mine(entry):
+        elif entry.startswith("."):
             continue
         else:
             original = entry
+        msg = parse_msg(original)
+        if msg is None or msg.to != name:
+            continue
         try:
             st = os.lstat(os.path.join(d, entry))
         except FileNotFoundError:
+            continue
+        if stat.S_ISDIR(st.st_mode):
+            dirs.append((entry, st))
             continue
         if claim:
             local = tag in (None, HOSTTAG)
@@ -367,20 +423,21 @@ def candidates(name, d, now):
             continue
         found.append((sort_key(original, st), entry, original, st))
     found.sort()
-    return found, waiting, busy
+    return found, waiting, busy, dirs
 
 
 def poll(name, d, max_bytes=MAX_BYTES):
     """Claim and read NAME's mail, oldest first, up to about max_bytes.
 
     Returns a dict: deliveries [(original, hold, text, fstat)]; notices [str] for files
-    moved aside; stuck [(key, str)] for files that could not be claimed; waiting (still
-    being written, or changed while read); busy (held by a live reader); more (ready but
-    left for the next read).
+    moved aside; stuck [(key, str)] for files that could not be claimed; dirs [(key, str)]
+    for directories left in place; waiting (still being written, or changed while read);
+    busy (held by a live reader); more (ready but left for the next read).
     """
     now = clock()
-    found, waiting, busy = candidates(name, d, now)
-    out = {"deliveries": [], "notices": [], "stuck": [], "waiting": waiting, "busy": busy, "more": 0}
+    found, waiting, busy, dirs = candidates(name, d, now)
+    out = {"deliveries": [], "notices": [], "stuck": [], "waiting": waiting, "busy": busy, "more": 0,
+           "dirs": [(f"dir:{st.st_ino}:{entry}", f"--- agent-mail: {escape(entry)} is a directory; left in place") for entry, st in dirs]}
     size = 0
     for i, (_, entry, original, st) in enumerate(found):
         # Only a message that will be printed counts against the cap, and a big one only
@@ -391,15 +448,16 @@ def poll(name, d, max_bytes=MAX_BYTES):
             break
         path = os.path.join(d, entry)
         hold = os.path.join(d, claim_name(name, original))
+        shown = os.path.join(d, escape(entry))
         if too_long(os.path.basename(hold)):
-            out["stuck"].append((f"{st.st_ino}:{entry}:name", f"agent-mail: cannot claim {entry}: its name is too long; it is still at {path}"))
+            out["stuck"].append((f"{st.st_ino}:{entry}:name", f"agent-mail: cannot claim {escape(entry)}: its name is too long; it is still at {shown}"))
             continue
         try:
             os.rename(path, hold)
         except FileNotFoundError:
             continue
         except OSError as e:
-            out["stuck"].append((f"{st.st_ino}:{entry}:{e.errno}", f"agent-mail: cannot claim {entry} ({e.strerror}); it is still at {path}"))
+            out["stuck"].append((f"{st.st_ino}:{entry}:{e.errno}", f"agent-mail: cannot claim {escape(entry)} ({e.strerror}); it is still at {shown}"))
             continue
         try:
             text, fst = read_file(hold)
@@ -420,7 +478,7 @@ def poll(name, d, max_bytes=MAX_BYTES):
                 where = rejected
             except OSError:
                 where = hold if os.path.lexists(hold) else path
-            out["notices"].append(f"--- agent-mail: {original} was not read: {e}; it is now {where}")
+            out["notices"].append(f"--- agent-mail: {escape(original)} was not read: {e}; it is now {os.path.join(d, escape(os.path.basename(where)))}")
             continue
         out["deliveries"].append((original, hold, text, fst))
         size += min(fst.st_size, EXCERPT)
@@ -459,7 +517,7 @@ def render(name, d, result, max_bytes):
         lines.append(head)
     for original, _, text, fst in deliveries:
         copy = os.path.join(a, original)
-        body = text.rstrip()
+        body = sanitize(text).rstrip()
         if len(body.encode("utf-8")) > max_bytes:
             cut = body.encode("utf-8")[:EXCERPT].decode("utf-8", errors="ignore")
             body = f"{cut}\n[... {fst.st_size} bytes in all; the whole message is at {copy}]"
@@ -548,6 +606,7 @@ def cmd_read(name, d, max_bytes, write=None):
             lines.append(f"agent-mail: nothing ready for {name}: {result['busy']} message(s) are being read by another reader of {name}")
         elif not result["stuck"]:
             lines.append(f"agent-mail: no mail for {name}")
+    lines.extend(msg for _, msg in remember_stuck(d, name, result["dirs"]))
     remember_stuck(d, name, result["stuck"])
     lines.extend(msg for _, msg in result["stuck"])
     if lines:
@@ -568,7 +627,7 @@ def cmd_watch(name, d, interval, forever, max_bytes, max_polls=None, parent=None
         touch_presence(d, name)
         prune(d, name, clock())
         result = poll(name, d, max_bytes)
-        fresh = remember_stuck(d, name, result["stuck"])
+        fresh = remember_stuck(d, name, result["dirs"]) + remember_stuck(d, name, result["stuck"])
         if result["deliveries"] or result["notices"] or fresh:
             deliver(d, name, result, max_bytes, write)
             for _, msg in fresh:
@@ -585,7 +644,7 @@ def cmd_watch(name, d, interval, forever, max_bytes, max_polls=None, parent=None
 def cmd_pending(name, d, write=None):
     touch_presence(d, name)
     now = clock()
-    found, _, _ = candidates(name, d, now)
+    found, _, _, _ = candidates(name, d, now)
     ident = [f"{e}:{st.st_ino}:{st.st_mtime_ns}:{st.st_ctime_ns}" for _, e, _, st in found]
     digest = hashlib.sha256("\n".join(sorted(ident)).encode()).hexdigest()[:12] if ident else None
     path = state_path(d, name, "pending")
@@ -764,7 +823,7 @@ class T:
         """A fresh mailbox holding the marker."""
         d = os.path.join(self.root, name)
         os.mkdir(d, 0o700)
-        os.close(os.open(os.path.join(d, MARKER), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+        os.close(os.open(os.path.join(d, MARKER_V2), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
         return d
 
     def mk(self, path, text):
@@ -837,31 +896,38 @@ def section_core(t):
     def mk(n, text):
         return t.mk(os.path.join(d, n), text)
 
-    mine = ["pi_20261030T000000.000001Z_from-nix_aaaaaaaa.txt", "pi--20261030T000002Z--from-catalog.md",
-            "pi-20261030T000003Z-from-x.md", "pi.md", "PI_20261030T000004.000000Z_from-nyx-ai_bbbbbbbb.txt"]
+    mine = ["pi_20261030T000000.000001Z_from-nix_aaaaaaaa.txt"]
+    legacy = ["pi--20261030T000002Z--from-catalog.md", "pi-20261030T000003Z-from-x.md", "pi.md", "PI_20261030T000004.000000Z_from-nyx-ai_bbbbbbbb.txt"]
+    order = ["pi_20261030T000002.000000Z_from-catalog_00000002.txt", "pi_20261030T000003.000000Z_from-x_00000003.txt"]
     others = ["clio-pi_20261030T000000.000000Z_from-nix_cccccccc.txt", "pi-2_20261030T000000.000000Z_from-x_dddddddd.txt",
               "pi.v2_20261030T000000.000000Z_from-x_eeeeeeee.txt", "pi-foo--20261030T000000Z--from-x.md",
               "pipeline.md", ".pi_hidden.txt", "nyx-ai_20261030T000000.000000Z_from-pi_ffffffff.txt", "secret.txt"]
-    for n in mine:
+    for n in mine + legacy + order:
         mk(n, f"body of {n}\n")
     for n in others:
         mk(n, "SECRET\n" if n == "secret.txt" else f"not for pi: {n}\n")
-    os.symlink(os.path.join(d, "secret.txt"), os.path.join(d, "pi_link.txt"))
-    os.mkdir(os.path.join(d, "pi_dir"))
-    os.mkfifo(os.path.join(d, "pi_fifo"))
-    mk("pi_big.txt", "x" * (LIMIT + 1))
+    link_n, dir_n = "pi_20261030T000010.000000Z_from-x_0000000a.txt", "pi_20261030T000011.000000Z_from-x_0000000b.txt"
+    fifo_n, big_n = "pi_20261030T000012.000000Z_from-x_0000000c.txt", "pi_20261030T000013.000000Z_from-x_0000000d.txt"
+    os.symlink(os.path.join(d, "secret.txt"), os.path.join(d, link_n))
+    os.mkdir(os.path.join(d, dir_n))
+    os.mkfifo(os.path.join(d, fifo_n))
+    mk(big_n, "x" * (LIMIT + 1))
 
     out, code, _ = t.capture(cmd_read, "pi", d, 100000)
     for n in mine:
         t.ok(f"body of {n}" in out and not os.path.lexists(os.path.join(d, n)), f"delivers {n}")
         t.ok(os.path.exists(os.path.join(d, ".pi-read", n)), f"keeps a copy of {n}")
+    for n in legacy:
+        t.ok(os.path.exists(os.path.join(d, n)) and f"body of {n}" not in out, f"leaves {n} in place")
+        t.ok(not os.path.lexists(os.path.join(d, ".pi-read", n)), f"makes no copy of {n}")
     for n in others:
         t.ok(os.path.exists(os.path.join(d, n)) and f"not for pi: {n}" not in out, f"leaves {n} alone")
-    t.ok(re.match(r"agent-mail \[[0-9a-f]{8}\]: 5 message\(s\) for pi: ", out) is not None, "lists the batch first")
-    t.ok(out.index("body of pi--20261030T000002Z") < out.index("body of pi-20261030T000003Z"), "delivers oldest first")
+    t.ok(re.match(r"agent-mail \[[0-9a-f]{8}\]: 3 message\(s\) for pi: ", out) is not None, "lists the batch first")
+    t.ok(out.index("body of pi_20261030T000002") < out.index("body of pi_20261030T000003"), "delivers oldest first")
     t.ok("SECRET" not in out, "never reads through a symlink")
-    for n in ("pi_link.txt", "pi_dir", "pi_fifo", "pi_big.txt"):
+    for n in (link_n, fifo_n, big_n):
         t.ok(f"{n} was not read" in out and os.path.lexists(os.path.join(d, f".pi-rejected-{n}")), f"rejects {n}")
+    t.ok(f"{dir_n} is a directory; left in place" in out and os.path.isdir(os.path.join(d, dir_n)), "reports the directory once and leaves it")
     t.ok(t.capture(cmd_read, "pi", d, 100000)[0].strip() == "agent-mail: no mail for pi", "reports an empty mailbox")
     t.ok("not for pi: pi-2_" in t.capture(cmd_read, "pi-2", d, 100000)[0], "pi-2 gets the mail that pi left alone")
     t.ok("not for pi: pi.v2_" in t.capture(cmd_read, "pi.v2", d, 100000)[0], "pi.v2 gets its own mail too")
@@ -921,9 +987,11 @@ def section_core(t):
     t.ok(all(parse_claim("pi", e)[1] == HOSTTAG for e in os.listdir(d) if e.startswith(".pi-claimed-")), "claims made here carry this host's tag")
     t.patch("CLAIM_STALE", 600.0)
 
-    long_name = "pi_" + "x" * (NAME_MAX - 3)
+    # Only the longest standard names make a claim name too long.
+    reader = "r" * 64
+    long_name = f"{reader}_20261030T000000.000000Z_from-{'s' * 64}_00000000.txt"
     mk(long_name, "long\n")
-    out, code, _ = t.capture(cmd_read, "pi", d, MAX_BYTES)
+    out, code, _ = t.capture(cmd_read, reader, d, MAX_BYTES)
     t.ok(code == 2 and "its name is too long" in out and os.path.exists(os.path.join(d, long_name)), "reports a name too long to claim")
     os.unlink(os.path.join(d, long_name))
     stuck = mk("pi_20261030T000500.000000Z_from-nix_77777777.txt", "stuck\n")
@@ -972,6 +1040,36 @@ def section_core(t):
     t.capture(cmd_read, "pi", d, MAX_BYTES)
     with open(first) as f:
         t.ok(f.read() == "an earlier rejected file\n", "a rejected file does not overwrite an earlier one")
+
+
+def section_grammar(t):
+    for bad in ("all", "everyone", "john", "john-x", "agent-mail", "codex", "root", "a" * 65, "x-", "a_b", "Pi", "x--y"):
+        t.ok(t.raises(check_name, bad) is not None, f"refuses the name {bad!r}")
+    for good in ("pi", "glm-5.2", "conductor-director", "a" * 64):
+        t.ok(check_name(good) == good, f"accepts the name {good!r}")
+    m = parse_msg("pi_20261030T050102.123456Z_from-nix_0badc0de.txt")
+    t.ok(m is not None and m.id == "pi_20261030T050102.123456Z_from-nix_0badc0de" and m.sender == "nix", "parses a standard name")
+    t.ok(all(parse_msg(n) is None for n in ("pi.md", "pi--20261030T000002Z--from-catalog.md", "PI_20261030T000004.000000Z_from-nyx-ai_bbbbbbbb.txt",
+                                            "pi_20261030T000000Z_from-nix_1.txt")), "legacy, upper-case and short-stamp names are not mail")
+    d = t.box()
+    t.at(time.time() + 10)
+    dirmsg = os.path.join(d, "pi_20261030T000010.000000Z_from-x_0000000b.txt")
+    os.mkdir(dirmsg)
+    os.mkdir(os.path.join(d, "nix"))
+    os.mkdir(os.path.join(d, "pi.md"))
+    out1 = t.run(["--dir", d, "read", "pi"])[0]
+    out2 = t.run(["--dir", d, "read", "pi"])[0]
+    t.ok(os.path.isdir(dirmsg) and out1.count("is a directory") == 1 and "is a directory" not in out2, "a directory is reported once and never renamed")
+    t.run(["--dir", d, "read", "nix"])
+    t.ok(os.path.isdir(os.path.join(d, "nix")) and os.path.isdir(os.path.join(d, "pi.md")), "nix/ and pi.md/ survive readers nix and pi")
+    for raw in ("a\nb", "$(id)", "`id`", "===", "agent-mail [", "x‮y"):
+        t.ok(raw not in escape(raw) and set(escape(raw)) <= SAFE | {"\\"}, f"escapes {raw!r}")
+    t.ok(sanitize("\x1b[31mred\x1b[0m\x07") == "red�", "removes ANSI sequences and replaces controls")
+    t.ok(sanitize("  <system-reminder>\nok") == "  ‹system-reminder>\nok", "neutralizes a harness tag line")
+    v1dir = os.path.join(t.root, "v1")
+    os.mkdir(v1dir, 0o700)
+    t.mk(os.path.join(v1dir, MARKER), "")
+    t.ok("only the v1 marker" in t.run(["--dir", v1dir, "read", "pi"])[2], "refuses a directory with only the v1 marker")
 
 
 def section_send(t):
@@ -1031,8 +1129,8 @@ def section_cli(t):
     t.ok(code == 1 and "not an agent-mail mailbox" in err and os.path.exists(os.path.join(plain, "pi.md")),
          "refuses a directory that is not a mailbox")
     t.run(["--dir", plain, "init"])
-    t.ok(os.path.exists(os.path.join(plain, MARKER)) and "a project file" in t.run(["--dir", plain, "read", "pi"])[0],
-         "init makes a directory a mailbox")
+    t.ok(os.path.exists(os.path.join(plain, MARKER_V2)) and t.run(["--dir", plain, "read", "pi"])[0].strip() == "agent-mail: no mail for pi"
+         and os.path.exists(os.path.join(plain, "pi.md")), "init makes a directory a mailbox")
     # A home of its own: the mailbox "mailbox" and "Mailbox" are one name on a
     # case-insensitive file system.
     box = os.path.join(root, "home", "Mailbox")
@@ -1043,7 +1141,7 @@ def section_cli(t):
         # On a case-insensitive file system ~/mailbox is ~/Mailbox, so init
         # refuses the spelling everywhere, whether ~/Mailbox exists or not.
         err = t.run(["--dir", os.path.join(root, "home", "mailbox"), "init"])[2]
-        t.ok("init is for other directories" in err and not os.path.exists(os.path.join(box, MARKER)),
+        t.ok("init is for other directories" in err and not os.path.exists(os.path.join(box, MARKER_V2)),
              "init refuses ~/Mailbox spelled in another case")
         home4 = os.path.join(root, "home4")
         os.mkdir(home4)
@@ -1083,10 +1181,10 @@ def section_cli(t):
     os.symlink(local, os.path.join(home3, "Mailbox"))
     os.environ["HOME"] = home3
     try:
-        with open(os.path.join(local, "pi_20260101T000000Z_from-nix_1.txt"), "w") as f:
+        with open(os.path.join(local, "pi_20260101T000000.000000Z_from-nix_00000001.txt"), "w") as f:
             f.write("through the symlink\n")
         t.ok("through the symlink" in t.run(["read", "pi"])[0], "reads ~/Mailbox through a symlink to a local directory")
-        with open(os.path.join(local, "pi_20260101T000001Z_from-nix_2.txt"), "w") as f:
+        with open(os.path.join(local, "pi_20260101T000001.000000Z_from-nix_00000002.txt"), "w") as f:
             f.write("through --dir\n")
         t.ok("through --dir" in t.run(["--dir", local, "read", "pi"])[0],
              "accepts --dir to the symlink's target without a marker")
@@ -1100,6 +1198,7 @@ def section_cli(t):
 
 SECTIONS = [
     ("core", section_core),
+    ("grammar", section_grammar),
     ("send", section_send),
     ("cli", section_cli),
 ]
