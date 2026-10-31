@@ -3330,13 +3330,23 @@ def section_core(t):
     legacy = mk(".pi-claimed-pi_20261029T235957.000000Z_from-nix_88888888.txt", "claimed by an older agent-mail\n")
     t.ok("claimed by an older agent-mail" not in t.capture(cmd_read, "pi", d, MAX_BYTES)[0] and os.path.exists(legacy),
          "leaves a recent claim made by an older agent-mail")
+    stale = CLAIM_STALE
     t.patch("CLAIM_STALE", 0.0)
     out = t.capture(cmd_read, "pi", d, MAX_BYTES)[0]
     t.ok("held by a live reader" in out, "recovers an abandoned claim")
     t.ok("claimed by an older agent-mail" in out and not os.path.exists(legacy), "recovers an abandoned claim made by an older agent-mail")
     t.ok("claimed on another host" in out and not os.path.exists(remote), "recovers an abandoned claim made on another host")
     t.ok(all(parse_claim("pi", e)[1] == HOSTTAG for e in os.listdir(d) if e.startswith(".pi-claimed-")), "claims made here carry this host's tag")
-    t.patch("CLAIM_STALE", 600.0)
+    t.patch("CLAIM_STALE", stale)
+    late = mk(f".pi-claimed-1-{remote_tag}-pi_20261029T235958.000000Z_from-nix_7777777a.txt", "claimed on another host ten minutes ago\n")
+    made = os.lstat(late).st_ctime
+    t.at(made + 599)
+    young = t.capture(cmd_read, "pi", d, MAX_BYTES)[0]
+    t.at(made + 601)
+    aged = t.capture(cmd_read, "pi", d, MAX_BYTES)[0]
+    t.at(None)
+    t.ok("ten minutes ago" not in young and "ten minutes ago" in aged and not os.path.exists(late),
+         "another host's claim is taken back once it is 600 s old, and not before")
 
     # Only the longest standard names make a claim name too long.
     reader = "r" * 64
@@ -3457,6 +3467,9 @@ def section_settings(t):
     t.ok(load_settings({}, {}, "pi").paused, "the pause file pauses the host")
     _, code, err = t.run(["--dir", t.box(), "read", "pi", "--max-bytes", "999"])
     t.ok(code == 1 and "--max-bytes is 999" in err, "the CLI passes its flags through load_settings")
+    blank = {"AGENT_MAIL_DIR": "", "AGENT_MAIL_POLL": "", "AGENT_MAIL_NOTIFY": "", "AGENT_MAIL_CHANNELS": "", "AGENT_MAIL_MAX_BYTES": ""}
+    t.ok(t.raises(load_settings, {}, blank, "pi") is None and load_settings({}, blank, "pi").source == load_settings({}, {}, "pi").source,
+         "an empty environment variable counts as unset")
 
 
 def section_state(t):
@@ -3555,6 +3568,30 @@ def section_state(t):
         t.ok(getattr(t.raises(runtime_dir), "code", None) == "unsafe_runtime_dir", "refuses a runtime directory others can read")
     finally:
         os.chmod(run, 0o700)
+    os.mkdir(os.path.join(t.root, "real-run"), 0o700)
+    run_link = os.path.join(t.root, "run-link")
+    os.symlink(os.path.join(t.root, "real-run"), run_link)
+    with contextlib.suppress(NotImplementedError, OSError):
+        os.chmod(run_link, 0o700, follow_symlinks=False)  # macOS can make a link's own mode private; Linux cannot
+    os.environ["AGENT_MAIL_RUNTIME_DIR"] = run_link
+    try:
+        t.ok(getattr(t.raises(runtime_dir), "code", None) == "unsafe_runtime_dir", "refuses a runtime directory that is a symlink, even one whose own mode is private")
+    finally:
+        os.environ["AGENT_MAIL_RUNTIME_DIR"] = run
+    touch_member(d, "pv", [], now - 100)
+    pv = legacy_presence(d, "pv")
+    t.ok(os.path.isfile(pv) and abs(os.stat(pv).st_mtime - (now - 100)) < 0.01, "the v1 presence file is touched with the member record, at the reader's time")
+    t.patch("SETTLE", 0.0)
+    local = t.box("hostlocal")
+    send(local, "nix", "pi", "s", "mail for pi to announce and read", load_settings({}, {}, "nix"))
+    send(local, "pi", "nix", "s", "a send leaves a window", load_settings({}, {}, "pi"))
+    t.run(["--dir", local, "pending", "pi"])
+    t.run(["--dir", local, "read", "pi"])
+    inside = sorted(os.path.relpath(os.path.join(folder, f), local) for folder, _, files in os.walk(local) for f in files if f.endswith(".json"))
+    here = os.path.join(t.root, ".local", "state", "agent-mail") + os.sep
+    t.ok(inside == [os.path.join(".agent-mail", "members", "pi.json")]
+         and all(os.path.isfile(state_file(local, "pi", x)) and state_file(local, "pi", x).startswith(here) for x in ("", ".send", ".pending")),
+         "reader state, the send window and pending's state stay on this host, outside the mailbox")
 
 
 def section_channels(t):
@@ -3734,7 +3771,8 @@ def section_posts(t):
     conflict = t.mk(os.path.join(fair, "+fleet", "fleet_20261030T000000.000000Z_from-x_0000000e.sync-conflict-20261031-000000-ABCDEFG.txt"), "x\n")
     o1, o2 = receive(fair, "r", s, sink), receive(fair, "r", s, sink)
     t.ok(o1.count("misfiled") == 1 and "misfiled" not in o2 and os.path.exists(misfiled), "a misfiled post is reported once and left alone")
-    t.ok("sync-conflict" in o1 and "sync-conflict" not in o2 and os.path.exists(conflict), "a conflict copy is reported once and never delivered")
+    t.ok("sync-conflict" in o1 and "is a Syncthing conflict copy, never mail; left in place" in o1 and "sync-conflict" not in o2 and os.path.exists(conflict),
+         "a conflict copy is reported once, as a conflict copy, and never delivered")
 
     k = t.box("kinds")
     create_channel(k, "a", "p")
@@ -3760,6 +3798,15 @@ def section_posts(t):
     t.ok("another reader of a appears active on h2" in receive(d, "a", s, sink), "warns when the member record shows another host")
     t.mk(member_path(d, "a"), json.dumps({"v": 2, "name": "a", "host": "h3", "checked": utc(T0 + 30), "subs": ["fleet"]}))
     t.ok("another reader of a appears active on h3" in receive(d, "a", s, sink), "a record stamped a little ahead by another host's clock still warns")
+    t.mk(member_path(d, "a"), json.dumps({"v": 2, "name": "a", "host": "h4", "checked": utc(T0 - 601), "subs": ["fleet"]}))
+    t.ok("another reader" not in receive(d, "a", s, sink), "a member record another host checked over 600 s ago does not warn")
+    t.mk(member_path(d, "a"), json.dumps({"v": 2, "name": "a", "host": "h2", "checked": utc(T0 - 60), "subs": ["fleet"]}))
+    out, code, _ = t.capture(cmd_watch, "a", d, 0.01, False, MAX_BYTES, 1)
+    t.ok(code is None and out == "", "a quiet pass of the claiming watch prints nothing, even with a duplicate-reader warning to give")
+    big_post = t.post(d, "fleet", "nix", "x" * POST_LIMIT)
+    out = receive(d, "a", s, sink)
+    t.ok(f"{os.path.basename(big_post)} in +fleet was not read: " in out and f"over the {POST_LIMIT}-byte limit for posts" in out and os.path.exists(big_post),
+         "an oversize post is skipped with a notice and left in place")
 
     # Review Focus 3: bytes that are not UTF-8, or not printable, in names and bodies.
     raw = t.box("bytes")
@@ -3854,6 +3901,17 @@ def section_retention(t):
     copy_6_days = t.mk(os.path.join(archive, "young-copy.txt"), "young\n")
     prune_archive(d, "a", os.stat(copy_6_days).st_ctime + 6 * 86400)
     t.ok(not os.path.exists(copy_8_days) and os.path.exists(copy_6_days), "archive copies older than 7 days go and younger ones stay")
+    edge = clock()
+    young_post = t.post(d, "fleet", "nix", "DAYS-29.75", stamp=edge - 29.75 * 86400)
+    old_post = t.post(d, "fleet", "nix", "DAYS-30.25", stamp=edge - 30.25 * 86400)
+    prune_posts(d, "a", st, effective_subs(st, s, edge), edge)
+    t.ok(os.path.exists(young_post) and not os.path.exists(old_post), "a post is pruned between 29.75 and 30.25 days after its stamp")
+    copy_edge = t.mk(os.path.join(archive, "edge-copy.txt"), "edge\n")
+    made = os.stat(copy_edge).st_ctime
+    prune_archive(d, "a", made + 6.75 * 86400)
+    stayed = os.path.exists(copy_edge)
+    prune_archive(d, "a", made + 7.25 * 86400)
+    t.ok(stayed and not os.path.exists(copy_edge), "an archive copy is pruned between 6.75 and 7.25 days after its ctime")
 
     old_broadcast = t.direct(d, "all", "nix", "OLD-BROADCAST", stamp=clock() - 40 * 86400)
     t.run(["--dir", d, "pending", "a"])
@@ -3908,13 +3966,13 @@ class FakeBackend:
     def registrations(self, path):
         return self.history.count(path)
 
-    def queue(self, kind):
-        self.script.append(kind)
+    def queue(self, kind, handle=None):
+        self.script.append((kind, handle))
 
     def wait(self, timeout):
         self.waits += 1
         self.last_timeout = timeout
-        events, self.script = [(kind, None) for kind in self.script], []
+        events, self.script = self.script, []
         return events
 
     def close(self):
@@ -3948,6 +4006,31 @@ def section_waiter(t):
     extra.remove(fleet)
     w.wait(None)
     t.ok(fleet not in fb.registered, "a dropped subscription is unwatched on the next pass")
+    before = fb.registrations(d)
+    fb.queue("rearm", d)
+    w.wait(None)
+    t.ok(w.rescan_requested and fb.registrations(d) == before + 1,
+         "a rearm event registers its directory again even when the inode is unchanged, as after inode reuse")
+    naps = []
+    w_gap = Waiter(lambda: [d], 15, "auto", backend=FakeBackend([]), sleep=naps.append)
+    w_gap.impl.queue("event")
+    w_gap.wait(None)
+    t.ok(len(naps) == 1 and 0 < naps[0] <= 0.5, "an event right after a scan waits out the 0.5 s minimum gap between scans")
+
+    class CountingWaiter(Waiter):
+        waits = []
+
+        def wait(self, settle_until=None):
+            CountingWaiter.waits.append(settle_until)
+            return "timeout"
+
+    real_waiter = Waiter
+    t.patch("Waiter", CountingWaiter)
+    try:
+        out, code, _ = t.capture(cmd_watch, "pi", d, 0.2, False, MAX_BYTES, 3)
+    finally:
+        t.patch("Waiter", real_waiter)
+    t.ok(code is None and out == "" and len(CountingWaiter.waits) == 2, "between passes the claiming watch waits on the Waiter, never a plain sleep")
     t.ok(Waiter(lambda: [d], 15, "off").backend == "poll", "notify off polls only")
 
     class NoBackend(PollBackend):
@@ -4386,6 +4469,8 @@ def section_send(t):
     t.ok(getattr(t.raises(send, d, "pi", "nix", "s", "-----BEGIN OPENSSH PRIVATE KEY-----\nabc", s), "code", None) == "looks_like_secret",
          "refuses a private key block")
     t.ok(getattr(t.raises(send, d, "pi", "nix", "s", "token ghp_" + "a" * 36, s), "code", None) == "looks_like_secret", "refuses a GitHub token")
+    for shape, token in (("an AWS access key", "AKIA" + "Q" * 16), ("a Slack token", "xoxb-" + "1" * 12), ("an Anthropic API key", "sk-ant-" + "a" * 24)):
+        t.ok(getattr(t.raises(send, d, "pi", "nix", "s", f"the key {token} in a message", s), "code", None) == "looks_like_secret", f"refuses {shape}")
     t.ok(send(d, "pi", "nix", "s2", "commit " + "0b1c" * 10 + " and the word sk-ant in prose", s).id, "lets a git hash and prose through")
     t.ok(getattr(t.raises(send, d, "pi", "nix", "s", "b", paused), "code", None) == "paused", "a paused host does not send")
     t.ok(getattr(t.raises(send, d, "pi", "+nope", "s", "b", s), "code", None) == "no_such_channel", "a post to a missing channel is refused")
