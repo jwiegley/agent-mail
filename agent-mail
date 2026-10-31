@@ -2191,7 +2191,7 @@ def bell_pass(d, name, settings, slot, now):
 
 def doorbell(d, name, settings, parent, forever, waiter=None, max_passes=None):
     """Ring a content-free line when mail for NAME starts waiting; never claim, never write
-    anything but the slot, never print anything but ring lines, never touch stderr.
+    anything but its slot and the log, never print anything but ring lines, never touch stderr.
 
     Returns 10 after a ring (without forever), 0 when a newer doorbell took the slot or the
     parent has gone, and 1 on an error or a vanished mailbox; diagnostics go to the log.
@@ -4355,6 +4355,26 @@ def section_doorbell(t):
     t.ok(t.run(["frobnicate"])[1] == 2 and not re.search("peer mail is waiting", t.run(["frobnicate"])[0]), "an unknown subcommand never rings")
     out, code, err = t.run(["--dir", os.path.join(t.root, "missing"), "watch", "pi", "--doorbell"])
     t.ok((code, out, err) == (1, "", ""), "the CLI doorbell keeps a refusal off stdout and stderr")
+
+    def files():
+        """Every path under the section's root: a file's mtime and size, or None for a directory."""
+        found = {}
+        for folder, dirs, names in os.walk(t.root):
+            for n in dirs + names:
+                path = os.path.join(folder, n)
+                st = os.lstat(path)
+                found[path] = None if stat.S_ISDIR(st.st_mode) else (st.st_mtime_ns, st.st_size)
+        return found
+
+    writes = t.box("writes")
+    t.direct(writes, "w", "nix", "RINGS-AND-WRITES-NOTHING-ELSE")
+    before = files()
+    rang = t.capture(doorbell, writes, "w", s, ppid, False, waiter=fake_waiter(writes), max_passes=3)[1]
+    after = files()
+    changed = {p for p in before.keys() | after.keys() if before.get(p, "missing") != after.get(p, "missing")}
+    allowed = {bell_path(writes, "w", ppid), os.path.join(os.path.expanduser(STATE_DIR), "log")}
+    t.ok(rang == 10 and bell_path(writes, "w", ppid) in changed and changed <= allowed,
+         f"the doorbell writes nothing but its slot and the log; it also changed: {', '.join(sorted(changed - allowed))}")
 
 
 def json_lines(text):
