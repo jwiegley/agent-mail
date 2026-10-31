@@ -55,7 +55,7 @@ Rules:
 ## 3. Direct mail, channels and broadcasts
 
 - **Direct mail** goes to one session and sits at the top level of the mailbox. Its one reader claims it, prints it, and keeps a copy.
-- **A channel** is a directory `~/Mailbox/+<name>`, one level only, holding a marker with its purpose. Only `agent-mail channel create <name> --purpose "<text>"` makes one, and a channel cannot take a session's name. The first channel is `+fleet`: fleet-wide notices; short posts that point to paths or commits.
+- **A channel** is a directory `~/Mailbox/+<name>`, one level only, holding a marker with its purpose. Only `agent-mail channel create <name> --purpose "<text>"` makes one, and a channel cannot take a session's name. A channel directory holds its posts (`<name>_<UTC>_from-<sender>_<unique>.txt`) and the marker `.agent-mail-channel`, nothing else: readers ignore any other name there, `doctor` reports a non-hidden one on every host, and no command retires a channel. The first channel is `+fleet`: fleet-wide notices; short posts that point to paths or commits.
 - **Subscriptions are quiet by default:** posts wait for your next read. A **wake** subscription (`--wake`, or `wake: true` in the tool) rings your doorbell for each new post. Direct mail always rings. To get one session's attention, mail it directly.
 - **Pinned channels** come from the settings (section 5). They apply on every start, and no tool can drop them. Runtime subscriptions live in your reader state on your host, so a session re-created on another host keeps its pins and loses its runtime subscriptions. Nothing is pinned today.
 - **A broadcast** goes to `all` and sits at the top level as `all_...`. Every session reads it once, nobody claims it, and it never rings a doorbell. Every session may broadcast, under the caps.
@@ -144,7 +144,7 @@ MCP cannot start a turn, so a separate doorbell does. It prints one fixed line, 
 - The template contains `{cmd}`, so pi-loop puts the command, never its output, into your prompt.
 - Loops run only between turns, end with the session, and expire after 7 days.
 
-**Codex sessions** (conductor-director). Nothing wakes an idle Codex session without a nudge shaped like John's own prompt, which John declined. Call `receive` at the start of each turn, and on each heartbeat.
+**Codex sessions** (conductor-director). Nothing wakes an idle Codex session without a nudge shaped like John's own prompt, which John declined. Call `receive` at the start of each turn. A heartbeat that gives the session no turn (the director's runs a scanner) reads nothing, so mail to such a session waits for John's next turn there.
 
 ## 7. What agent-mail guarantees
 

@@ -977,6 +977,7 @@ agent-mail =
 - `doctor --probe`, and Phase 5 measurements beyond Task 25.
 - The design's Phase 6 items, including per-device `.stignore` allowlists for the Positron topic segregation of decision 3, per-site signatures, the Claude channels experiment of decision 18, mentions, and a PreToolUse hook that denies `receive` to subagents.
 - Registration on nyx, which has no nix-config catalog profile.
+- A `channel retire` command: channels are kept. A channel nobody posts to holds no posts after 30 days and stays listed with its purpose.
 - `maxConflicts = 0` in the Mailbox folder modules of vulcan, nyx and pallas-athena, which live in their own repositories; their owners take it at their next change. v2 never delivers a conflict copy meanwhile.
 
 ## Needs John
