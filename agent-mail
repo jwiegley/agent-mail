@@ -1947,10 +1947,23 @@ def emit(write, text):
         raise MailError("output_failed", "the output failed") from None
 
 
+def hold_reader(d, name):
+    """Take NAME's reader lock for this command, or refuse with not_reader (status 4)."""
+    lock = ReaderLock(d, name)
+    if not lock.acquire():
+        raise MailError("not_reader", f"another reader of {name} holds its lock ({clean_line(lock.holder or 'unknown')}); if that is your MCP server, "
+                                      f"use its receive and subscribe tools, and run agent-mail watch {name} --doorbell to be woken")
+    return lock
+
+
 def cmd_read(name, d, max_bytes, write=None, settings=None):
     if settings is None:
         settings = load_settings({}, os.environ, name)
-    out = receive(d, name, settings, write or stdout_write, max_bytes)
+    lock = hold_reader(d, name)
+    try:
+        out = receive(d, name, settings, write or stdout_write, max_bytes)
+    finally:
+        lock.release()
     return EXIT_STATUS["stuck"] if out.batch.stuck else 0
 
 
@@ -1959,6 +1972,7 @@ def cmd_watch(name, d, interval, forever, max_bytes, max_polls=None, parent=None
     if settings is None:
         settings = load_settings({}, os.environ, name)
     polls = 0
+    lock = hold_reader(d, name)
     waiter = Waiter(lambda: watch_dirs(d, name, settings), interval, settings.notify)
     try:
         while True:
@@ -1978,6 +1992,62 @@ def cmd_watch(name, d, interval, forever, max_bytes, max_polls=None, parent=None
             waiter.wait(out.batch.settle)
     finally:
         waiter.close()
+        lock.release()
+
+
+def subscription_text(d, name, ch, sub):
+    listed = sorted(n for n, record in members(d).items() if ch in record["subs"])
+    how = ("wake" if sub["wake"] else "quiet") + (", pinned" if sub["pinned"] else "")
+    return f"+{ch}: {name} subscribes, {how}; subscribers listed: {', '.join(listed) or 'none'}"
+
+
+def cmd_subscribe(name, d, ch, wake, backlog, settings, write=None):
+    lock = hold_reader(d, name)
+    try:
+        now = clock()
+        state = load_state(d, name)
+        sub = subscribe(d, name, state, settings, ch, wake=wake, backlog=backlog, now=now)
+        save_state(d, name, state)
+        touch_member(d, name, effective_subs(state, settings, now), now)
+        emit(write, subscription_text(d, name, ch, sub) + "\n")
+    finally:
+        lock.release()
+    return 0
+
+
+def cmd_unsubscribe(name, d, ch, settings, write=None):
+    lock = hold_reader(d, name)
+    try:
+        now = clock()
+        state = load_state(d, name)
+        was = unsubscribe(state, settings, ch)
+        save_state(d, name, state)
+        touch_member(d, name, effective_subs(state, settings, now), now)
+        emit(write, f"+{ch}: {name} unsubscribed\n" if was else f"+{ch}: {name} was not subscribed\n")
+    finally:
+        lock.release()
+    return 0
+
+
+def cmd_channel_create(d, ch, purpose, write=None):
+    create_channel(d, ch, purpose)
+    emit(write, f"+{ch}\n")
+    return 0
+
+
+def cmd_channels(d, name, settings, write=None):
+    now = clock()
+    subs = effective_subs(load_state(d, name), settings, now) if name else {}
+    lines = []
+    for c in list_channels(d, now):
+        mark = ""
+        if c["name"] in subs:
+            sub = subs[c["name"]]
+            mark = f" (you, {'wake' if sub['wake'] else 'quiet'})" + (" (pinned)" if sub["pinned"] else "")
+        lines.append(f"+{c['name']}{mark}: {c['purpose']}; {c['posts_7d']} post(s) in 7 days; last post {c['last_post'] or 'none'}; "
+                     f"subscribers listed: {', '.join(c['subscribers']) or 'none'}")
+    emit(write, "\n".join(lines) + "\n" if lines else "agent-mail: no channels yet; agent-mail channel create makes one\n")
+    return 0
 
 
 def cmd_pending(name, d, write=None):
@@ -2034,7 +2104,7 @@ def cmd_send(sender, to, subject, ident, src, d, write=None, settings=None, in_r
     return 0
 
 
-def main(argv):
+def build_parser():
     p = argparse.ArgumentParser(prog="agent-mail", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--dir", default=None, help="mailbox directory (default $AGENT_MAIL_DIR or ~/Mailbox)")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -2045,25 +2115,44 @@ def main(argv):
     s.add_argument("--in-reply-to", help="the id of the message this one answers")
     s.add_argument("--id")
     s.add_argument("file", nargs="?")
+    pin = {"action": "append", "dest": "pins", "metavar": "CHANNEL[:wake]", "help": "pin a channel (repeatable)"}
     r = sub.add_parser("read")
     r.add_argument("name")
     r.add_argument("--max-bytes", type=int)
-    r.add_argument("--channel", action="append", help="pin a channel, NAME or NAME:wake (repeatable)")
+    r.add_argument("--channel", **pin)
     pe = sub.add_parser("pending")
     pe.add_argument("name")
-    pe.add_argument("--channel", action="append", help="pin a channel, NAME or NAME:wake (repeatable)")
+    pe.add_argument("--channel", **pin)
     w = sub.add_parser("watch")
     w.add_argument("name")
     w.add_argument("--poll", type=float, help="seconds between scans, 1 to 300 (default 15)")
     w.add_argument("--interval", dest="poll", type=float, help=argparse.SUPPRESS)  # the fleet's running watch lines use it
     w.add_argument("--notify", help="auto, on or off")
-    w.add_argument("--channel", action="append", help="pin a channel, NAME or NAME:wake (repeatable)")
+    w.add_argument("--channel", **pin)
     w.add_argument("--forever", action="store_true")
     w.add_argument("--max-bytes", type=int)
     w.add_argument("--parent", type=int, help="stop when this process (the session that started the watcher) is gone")
+    w.add_argument("--max-polls", type=int, help=argparse.SUPPRESS)  # for the self-test
+    sub.add_parser("channels").add_argument("name", nargs="?")
+    ch = sub.add_parser("channel").add_subparsers(dest="channel_cmd", required=True)
+    cc = ch.add_parser("create")
+    cc.add_argument("channel")
+    cc.add_argument("--purpose", required=True)
+    sb = sub.add_parser("subscribe")
+    sb.add_argument("name")
+    sb.add_argument("channel")
+    sb.add_argument("--wake", action="store_true")
+    sb.add_argument("--backlog", type=int, default=0)
+    us = sub.add_parser("unsubscribe")
+    us.add_argument("name")
+    us.add_argument("channel")
     sub.add_parser("self-test").add_argument("sections", nargs="*", metavar="SECTION")
     sub.add_parser("init")
-    a = p.parse_args(argv)
+    return p
+
+
+def main(argv):
+    a = build_parser().parse_args(argv)
     os.umask(0o077)
     try:
         return dispatch(a)
@@ -2079,8 +2168,13 @@ def main(argv):
 
 def cli_settings(a, name):
     flags = {"dir": a.dir, "poll": getattr(a, "poll", None), "notify": getattr(a, "notify", None),
-             "max_bytes": getattr(a, "max_bytes", None), "channels": getattr(a, "channel", None)}
+             "max_bytes": getattr(a, "max_bytes", None), "channels": getattr(a, "pins", None)}
     return load_settings({k: v for k, v in flags.items() if v is not None}, os.environ, name)
+
+
+def bare(ch):
+    """A channel argument without its leading "+", which the CLI accepts."""
+    return ch[1:] if ch.startswith("+") else ch
 
 
 def dispatch(a):
@@ -2093,6 +2187,12 @@ def dispatch(a):
         s = cli_settings(a, sender)
         d = require_mailbox(s.dir)
         return cmd_send(sender, a.to, a.subject, a.id, a.file, d, settings=s, in_reply_to=a.in_reply_to)
+    if a.cmd == "channel":
+        return cmd_channel_create(require_mailbox(cli_settings(a, None).dir), bare(a.channel), a.purpose)
+    if a.cmd == "channels":
+        name = check_name(a.name) if a.name else None
+        s = cli_settings(a, name)
+        return cmd_channels(require_mailbox(s.dir), name, s)
     name = check_name(a.name)
     s = cli_settings(a, name)
     d = require_mailbox(s.dir)
@@ -2100,7 +2200,11 @@ def dispatch(a):
         return cmd_read(name, d, s.max_bytes, settings=s)
     if a.cmd == "pending":
         return cmd_pending(name, d)
-    return cmd_watch(name, d, s.poll, a.forever, s.max_bytes, parent=a.parent, settings=s)
+    if a.cmd == "subscribe":
+        return cmd_subscribe(name, d, bare(a.channel), a.wake, a.backlog, s)
+    if a.cmd == "unsubscribe":
+        return cmd_unsubscribe(name, d, bare(a.channel), s)
+    return cmd_watch(name, d, s.poll, a.forever, s.max_bytes, max_polls=a.max_polls, parent=a.parent, settings=s)
 
 
 # ---- self-test ----
@@ -3138,6 +3242,36 @@ def section_cli(t):
         t.ok(getattr(t.raises(check_name, bad), "code", None) == "invalid_name", f"rejects the name {bad!r}")
     for good in ("pi", "clio-pi", "mcp-servers", "conductor-director", "keyboard-maestro", "nyx-ai"):
         t.ok(check_name(good) == good, f"accepts the name {good!r}")
+
+    # Task 12: channels, subscriptions and the lock through the CLI.
+    d = t.box("cli")
+    t.run(["--dir", d, "channel", "create", "fleet", "--purpose", "fleet-wide notices; short posts that point to paths or commits"])
+    t.run(["--dir", d, "subscribe", "pi", "fleet"])
+    t.direct(d, "all", "nix", "CLI-BROADCAST")
+    t.post(d, "fleet", "nix", "CLI-POST")
+    t.direct(d, "pi", "nix", "CLI-DIRECT")
+    out = t.run(["--dir", d, "read", "pi"])[0]
+    t.ok(all(k in out for k in ("direct id=", "post +fleet id=", "broadcast id="))
+         and out.index("direct id=") < out.index("post +fleet id=") < out.index("broadcast id="), "read delivers direct mail, posts and broadcasts in order")
+    t.post(d, "fleet", "nix", "CLI-WAKE")
+    watch_out = t.run(["--dir", d, "watch", "pi", "--poll", "1", "--max-polls", "3"])[0]
+    t.ok("post +fleet" in watch_out and watch_out.rstrip().endswith("has exited after this delivery; start it again"), "watch wakes on a post in a subscribed channel")
+    held = ReaderLock(d, "pi")
+    held.acquire()
+    try:
+        out, code, err = t.run(["--dir", d, "subscribe", "pi", "fleet"])
+        t.ok(code == 4 and "holds its lock" in err and f"{os.getpid()}@{HOST}" in err, "subscribe refuses while another reader holds the lock")
+        t.ok(t.run(["--dir", d, "read", "pi"])[1] == 4, "read refuses while another reader holds the lock")
+    finally:
+        held.release()
+    t.ok(t.run(["--dir", d, "channel", "create", "ops", "--purpose", "ops notices"])[0].strip() == "+ops", "channel create prints the channel")
+    t.ok("ops notices" in t.run(["--dir", d, "channels"])[0], "channels lists the channel with its purpose")
+    t.ok(t.run(["--dir", d, "watch", "pi", "--interval", "1", "--max-polls", "1"])[1] in (0, None), "watch still accepts --interval")
+    t.run(["--dir", d, "subscribe", "pi", "+ops", "--wake"])
+    listing = t.run(["--dir", d, "channels", "pi"])[0]
+    t.ok("+ops" in listing and "you, wake" in listing and "you, quiet" in listing, "channels NAME marks that session's subscriptions")
+    out = t.run(["--dir", d, "unsubscribe", "pi", "ops"])[0]
+    t.ok("ops" not in load_state(d, "pi")["subs"] and "+ops" in out, "unsubscribe drops a subscription")
 
 
 SECTIONS = [
