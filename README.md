@@ -155,6 +155,7 @@ MCP cannot start a turn, so a separate doorbell does. It prints one fixed line, 
 - One delivery is about 12 KB at most (`--max-bytes`). A bigger direct message is shown in part, with the path of its full copy. What doesn't fit waits for the next read, and the list line says so.
 - If printing, or the tool's answer, fails, every claim goes back and no seen set changes.
 - It refuses symlinks, FIFOs, hard-linked files, other users' files and oversized files with mail names: it renames them `.<you>-rejected-<file>` and reports them once. It never renames a directory, and never moves a post or a broadcast.
+- It refuses a mailbox in which `.agent-mail`, `.agent-mail/members`, `.agent-mail-presence` or `.<you>-read` is a symlink or not a directory, before claiming anything, so nothing it writes lands outside the mailbox. `doctor` reports such a path.
 - Names in its notices are escaped. Printed text has terminal escape sequences removed, control and bidi characters replaced, and harness tag lines defused.
 - Each read records in `.agent-mail/members/<you>.json` that your mail was checked, at most every 5 minutes. `send` warns when the recipient's mail has not been checked for an hour, or ever; the message still waits.
 - `send` refuses private keys and complete tokens, oversized messages, and sends over the caps. It removes control characters from the subject.
@@ -188,9 +189,9 @@ What stays on its host: claims, archive copies, rejected files and temporary fil
 |---|---|
 | `send --from NAME --to NAME\|+CHANNEL\|all --subject TEXT [--in-reply-to ID] [--id SESSION_ID] [FILE]` | Send FILE or standard input: direct mail, a post or a broadcast. |
 | `read NAME [--max-bytes N] [--channel CHANNEL[:wake]]` | Deliver NAME's waiting mail once. |
-| `watch NAME [--poll S] [--notify auto\|on\|off] [--forever] [--parent PID] [--max-bytes N]` | Wait for mail, deliver it, then exit; `--forever` keeps going. |
+| `watch NAME [--poll S] [--notify auto\|on\|off] [--channel CHANNEL[:wake]] [--forever] [--parent PID] [--max-bytes N]` | Wait for mail, deliver it, then exit; `--forever` keeps going. |
 | `watch [NAME] --doorbell [--parent PID] [--forever]` | Print the ring line when mail starts waiting, and exit 10. Claims nothing. |
-| `pending NAME [--format human\|loop\|context]` | One line about waiting mail, delivering nothing. |
+| `pending NAME [--format human\|loop\|context] [--channel CHANNEL[:wake]]` | One line about waiting mail, delivering nothing. |
 | `channels [NAME]` | List the channels. |
 | `channel create CHANNEL --purpose TEXT` | Create `+CHANNEL`. |
 | `subscribe NAME CHANNEL [--wake] [--backlog N]` | Subscribe NAME to a channel. |

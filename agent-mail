@@ -33,13 +33,13 @@ Commands:
       (at most 4 KiB), refusing private keys and tokens, under per-sender rate caps.
   read NAME [--max-bytes N] [--channel CHANNEL[:wake]]
       Deliver NAME's waiting mail once, about 12 KB at most (1000 to 24000).
-  watch NAME [--poll S] [--notify auto|on|off] [--forever] [--parent PID] [--max-bytes N]
+  watch NAME [--poll S] [--notify auto|on|off] [--channel CHANNEL[:wake]] [--forever] [--parent PID] [--max-bytes N]
       Wait for mail (kqueue or inotify, polling underneath), deliver it, then exit, so a
       background task wakes its session once per batch; --forever keeps going.
   watch [NAME] --doorbell [--parent PID] [--forever]
       Print one fixed line when mail for NAME starts waiting, claiming nothing, and exit 10
       (or keep going with --forever). Without NAME, the name resolves as mcp's does.
-  pending NAME [--format human|loop|context]
+  pending NAME [--format human|loop|context] [--channel CHANNEL[:wake]]
       One line about NAME's waiting mail, delivering nothing: human counts it, loop is
       pi-loop's announcement (the default), context is the doorbell line or nothing.
   channels [NAME]
@@ -4435,6 +4435,29 @@ def subcommands(parser, prefix=""):
     return names
 
 
+def undocumented_options(parser, doc, prefix=""):
+    """Options a leaf subcommand accepts, help not suppressed, that none of its usage lines
+    in the docstring's Commands section names under any of its spellings: "watch --channel"."""
+    section = doc.split("\nCommands:\n", 1)[1] if "\nCommands:\n" in doc else ""
+    usage = collections.defaultdict(str)
+    for m in re.finditer(r"^  ([a-z][a-z-]*(?: [a-z][a-z-]*)*)(.*)$", section, re.MULTILINE):
+        usage[m.group(1)] += m.group(2) + "\n"
+    missing = []
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for name, sub in action.choices.items():
+                command = f"{prefix}{name}"
+                if subcommands(sub):
+                    missing += undocumented_options(sub, doc, f"{command} ")
+                    continue
+                for option in sub._actions:
+                    spellings = [s for s in option.option_strings if s.startswith("--") and s != "--help"]
+                    if spellings and option.help != argparse.SUPPRESS and not any(
+                            re.search(rf"{re.escape(s)}(?![a-z-])", usage[command]) for s in spellings):
+                        missing.append(f"{command} {spellings[0]}")
+    return missing
+
+
 def undescribed(parser, prefix=""):
     """Subcommands that lack a help line in their parent or a description of their own."""
     missing = []
@@ -4458,6 +4481,8 @@ def section_help(t):
     names = subcommands(build_parser())
     t.ok("channel create" in names and names <= documented_commands(__doc__), "the docstring lists every subcommand")
     t.ok(not undescribed(build_parser()), "every subparser has help and a description")
+    missing = undocumented_options(build_parser(), __doc__)
+    t.ok(not missing, f"every option appears on its command's usage line in the docstring; missing: {', '.join(missing)}")
     for n in sorted(names):
         t.ok(t.run([*n.split(), "--help"])[1] == 0, f"{n} --help exits 0")
 
