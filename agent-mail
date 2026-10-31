@@ -88,6 +88,7 @@ import dataclasses
 import datetime
 import errno
 import fcntl
+import fnmatch
 import hashlib
 import io
 import json
@@ -4153,6 +4154,179 @@ def section_cli(t):
     t.ok("ops" not in load_state(d, "pi")["subs"] and "+ops" in out, "unsubscribe drops a subscription")
 
 
+# ---- FakeSync: Syncthing replicas, simulated (test only) ----
+
+IGNORE = (".*-claimed-*", ".*-read", ".*-rejected-*", ".*.tmp", "(?d).nfs*", "(?d).DS_Store")  # nix's .stignore lines
+
+
+def ignored(path, ignore=IGNORE):
+    """True when Syncthing, with these ignore lines, never carries PATH (relative to the
+    folder): a pattern matches any component, at any depth."""
+    pats = [p.removeprefix("(?d)") for p in ignore]
+    return any(fnmatch.fnmatchcase(part, pat) for part in path.split(os.sep) for pat in pats)
+
+
+class FakeSync:
+    """Test only: N replicas of one Syncthing folder. step() delivers what the previous step
+    found (new or changed files, and deletions) to every other online replica, so changes
+    arrive one step late; ignored names never cross. on(i) acts as replica i's host, with
+    its own HOST, HOSTTAG and clock offset."""
+
+    def __init__(self, root, n, ignore=IGNORE):
+        self.dirs = [os.path.join(root, f"replica-{i}") for i in range(n)]
+        self.ignore = ignore
+        self.online = [True] * n
+        self.offsets = [7.0 * i for i in range(n)]
+        self.now = clock()
+        self.index = [{} for _ in range(n)]
+        self.queue = [[] for _ in range(n)]
+        for d in self.dirs:
+            os.mkdir(d, 0o700)
+            os.close(os.open(os.path.join(d, MARKER_V2), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+
+    def replica(self, i):
+        return self.dirs[i]
+
+    def offline(self, i, flag):
+        self.online[i] = not flag
+
+    @contextlib.contextmanager
+    def on(self, i):
+        global HOST, HOSTTAG, _CLOCK
+        saved = HOST, HOSTTAG, _CLOCK
+        HOST, _CLOCK = f"h{i}", self.now + self.offsets[i]
+        HOSTTAG = hashlib.sha256(HOST.encode()).hexdigest()[:8]
+        try:
+            yield self.dirs[i]
+        finally:
+            HOST, HOSTTAG, _CLOCK = saved
+
+    def _files(self, i):
+        root = self.dirs[i]
+        for folder, subdirs, files in os.walk(root):
+            rel = os.path.relpath(folder, root)
+            subdirs[:] = [s for s in subdirs if not ignored(os.path.normpath(os.path.join(rel, s)), self.ignore)]
+            for f in files:
+                path = os.path.normpath(os.path.join(rel, f))
+                st = os.lstat(os.path.join(root, path))
+                if stat.S_ISREG(st.st_mode) and not ignored(path, self.ignore):
+                    yield path, (st.st_ino, st.st_size, st.st_mtime_ns)
+
+    def step(self):
+        for j, online in enumerate(self.online):
+            if online:
+                for change in self.queue[j]:
+                    self._apply(j, *change)
+                self.queue[j] = []
+        for i, online in enumerate(self.online):
+            if not online:
+                continue
+            seen = dict(self._files(i))
+            changes = [("write", p, open(os.path.join(self.dirs[i], p), "rb").read()) for p, key in seen.items() if self.index[i].get(p) != key]
+            changes += [("delete", p, None) for p in self.index[i] if p not in seen]
+            self.index[i] = seen
+            for j in range(len(self.dirs)):
+                if j != i:
+                    self.queue[j] += changes
+
+    def _apply(self, j, op, path, data):
+        dest = os.path.join(self.dirs[j], path)
+        if op == "delete":
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(dest)
+            self.index[j].pop(path, None)
+            return
+        os.makedirs(os.path.dirname(dest), 0o700, exist_ok=True)
+        tmp = os.path.join(os.path.dirname(dest), f".syncthing.{os.path.basename(dest)}.tmp")
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.rename(tmp, dest)
+        st = os.lstat(dest)
+        self.index[j][path] = (st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def section_sync(t):
+    T0 = time.time() + 3600
+    t.at(T0)
+    fs = FakeSync(t.root, 3)  # replica 2 only ever receives what syncs
+    fs.now = T0
+    s = load_settings({}, {}, "a")
+
+    def sync():
+        fs.step()
+        fs.step()
+
+    def sink(text):
+        pass
+
+    def msgs(d, to="b"):
+        return sorted(m.id for m in map(parse_msg, os.listdir(d)) if m is not None and m.to == to)
+
+    with fs.on(1) as r1:
+        t.direct(r1, "b", "nix", "CLAIMED-ON-H1")
+    sync()
+    arrived = msgs(fs.replica(0))
+    with fs.on(1) as r1:
+        receive(r1, "b", s, sink)
+    sync()
+    t.ok(len(arrived) == 1 and not msgs(fs.replica(0)), "a claim on one host reaches the other as a deletion")
+
+    with fs.on(0) as r0:
+        mid = parse_msg(os.path.basename(t.direct(r0, "b", "nix", "PUT-BACK"))).id
+    sync()
+    with fs.on(1) as r1:
+        batch = collect(r1, "b", s, load_state(r1, "b"), MAX_BYTES, clock())
+    sync()
+    gone_on_0 = not msgs(fs.replica(0))
+    with fs.on(1):
+        put_back(batch)
+    sync()
+    t.ok(len(batch.items) == 1 and gone_on_0 and msgs(fs.replica(0)) == [mid], "a put-back on one host resurrects the file on the other")
+
+    with fs.on(0) as r0:
+        create_channel(r0, "fleet", "fleet-wide notices; short posts that point to paths or commits")
+        st = load_state(r0, "a")
+        subscribe(r0, "a", st, s, "fleet", now=clock())
+        save_state(r0, "a", st)
+        old = os.path.basename(t.post(r0, "fleet", "nix", "OLD-POST", stamp=clock() - 31 * 86400))
+    sync()
+    was_on_1 = os.path.exists(os.path.join(fs.replica(1), "+fleet", old))
+    with fs.on(0) as r0:
+        receive(r0, "a", s, sink)
+    sync()
+    t.ok(was_on_1 and not os.path.exists(os.path.join(fs.replica(1), "+fleet", old)), "a prune on one host propagates")
+
+    fs.offline(1, True)
+    with fs.on(1) as r1:
+        t.post(r1, "fleet", "nix", "from the offline host")
+    sync()
+    with fs.on(0) as r0:
+        early = receive(r0, "a", s, sink)
+    fs.offline(1, False)
+    sync()
+    with fs.on(0) as r0:
+        late = receive(r0, "a", s, sink)
+    t.ok("from the offline host" not in early and "from the offline host" in late, "an offline host's late post arrives and is delivered")
+
+    with fs.on(0) as r0:
+        out_on_h0 = receive(r0, "b", s, sink)
+    t.ok("another reader of b appears active on h1" in out_on_h0, "the same name on two hosts raises the warning")
+
+    with fs.on(0) as r0:
+        t.mk(os.path.join(r0, "+fleet", ".x.tmp"), "half-written\n")
+        t.mk(os.path.join(r0, ".b-rejected-junk"), "refused\n")
+        t.mk(os.path.join(r0, f".b-claimed-1-{HOSTTAG}-b_20261030T000000.000000Z_from-x_0000000a.txt"), "claimed\n")
+    sync()
+
+    def walk(d):
+        for folder, subdirs, files in os.walk(d):
+            for name in subdirs + files:
+                yield os.path.relpath(os.path.join(folder, name), d)
+
+    t.ok(any(ignored(p) for p in walk(fs.replica(0))) and not any(ignored(p) for p in walk(fs.replica(2))),
+         "claims, archives, rejected files and temporary files never cross, including +fleet/.x.tmp")
+
+
 SECTIONS = [
     ("core", section_core),
     ("grammar", section_grammar),
@@ -4167,6 +4341,7 @@ SECTIONS = [
     ("doorbell", section_doorbell),
     ("mcp", section_mcp),
     ("tools", section_tools),
+    ("sync", section_sync),
     ("send", section_send),
     ("cli", section_cli),
 ]
