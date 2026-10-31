@@ -22,7 +22,7 @@
 - No `?` appears in any text the steward prints except the question line; no `?` in `SUMMARY`, `STATUS` or template subjects (spec 6.4 step 7, 6.7).
 - The steward never uses `agent-deck session send`, `launch`, `stop`, `restart`, `set-parent`, `notify_discord.py`, or `inbox drain` (spec 4, 6.6); the instruction files must say so and the `docs` check must find those words only in a "never" sentence.
 - Nothing here modifies `agent-mail`, its README's rules, or any file outside `steward/` and `docs/`, except one pointer paragraph in the top-level `README.md` (Task 12). John's `monitor_sessions.py` and `bridge.py` are read-only; the patches are made against copies (Tasks 10, 11).
-- Every task ends with a commit whose message ends with the two attribution lines in use in this session (`Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>` and `Claude-Session: https://claude.ai/code/session_018B4HUohdwotbPJprp7dr7q`).
+- Every task ends with a commit whose message ends with two attribution lines: a `Co-Authored-By:` line naming the model that wrote the commit (the implementer's own session reminder gives it, for example `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`), and this session's `Claude-Session: https://claude.ai/code/session_018B4HUohdwotbPJprp7dr7q`.
 
 ## Review Focus
 
