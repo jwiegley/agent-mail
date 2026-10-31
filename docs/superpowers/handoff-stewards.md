@@ -4,7 +4,7 @@ Frozen plan: `docs/superpowers/plans/2026-10-31-agent-mail-stewards.md` (approve
 
 ## Refocus checkpoint
 
-- Last check: 2026-10-31 15:29 PDT. Goal unchanged: the twelve plan tasks as documented, minus cost measurement (decision 20). Task 1 is implemented and fixed (d9cdf75, fd188c4); its scoped re-review (seven items ADDRESSED so far) and its fess audit are running. No scope creep: the only additions were John's own decision 20 and the channel facts from mail-dev. Next deadline: 16:30 PDT. Next step: dispatch Task 2 when the re-review verdict is in; fold any real fess finding into Task 2's round or a fix.
+- Last check: 2026-10-31 16:16 PDT. Goal unchanged. Task 1 complete (audit clean); Task 2 implemented and fixed (8918852, d02c33b), scoped re-review running; Tasks 3 to 12 pending. No scope creep. Next deadline: 17:15 PDT. Next step: Task 3 after the re-review verdict; Task 2's fess audit in parallel with it.
 
 ## Definition of Done (frozen)
 
@@ -19,8 +19,8 @@ Frozen plan: `docs/superpowers/plans/2026-10-31-agent-mail-stewards.md` (approve
 | Task | State | Commits | Review | fess |
 |---|---|---|---|---|
 | 1 POLICY.md and parser | complete | d9cdf75, fd188c4 | Approved; round 1 all addressed; 3 minors deferred | clean; 3 Low carried to Task 5, F3 parked |
-| 2 roster and agent-deck readers | implemented (DONE_WITH_CONCERNS); review running | 8918852 | running | |
-| 3 census | | | | |
+| 2 roster and agent-deck readers | complete | 8918852, d02c33b | Approved; round 1 all addressed; 6 minors deferred | clean; 6 findings carried to Task 6 |
+| 3 census | implemented (DONE_WITH_CONCERNS); review running | c8a522e | running | |
 | 4 probe | | | | |
 | 5 usage and metrics | | | | |
 | 6 signals command | | | | |
