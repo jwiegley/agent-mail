@@ -91,11 +91,14 @@ import fcntl
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import secrets
+import select
 import socket
 import stat
+import struct
 import sys
 import tempfile
 import time
@@ -1038,13 +1041,14 @@ HELD = set()  # claim paths this process holds in flight
 def candidates(name, d, now):
     """NAME's deliverable entries, oldest first: settled mail and abandoned claims.
 
-    Returns (entries, waiting, busy, dirs): entries are (sort key, entry, original, lstat);
-    waiting counts mail still being written, busy counts claims a live reader holds, and
-    dirs lists (entry, lstat) for directories with NAME's mail names, which are never moved.
+    Returns (entries, waiting, busy, dirs, settle): entries are (sort key, entry, original,
+    lstat); waiting counts mail still being written, busy counts claims a live reader holds,
+    dirs lists (entry, lstat) for directories with NAME's mail names, which are never moved,
+    and settle is when the first waiting file settles (None when none waits).
     Only names in the standard form are NAME's mail. A claim that this process made and no
     longer holds in flight is recoverable at once.
     """
-    found, waiting, busy, dirs = [], 0, 0, []
+    found, waiting, busy, dirs, settle = [], 0, 0, [], None
     try:
         entries = os.listdir(d)
     except (FileNotFoundError, NotADirectoryError):
@@ -1081,10 +1085,11 @@ def candidates(name, d, now):
                     continue
         elif 0 <= now - st.st_ctime < SETTLE:
             waiting += 1
+            settle = min(settle or math.inf, st.st_ctime + SETTLE)
             continue
         found.append((sort_key(original, st), entry, original, st))
     found.sort()
-    return found, waiting, busy, dirs
+    return found, waiting, busy, dirs, settle
 
 
 def archive_dir(d, name):
@@ -1101,8 +1106,9 @@ def archive_target(d, name, file):
 
 # A delivered item. hold is the claim path of direct mail; copy is its archive path.
 Item = collections.namedtuple("Item", "kind id entry path hold channel sender text size header_from copy", defaults=(None,))
-# One receive's work. stuck holds (key, notice, first time); subs is the published list.
-Batch = collections.namedtuple("Batch", "items notices stuck more waiting busy extra_lines subs", defaults=((),))
+# One receive's work. stuck holds (key, notice, first time); subs is the published list;
+# settle is when the first item still settling will be ready (None when none is).
+Batch = collections.namedtuple("Batch", "items notices stuck more waiting busy extra_lines subs settle", defaults=((), None))
 
 
 def header_from(text):
@@ -1123,9 +1129,10 @@ BROADCASTS_PER_SENDER = 3
 DUPLICATE_READER = 600.0
 
 
-def scan_shared(fd, d, name, kind, ch, since, seen, now):
+def scan_shared(fd, d, name, kind, ch, since, seen, now, settling=None):
     """Unread posts of +CH (kind "post") or broadcasts at the top level (kind "broadcast")
-    in the open directory FD, oldest first, and notices for entries that are not mail."""
+    in the open directory FD, oldest first, and notices for entries that are not mail.
+    When SETTLING is a list, the settle time of each unread entry still settling joins it."""
     to, limit = (ch, POST_LIMIT) if kind == "post" else ("all", BROADCAST_LIMIT)
     where = f" in +{ch}" if kind == "post" else ""
     found, notices = [], []
@@ -1149,6 +1156,8 @@ def scan_shared(fd, d, name, kind, ch, since, seen, now):
         except OSError:
             continue
         if 0 <= now - st.st_ctime < SETTLE:
+            if settling is not None:
+                settling.append(st.st_ctime + SETTLE)
             continue
         why = None
         if m.stamp > now + FUTURE:
@@ -1169,10 +1178,11 @@ def scan_shared(fd, d, name, kind, ch, since, seen, now):
     return [item for *_, item in sorted(found, key=lambda f: f[:2])], notices
 
 
-def unread_posts(d, name, state, subs, now):
+def unread_posts(d, name, state, subs, now, settling=None):
     """NAME's unread posts, by channel name, then its unread broadcasts, oldest first
     within each, with notices for entries that are not mail. Items carry no text yet.
-    No side effects, so the doorbell and pending can call it."""
+    No side effects, so the doorbell and pending can call it; SETTLING, when a list,
+    collects the settle times of unread entries still settling."""
     items, notices = [], []
     seen = state.get("seen", {})
     for ch in sorted(subs):
@@ -1185,7 +1195,7 @@ def unread_posts(d, name, state, subs, now):
                 notices.append(f"agent-mail: subscribed channel +{ch} is missing")
             continue
         try:
-            found, bad = scan_shared(fd, d, name, "post", ch, subs[ch]["since"], set(seen.get(f"+{ch}", ())), now)
+            found, bad = scan_shared(fd, d, name, "post", ch, subs[ch]["since"], set(seen.get(f"+{ch}", ())), now, settling)
         finally:
             os.close(fd)
         items += found
@@ -1197,7 +1207,7 @@ def unread_posts(d, name, state, subs, now):
     try:
         since_all = state.get("since_all")
         found, bad = scan_shared(fd, d, name, "broadcast", None, now - REPLAY if since_all is None else since_all,
-                                 set(seen.get("all", ())), now)
+                                 set(seen.get("all", ())), now, settling)
     finally:
         os.close(fd)
     return items + found, notices + bad
@@ -1346,8 +1356,8 @@ def collect(d, name, settings, state, max_bytes, now):
     the part of it that is shown. Directory and stuck notices are remembered in STATE,
     which only commit saves. If anything here fails, every claim goes back.
     """
-    found, waiting, busy, dirs = candidates(name, d, now)
-    items, notices, stuck, more, size = [], [], [], 0, 0
+    found, waiting, busy, dirs, settle = candidates(name, d, now)
+    items, notices, stuck, more, size, settling = [], [], [], 0, 0, [] if settle is None else [settle]
     for entry, st in dirs:
         if remember(state, f"dir:{st.st_ino}:{entry}"):
             notices.append(f"--- agent-mail: {escape(entry)} is a directory; left in place")
@@ -1398,6 +1408,7 @@ def collect(d, name, settings, state, max_bytes, now):
                     os.rename(hold, back)
                 HELD.discard(hold)
                 waiting += 1
+                settling.append(now + SETTLE)
                 continue
             except Exception as e:
                 rejected = os.path.join(d, f".{name}-rejected-{original}")
@@ -1419,7 +1430,7 @@ def collect(d, name, settings, state, max_bytes, now):
             items.append(Item("direct", msg.id, entry, os.path.join(d, original), hold, None, msg.sender,
                               shown_text, fst.st_size, header_from(text), copy))
             size += min(fst.st_size, EXCERPT) + frame_cost(items[-1], copy)
-        shared, shared_notices = unread_posts(d, name, state, subs, now)
+        shared, shared_notices = unread_posts(d, name, state, subs, now, settling)
         notices += [notice for notice in shared_notices if remember(state, f"notice:{notice}")]
         taken, full = collections.Counter(), False
         for item in shared:
@@ -1443,7 +1454,7 @@ def collect(d, name, settings, state, max_bytes, now):
     finally:
         if not done:
             put_back(Batch(items, notices, stuck, more, waiting, busy, []))
-    return Batch(items, notices, stuck, more, waiting, busy, extra, sorted(subs))
+    return Batch(items, notices, stuck, more, waiting, busy, extra, sorted(subs), min(settling, default=None))
 
 
 def label(item):
@@ -1569,6 +1580,264 @@ def receive(d, name, settings, write, max_bytes=None, *, idle=True, again="run r
     return result
 
 
+# ---- the Waiter ----
+
+O_EVTONLY = getattr(os, "O_EVTONLY", 0x8000)
+MIN_GAP = 0.5  # at most one scan every half second
+# inotify(7): the bits a watch asks for and the bits its events carry.
+IN_CLOSE_WRITE, IN_MOVED_FROM, IN_MOVED_TO, IN_CREATE, IN_DELETE = 0x8, 0x40, 0x80, 0x100, 0x200
+IN_DELETE_SELF, IN_MOVE_SELF, IN_Q_OVERFLOW, IN_IGNORED = 0x400, 0x800, 0x4000, 0x8000
+IN_ONLYDIR, IN_DONT_FOLLOW, IN_NONBLOCK, IN_CLOEXEC = 0x1000000, 0x2000000, 0o4000, 0o2000000
+INOTIFY_MASK = (IN_CREATE | IN_MOVED_TO | IN_CLOSE_WRITE | IN_DELETE | IN_MOVED_FROM | IN_DELETE_SELF | IN_MOVE_SELF
+                | IN_ONLYDIR | IN_DONT_FOLLOW)
+
+
+class PollBackend:
+    """No native watch: a wait only sleeps."""
+    name = "poll"
+    native = False
+    unavailable = None
+
+    def __init__(self, sleep=time.sleep):
+        self.sleep = sleep
+
+    def register(self, path):
+        return path
+
+    def unregister(self, handle):
+        pass
+
+    def wait(self, timeout):
+        self.sleep(timeout)
+        return []
+
+    def close(self):
+        pass
+
+
+class KqueueBackend:
+    """macOS and BSD: a vnode filter on each watched directory. Delete, rename or revoke
+    asks the Waiter to close the descriptor, re-arm and rescan."""
+    name = "kqueue"
+    native = True
+
+    def __init__(self):
+        self.unavailable, self.kq = None, None
+        try:
+            self.kq = select.kqueue()
+        except (AttributeError, OSError) as e:
+            self.unavailable = getattr(e, "strerror", None) or str(e)
+
+    def register(self, path):
+        fd = os.open(path, os.O_RDONLY | O_EVTONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            self.kq.control([select.kevent(fd, filter=select.KQ_FILTER_VNODE, flags=select.KQ_EV_ADD | select.KQ_EV_CLEAR,
+                                           fflags=select.KQ_NOTE_WRITE | select.KQ_NOTE_DELETE | select.KQ_NOTE_RENAME | select.KQ_NOTE_REVOKE)], 0, 0)
+        except OSError:
+            os.close(fd)
+            raise
+        return fd
+
+    def unregister(self, fd):
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+    def wait(self, timeout):
+        events = list(self.kq.control(None, 64, timeout))
+        for _ in range(16):  # drain what is queued, without chasing a busy directory forever
+            more = self.kq.control(None, 64, 0)
+            if not more:
+                break
+            events += more
+        gone = select.KQ_NOTE_DELETE | select.KQ_NOTE_RENAME | select.KQ_NOTE_REVOKE
+        return [("rearm" if ev.fflags & gone else "event", ev.ident) for ev in events]
+
+    def close(self):
+        if self.kq is not None:
+            self.kq.close()
+            self.kq = None
+
+
+class InotifyBackend:
+    """Linux: inotify through ctypes, waited on with select.poll. Only the fixed headers of
+    events are read; the names they carry are skipped, never used. fail_errno makes
+    inotify_init1 fail, for the self-test."""
+    name = "inotify"
+    native = True
+
+    def __init__(self, fail_errno=None):
+        self.unavailable, self.fd = None, None
+        try:
+            if fail_errno is not None:
+                raise OSError(fail_errno, os.strerror(fail_errno))
+            import ctypes
+            libc = ctypes.CDLL(None, use_errno=True)
+            self._init, self._add, self._rm = libc.inotify_init1, libc.inotify_add_watch, libc.inotify_rm_watch
+            self._init.argtypes, self._init.restype = [ctypes.c_int], ctypes.c_int
+            self._add.argtypes, self._add.restype = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32], ctypes.c_int
+            self._rm.argtypes, self._rm.restype = [ctypes.c_int, ctypes.c_int], ctypes.c_int
+            self._errno = ctypes.get_errno
+            fd = self._init(IN_NONBLOCK | IN_CLOEXEC)
+            if fd < 0:
+                e = ctypes.get_errno()
+                raise OSError(e, os.strerror(e))
+            self.fd = fd
+            self.poller = select.poll()
+            self.poller.register(fd, select.POLLIN)
+        except (OSError, AttributeError) as e:
+            self.unavailable = e.strerror if isinstance(e, OSError) and e.strerror else str(e)
+
+    def register(self, path):
+        wd = self._add(self.fd, os.fsencode(path), INOTIFY_MASK)
+        if wd < 0:
+            e = self._errno()
+            raise OSError(e, os.strerror(e), path)
+        return wd
+
+    def unregister(self, wd):
+        self._rm(self.fd, wd)
+
+    def wait(self, timeout):
+        if not self.poller.poll(max(0, int(timeout * 1000))):
+            return []
+        events = []
+        while True:
+            try:
+                data = os.read(self.fd, 65536)
+            except BlockingIOError:
+                break
+            if not data:
+                break
+            offset = 0
+            while offset + 16 <= len(data):
+                wd, mask, _cookie, length = struct.unpack_from("iIII", data, offset)
+                offset += 16 + length
+                if mask & IN_Q_OVERFLOW:
+                    events.append(("overflow", None))
+                elif mask & (IN_IGNORED | IN_DELETE_SELF | IN_MOVE_SELF):
+                    events.append(("rearm", wd))
+                else:
+                    events.append(("event", wd))
+        return events
+
+    def close(self):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+
+def native_backend():
+    if hasattr(select, "kqueue"):
+        return KqueueBackend()
+    if sys.platform.startswith("linux"):
+        return InotifyBackend()
+    return None
+
+
+class Waiter:
+    """Waits for a reason to scan: a native watch's event, or the poll interval.
+
+    An event is only a reason to scan sooner; polling never stops. Each wait drains every
+    queued event, then re-reads the watched set, registers new directories, drops ones no
+    longer wanted, and registers again any whose (st_dev, st_ino) changed, so the caller's
+    next scan happens with every watch armed. The first arming happens here, before the
+    caller's first scan.
+    """
+
+    def __init__(self, dirs, poll, notify, backend=None, sleep=time.sleep):
+        self.dirs, self.poll, self.sleep = dirs, poll, sleep
+        self.rescan_requested, self.watched = False, {}
+        if notify == "off":
+            impl, self.backend = PollBackend(sleep), "poll"
+        else:
+            impl = backend if backend is not None else native_backend()
+            if impl is None:
+                reason = "no native watch on this platform"
+            elif impl.unavailable:
+                reason = f"{impl.name} unavailable: {impl.unavailable}"
+            elif not impl.native:
+                reason = f"{impl.name} is not a native watch"
+            else:
+                reason = None
+            self.backend = impl.name if reason is None else (f"poll ({reason})" if impl is None or impl.unavailable else "poll")
+            if reason is not None:
+                if impl is not None:
+                    impl.close()
+                if notify == "on":
+                    raise MailError("no_native_watch", f"notify is on, but {reason}")
+                impl = PollBackend(sleep)
+        self.impl = impl
+        self._refresh()
+        self._released = time.monotonic()
+
+    def wait(self, settle_until=None):
+        """Wait for an event or the timeout and return "event" or "timeout". The timeout is
+        the poll interval, or the settle end plus 0.2 s when that is sooner."""
+        self.rescan_requested = False
+        timeout = self.poll
+        if settle_until is not None:
+            timeout = min(timeout, max(MIN_GAP, settle_until + 0.2 - clock()))
+        events = self.impl.wait(timeout)
+        for kind, handle in events:
+            if kind in ("overflow", "rearm"):
+                self.rescan_requested = True
+            if kind == "rearm":
+                for path, (h, _) in list(self.watched.items()):
+                    if h == handle:
+                        self.impl.unregister(self.watched.pop(path)[0])
+        if events:
+            gap = self._released + MIN_GAP - time.monotonic()
+            if gap > 0:
+                self.sleep(gap)
+        self._refresh()
+        self._released = time.monotonic()
+        return "event" if events else "timeout"
+
+    def _refresh(self):
+        try:
+            paths = list(self.dirs())
+        except (OSError, MailError):
+            return
+        wanted = {}
+        for path in paths:
+            with contextlib.suppress(OSError):
+                st = os.stat(path, follow_symlinks=False)
+                if stat.S_ISDIR(st.st_mode):
+                    wanted[path] = (st.st_dev, st.st_ino)
+        for path in [p for p, (_, ident) in self.watched.items() if wanted.get(p) != ident]:
+            self.impl.unregister(self.watched.pop(path)[0])
+        for path, ident in wanted.items():
+            if path not in self.watched:
+                with contextlib.suppress(OSError):
+                    self.watched[path] = (self.impl.register(path), ident)
+
+    def close(self):
+        for handle, _ in self.watched.values():
+            self.impl.unregister(handle)
+        self.watched.clear()
+        self.impl.close()
+
+
+def probe_backend(notify="auto"):
+    """The watch a Waiter with this notify setting would use here, found without watching."""
+    try:
+        w = Waiter(lambda: [], 1, notify)
+    except MailError as e:
+        return f"none ({e.message})"
+    w.close()
+    return w.backend
+
+
+def watch_dirs(d, name, settings):
+    """What the claiming watch waits on: the top level and each subscribed channel that exists."""
+    top = os.path.realpath(d)
+    dirs = [top]
+    for ch in sorted(effective_subs(load_state(d, name), settings, clock())):
+        with contextlib.suppress(MailError):
+            dirs.append(channel_dir(top, ch))
+    return dirs
+
+
 def stdout_write(text):
     if sys.stdout is None:  # descriptor 1 was closed when Python started
         raise OSError(errno.EBADF, "standard output is closed")
@@ -1596,27 +1865,31 @@ def cmd_watch(name, d, interval, forever, max_bytes, max_polls=None, parent=None
     if settings is None:
         settings = load_settings({}, os.environ, name)
     polls = 0
-    while True:
-        if parent is not None and not alive(parent):
-            emit(write, f"agent-mail: process {parent}, which started the watcher for {name}, has gone; the watcher has stopped without reading\n")
-            return 1
-        if not os.path.isdir(d):
-            emit(write, f"agent-mail: mailbox {d} is missing; the watcher for {name} has stopped\n")
-            return 1
-        out = receive(d, name, settings, write, max_bytes, idle=False)
-        if out and not forever:
-            emit(write, f"agent-mail: the watcher for {name} has exited after this delivery; start it again\n")
-            return 0
-        polls += 1
-        if max_polls is not None and polls >= max_polls:
-            return None
-        time.sleep(interval)
+    waiter = Waiter(lambda: watch_dirs(d, name, settings), interval, settings.notify)
+    try:
+        while True:
+            if parent is not None and not alive(parent):
+                emit(write, f"agent-mail: process {parent}, which started the watcher for {name}, has gone; the watcher has stopped without reading\n")
+                return 1
+            if not os.path.isdir(d):
+                emit(write, f"agent-mail: mailbox {d} is missing; the watcher for {name} has stopped\n")
+                return 1
+            out = receive(d, name, settings, write, max_bytes, idle=False)
+            if out and not forever:
+                emit(write, f"agent-mail: the watcher for {name} has exited after this delivery; start it again\n")
+                return 0
+            polls += 1
+            if max_polls is not None and polls >= max_polls:
+                return None
+            waiter.wait(out.batch.settle)
+    finally:
+        waiter.close()
 
 
 def cmd_pending(name, d, write=None):
     now = clock()
     touch_member(d, name, load_state(d, name)["subs"], now)
-    found, _, _, _ = candidates(name, d, now)
+    found, *_ = candidates(name, d, now)
     ident = [f"{e}:{st.st_ino}:{st.st_mtime_ns}:{st.st_ctime_ns}" for _, e, _, st in found]
     digest = hashlib.sha256("\n".join(sorted(ident)).encode()).hexdigest()[:12] if ident else None
     # pending's announce state is a file of its own: the reader state has one writer.
@@ -2464,6 +2737,112 @@ def section_retention(t):
     t.ok(os.path.exists(outside_file), "a channel swapped for a symlink between listing and unlink loses nothing outside")
 
 
+class FakeBackend:
+    """Test only: a watch backend that records registrations and returns scripted events."""
+    name = "fake"
+    native = True
+    unavailable = None
+
+    def __init__(self, script):
+        self.script = list(script)
+        self.registered, self.history = [], []
+        self.waits = 0
+        self.armed_before_first_scan = False
+        self.last_timeout = None
+
+    def register(self, path):
+        self.history.append(path)
+        if path not in self.registered:
+            self.registered.append(path)
+        if self.waits == 0:
+            self.armed_before_first_scan = True
+        return path
+
+    def unregister(self, handle):
+        if handle in self.registered:
+            self.registered.remove(handle)
+
+    def registrations(self, path):
+        return self.history.count(path)
+
+    def queue(self, kind):
+        self.script.append(kind)
+
+    def wait(self, timeout):
+        self.waits += 1
+        self.last_timeout = timeout
+        events, self.script = [(kind, None) for kind in self.script], []
+        return events
+
+    def close(self):
+        pass
+
+
+def section_waiter(t):
+    d = t.box()
+    extra = []
+    fb = FakeBackend([])
+    w = Waiter(lambda: [d] + extra, 15, "auto", backend=fb)
+    t.ok(fb.registered == [d] and fb.armed_before_first_scan, "the watch is armed before the first scan")
+    fb.queue("event")
+    t.ok(w.wait(None) == "event" and fb.last_timeout == 15, "an event queued after the scan ends the next wait at once")
+    t.ok(w.wait(clock() + 1.0) == "timeout" and abs(fb.last_timeout - 1.2) < 0.05, "a settling file shortens the wait to its settle end plus 0.2 s")
+    fb.queue("overflow")
+    w.wait(None)
+    t.ok(w.rescan_requested, "an overflow forces a full rescan")
+    d2 = os.path.join(t.root, "second")
+    os.mkdir(d2, 0o700)
+    extra.append(d2)
+    w.wait(None)
+    os.rename(d2, d2 + ".old")
+    os.mkdir(d2, 0o700)
+    w.wait(None)
+    t.ok(fb.registrations(d2) == 2, "a re-created directory is registered again")
+    fleet = create_channel(d, "fleet", "fleet-wide notices")
+    extra.append(fleet)
+    w.wait(None)
+    t.ok(fleet in fb.registered, "a new subscription is watched on the next pass")
+    extra.remove(fleet)
+    w.wait(None)
+    t.ok(fleet not in fb.registered, "a dropped subscription is unwatched on the next pass")
+    t.ok(Waiter(lambda: [d], 15, "off").backend == "poll", "notify off polls only")
+
+    class NoBackend(PollBackend):
+        native = False
+
+    t.ok(getattr(t.raises(Waiter, lambda: [d], 15, "on", backend=NoBackend()), "code", None) == "no_native_watch", "notify on fails without a native backend")
+    t.ok(Waiter(lambda: [d], 15, "auto", backend=InotifyBackend(fail_errno=errno.EMFILE)).backend.startswith("poll (inotify unavailable"),
+         "an inotify failure falls back to polling and says so")
+    # The Linux event parser, fed through a pipe so it runs on every platform.
+    ib = InotifyBackend(fail_errno=errno.EMFILE)
+    r, wfd = os.pipe()
+    os.set_blocking(r, False)
+    ib.fd, ib.poller = r, select.poll()
+    ib.poller.register(r, select.POLLIN)
+    os.write(wfd, struct.pack("iIII", 1, IN_CREATE, 0, 16) + b"x.txt".ljust(16, b"\0")
+             + struct.pack("iIII", -1, IN_Q_OVERFLOW, 0, 0) + struct.pack("iIII", 2, IN_IGNORED, 0, 0))
+    os.close(wfd)
+    t.ok(ib.wait(1) == [("event", 1), ("overflow", None), ("rearm", 2)], "inotify events are read by their fixed headers, names skipped")
+    ib.close()
+    if probe_backend("auto") in ("kqueue", "inotify"):  # skipped where no native backend exists
+        tmp = t.mk(os.path.join(d, ".x.tmp"), "x\n")
+        w = Waiter(lambda: [d], 60, "on")
+        try:
+            os.rename(tmp, os.path.join(d, "x.txt"))
+            t0 = time.monotonic()
+            t.ok(w.wait(None) == "event" and time.monotonic() - t0 < 5, "a native backend sees a rename within 5 s while polling every 60 s")
+        finally:
+            w.close()
+        moved = os.path.join(t.root, "moved")
+        os.mkdir(moved, 0o700)
+        w = Waiter(lambda: [moved], 60, "on")
+        try:
+            os.rename(moved, moved + ".gone")
+            t.ok(w.wait(None) == "event" and w.rescan_requested and moved not in w.watched, "a watched directory renamed away re-arms and asks for a rescan")
+        finally:
+            w.close()
+
+
 def section_send(t):
     t.patch("SETTLE", 0.0)
     root = t.root
@@ -2625,6 +3004,7 @@ SECTIONS = [
     ("receive", section_receive),
     ("posts", section_posts),
     ("retention", section_retention),
+    ("waiter", section_waiter),
     ("send", section_send),
     ("cli", section_cli),
 ]
