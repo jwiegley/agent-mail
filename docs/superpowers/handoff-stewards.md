@@ -4,7 +4,7 @@ Frozen plan: `docs/superpowers/plans/2026-10-31-agent-mail-stewards.md` (approve
 
 ## Refocus checkpoint
 
-- Last check: 2026-10-31 14:42 PDT. Goal: the twelve plan tasks, nothing beyond `steward/`, the two patches, the runbook and one pointer paragraph in the top-level README. On track: Task 1's implementer is running. No scope creep. Next deadline: 15:42 PDT. Next step: probe the runner's history isolation for fess audits, then review Task 1 when its report lands.
+- Last check: 2026-10-31 15:29 PDT. Goal unchanged: the twelve plan tasks as documented, minus cost measurement (decision 20). Task 1 is implemented and fixed (d9cdf75, fd188c4); its scoped re-review (seven items ADDRESSED so far) and its fess audit are running. No scope creep: the only additions were John's own decision 20 and the channel facts from mail-dev. Next deadline: 16:30 PDT. Next step: dispatch Task 2 when the re-review verdict is in; fold any real fess finding into Task 2's round or a fix.
 
 ## Definition of Done (frozen)
 
@@ -18,8 +18,8 @@ Frozen plan: `docs/superpowers/plans/2026-10-31-agent-mail-stewards.md` (approve
 
 | Task | State | Commits | Review | fess |
 |---|---|---|---|---|
-| 1 POLICY.md and parser | implemented d9cdf75 (DONE_WITH_CONCERNS); review running; fix round pending for decision 20 (drop the four price keys) | d9cdf75 | running | |
-| 2 roster and agent-deck readers | | | | |
+| 1 POLICY.md and parser | complete | d9cdf75, fd188c4 | Approved; round 1 all addressed; 3 minors deferred | clean; 3 Low carried to Task 5, F3 parked |
+| 2 roster and agent-deck readers | implemented (DONE_WITH_CONCERNS); review running | 8918852 | running | |
 | 3 census | | | | |
 | 4 probe | | | | |
 | 5 usage and metrics | | | | |
@@ -37,7 +37,7 @@ Frozen plan: `docs/superpowers/plans/2026-10-31-agent-mail-stewards.md` (approve
 
 ## Independence probe
 
-- 2026-10-31 14:44 PDT: a fresh general-purpose subagent (haiku) dispatched with the Agent tool (non-fork, the runner's no-history mode) returned PARENT_HISTORY_ABSENT; `verify-history-isolation.py` passed. Non-fork Agent dispatches count as independent for fess audits and reviews; re-probe if the runner, model or dispatch configuration changes.
+- 2026-10-31 14:44 PDT: a fresh general-purpose subagent (haiku) dispatched with the Agent tool (non-fork, the runner's no-history mode) returned PARENT_HISTORY_ABSENT; `verify-history-isolation.py` passed. A second probe on the fess-auditor agent type (sonnet) at 15:47 PDT also returned PARENT_HISTORY_ABSENT, verified by hand (exact match, sentinel absent): the standalone parallelize skill and its verify script were removed from hera by the wiggum consolidation between the two probes. Non-fork Agent dispatches of both types count as independent; re-probe if the runner, model or dispatch configuration changes.
 
 ## Rulings (mirror of the ledger's `Ruling:` lines)
 
