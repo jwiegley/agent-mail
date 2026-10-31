@@ -584,11 +584,11 @@ def parse_utc(text):
 
 def open_meta(d, rel, create=False):
     """A descriptor for REL, one of the mailbox's own directories (.agent-mail,
-    .agent-mail/members or .agent-mail-presence), opened one component at a time without
-    following a symlink and made mode 0700 on the way when CREATE; None when it is missing
-    and CREATE is false. A symlink or a non-directory on the way is unsafe_mailbox, so a
-    planted link never steers a write outside the mailbox. The mailbox itself may be a
-    symlink, as ~/Products/mailbox is."""
+    .agent-mail/members, .agent-mail-presence or a reader's archive .NAME-read), opened
+    one component at a time without following a symlink and made mode 0700 on the way
+    when CREATE; None when it is missing and CREATE is false. A symlink or a non-directory
+    on the way is unsafe_mailbox, so a planted link never steers a write outside the
+    mailbox. The mailbox itself may be a symlink, as ~/Products/mailbox is."""
     fd, here = os.open(d, os.O_RDONLY | os.O_DIRECTORY), d
     try:
         for part in rel.split("/"):
@@ -625,10 +625,11 @@ def meta_fd(d, rel):
         return None
 
 
-def mailbox_problems(d):
-    """Why the mailbox's own directories are unsafe, one sentence each; empty when they are not."""
+def mailbox_problems(d, name=None):
+    """Why the mailbox's own directories, and NAME's archive when NAME is given, are unsafe,
+    one sentence each; empty when they are not."""
     found = []
-    for rel in (".agent-mail/members", ".agent-mail-presence"):
+    for rel in (".agent-mail/members", ".agent-mail-presence") + ((f".{name}-read",) if name else ()):
         try:
             fd = open_meta(d, rel)
         except MailError as e:
@@ -1334,13 +1335,22 @@ def frame_cost(item, copy):
     return 100 + len(item.id) + len(item.sender) + len(copy) + len(item.channel or "")
 
 
-def write_copy(path, text):
-    """Keep a delivered post's text as an archive copy that no peer can change."""
-    folder, base = os.path.split(path)
-    tmp = os.path.join(folder, f".{base}.{os.getpid()}.tmp")
-    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), "w", encoding="utf-8") as f:
+def free_name(fd, file):
+    """FILE, or FILE with a random suffix when the directory FD already holds that name."""
+    try:
+        os.stat(file, dir_fd=fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return file
+    return f"{file}.{secrets.token_hex(3)}"
+
+
+def write_copy(fd, file, text):
+    """Keep a delivered post's text as FILE in the open archive directory FD, a copy that no
+    peer can change: a hidden temporary file, then a rename to a free name."""
+    tmp = f".{file}.{os.getpid()}.tmp"
+    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd), "w", encoding="utf-8") as f:
         f.write(text)
-    os.rename(tmp, path if not os.path.lexists(path) else f"{path}.{secrets.token_hex(3)}")
+    os.rename(tmp, free_name(fd, file), src_dir_fd=fd, dst_dir_fd=fd)
 
 
 def shared_ids(d, key):
@@ -1456,9 +1466,9 @@ def collect(d, name, settings, state, max_bytes, now):
     Only a message that will be printed counts against the budget, and a big one only as
     the part of it that is shown. Directory and stuck notices are remembered in STATE,
     which only commit saves. If anything here fails, every claim goes back. An unsafe
-    mailbox is refused before anything is claimed.
+    mailbox, or an unsafe archive for NAME, is refused before anything is claimed.
     """
-    problems = mailbox_problems(d)
+    problems = mailbox_problems(d, name)
     if problems:
         raise MailError("unsafe_mailbox", problems[0])
     found, waiting, busy, dirs, settle = candidates(name, d, now)
@@ -1591,19 +1601,22 @@ def render(batch, name, bound, again="call receive again"):
 
 def commit(d, name, batch, state, now):
     """After a batch was written: archive each direct message, record the batch, save the
-    state if it changed, and touch the member record."""
+    state if it changed, and touch the member record. Archive copies go in through a
+    descriptor for .NAME-read (see open_meta), never through a symlink."""
+    afd = None
     try:
         if batch.items:
-            with contextlib.suppress(FileExistsError):
-                os.mkdir(archive_dir(d, name), 0o700)
+            afd = open_meta(d, f".{name}-read", create=True)
         for item in batch.items:
+            copy = os.path.basename(item.copy)
             if item.hold is not None:
-                dest = item.copy if not os.path.lexists(item.copy) else f"{item.copy}.{secrets.token_hex(3)}"
                 with contextlib.suppress(FileNotFoundError):
-                    os.rename(item.hold, dest)
+                    os.rename(item.hold, free_name(afd, copy), dst_dir_fd=afd)
             else:
-                write_copy(item.copy, item.text)
+                write_copy(afd, copy, item.text)
     finally:
+        if afd is not None:
+            os.close(afd)
         for item in batch.items:
             HELD.discard(item.hold)
     seen = state.setdefault("seen", {})
@@ -2687,7 +2700,7 @@ def doctor(d, name, settings):
         lines.append(f"mailbox {d}: marked with {MARKER_V2}")
     else:
         finding(f"mailbox {d} has no {MARKER_V2}, so agent-mail refuses it; run agent-mail init there")
-    for problem in mailbox_problems(d):
+    for problem in mailbox_problems(d, name):
         finding(problem)
     kind = fs_type(d)
     nfs = kind is not None and kind.startswith("nfs")
@@ -3592,6 +3605,21 @@ def section_state(t):
     t.ok(inside == [os.path.join(".agent-mail", "members", "pi.json")]
          and all(os.path.isfile(state_file(local, "pi", x)) and state_file(local, "pi", x).startswith(here) for x in ("", ".send", ".pending")),
          "reader state, the send window and pending's state stay on this host, outside the mailbox")
+    arch = t.box("archive-link")
+    away = os.path.join(t.root, "archive-elsewhere")
+    os.mkdir(away, 0o700)
+    os.symlink(away, os.path.join(arch, ".pi-read"))
+    waiting = t.direct(arch, "pi", "nix", "stays home")
+    out, code, err = t.run(["--dir", arch, "read", "pi"])
+    report, flagged, _ = t.run(["--dir", arch, "doctor", "pi"])
+    t.ok(code == 1 and ".pi-read is a symlink" in err and not out and os.path.exists(waiting) and not os.listdir(away)
+         and flagged == 1 and ".pi-read is a symlink" in report, "a symlinked archive directory is refused before anything is claimed, and doctor names it")
+    os.unlink(os.path.join(arch, ".pi-read"))
+    batch = collect(arch, "pi", load_settings({}, {}, "pi"), load_state(arch, "pi"), MAX_BYTES, clock())
+    os.symlink(away, os.path.join(arch, ".pi-read"))
+    e = t.raises(commit, arch, "pi", batch, load_state(arch, "pi"), clock())
+    t.ok(len(batch.items) == 1 and getattr(e, "code", None) == "unsafe_mailbox" and not os.listdir(away),
+         "commit moves nothing through an archive directory swapped for a symlink after collect")
 
 
 def section_channels(t):
