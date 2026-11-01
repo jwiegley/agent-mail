@@ -1,8 +1,8 @@
 #!/usr/bin/env -S python3 -I
 """steward-signals: the read-only helper for a topic steward, and the checks on the steward's files.
 
-A topic steward is an agent-deck conductor that watches one agent-mail channel. This helper reads
-metadata only: it never opens a message file, never writes to the mailbox and never sends anything.
+A topic steward is an agent-deck conductor that watches one agent-mail channel. This helper never opens a
+message file, never writes to the mailbox and never sends anything, and it reads metadata only, with one exception: the probe (below).
 
 POLICY.md holds the steward's thresholds and self-caps as a Markdown table, | key | value | meaning |, with
 one row for each key in POLICY_KEYS. A missing, unknown or repeated key, or a value its key cannot use (a
@@ -23,9 +23,19 @@ unread mail and the age of its oldest, the steward's own NUDGEs still unread, th
 account for (no sent line names the file, and no intent that has no sent line yet names the same recipient within 10 seconds of the
 stamp), the mail from one member to another that no NOTE names, and how many posts the channel has had since a time, by ctime.
 
+The probe tells whether a member is waiting on John without any text of the member's entering the steward's context. It asks agent-deck for the
+end of the member's last response (`session output NAME --max-tokens 200`, in text form: -q would ignore the cap) and reduces it to a word: yes
+when its last non-empty line, less the footer agent-deck puts after a response it cut to the cap, ends with a question mark, no when it does not.
+It prints that word, or unknown, and nothing else. Only a member on hera is asked, since no output command for a remote member is verified; a
+member on another host, one that TOPIC.md does not list, and a command that fails or does not finish in 20 seconds are unknown. agent-deck logs
+the read and keeps the whole text of a response it cut in a file of its own; the helper keeps none of the text.
+
 Commands:
   self-test [SECTION ...]
       Run the built-in checks, each section in a fresh temporary home.
+  probe NAME --dir CONDUCTOR_DIR
+      Print yes, no or unknown: whether the last response of the member NAME ends with a question. The member's host is read from the
+      Members table of the TOPIC.md in CONDUCTOR_DIR.
 """
 
 import argparse
@@ -40,6 +50,7 @@ import os
 import pathlib
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -61,6 +72,8 @@ SHELL_WORDS = ("sleep", "watch", "sh -c", "bash -c", "tail")  # in a background 
 MSG_RE = re.compile(rf"(?P<to>{NAME_RE.pattern})_(?P<stamp>[0-9]{{8}}T[0-9]{{6}}\.[0-9]{{6}}Z)_from-(?P<sender>{NAME_RE.pattern})_[0-9a-f]{{8}}\.txt")
 STAMP_RE = re.compile(r"([0-9]{4})([0-9]{2})([0-9]{2})T([0-9]{2})([0-9]{2})([0-9]{2})(?:\.([0-9]{6}))?Z")  # a file name's stamp; SENT.log's has no fraction
 INTENT_WINDOW_S = 10  # how near, in seconds, an intent line's time must be to a file's stamp for the intent to account for the file
+ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-_])")  # a CSI sequence, an OSC sequence (ended by BEL or ST), or another escape of two characters
+CUT_FOOTER_RE = re.compile(r"\u2026 output truncated to [0-9]+ tokens; full output at .+")  # what agent-deck ends a response with when it cut it to --max-tokens
 
 
 # ---- policy ----
@@ -477,6 +490,69 @@ def census(entries, members, steward, sent, notes, nudge_ids, now):
             unmatched_own.append(ident)
     unread = {name: (len(waited), max(waited, default=None)) for name, waited in ages.items()}
     return Census(unread, nudges_unread, unmatched_own, transit_without_note, post_ctimes)
+
+
+# ---- probe ----
+
+def real_run(argv):
+    """The run(argv) of deck_rows and probe, for real: (stdout, returncode) of the command ARGV, whose first word is the program, as they build it
+    ("agent-deck", then its arguments). It never raises: a command that cannot be started, or has not finished in 20 seconds, gives ("", 1)."""
+    try:
+        done = subprocess.run(argv, capture_output=True, encoding="utf-8", timeout=20)
+    except Exception:
+        return "", 1
+    return done.stdout, done.returncode
+
+
+def runner_for(fixture):
+    """The run(argv) the commands use: real_run, or, when FIXTURE is a path (the hidden --run-fixture, which only the self-test gives), a fake_run
+    that answers as the JSON object in that file says, so that no check runs the real agent-deck."""
+    if fixture is None:
+        return real_run
+    with open(fixture, encoding="utf-8") as f:
+        return fake_run(json.load(f))
+
+
+def probe(run, name, host):
+    """Whether the member NAME, on the host HOST, is waiting on John: True when its last response ends with a question, False when it does not,
+    None when that cannot be told. RUN(argv) is the runner of deck_rows. Only a member on hera is asked, since no output command for a remote member
+    is verified, and only by a name that agent-mail could have given it, so that agent-deck never takes the name for a flag or, when it is empty, for
+    the caller's own session. The command is the text form of `agent-deck session output NAME --max-tokens 200`; -q would ignore the cap. Its text
+    is reduced here: with the ANSI escape sequences stripped, the last non-empty line decides, less the footer that agent-deck puts after a response
+    it cut to the cap (a response over 200 tokens, about 800 bytes, is cut to its head and its tail around a seam, so the footer would otherwise be
+    its last line). None of the text is kept or printed. A command that fails, or a run that raises, is None."""
+    if host != "hera" or not grammatical(name):  # hera is the host that `agent-deck list` answers for, as in deck_rows
+        return None
+    try:
+        out, code = run(["agent-deck", "session", "output", name, "--max-tokens", "200"])
+    except Exception:  # a run does not raise, but a probe that cannot be told is unknown, never an error
+        return None
+    if code != 0:
+        return None
+    lines = [line for line in map(str.strip, ANSI_RE.sub("", out).splitlines()) if line]
+    if lines and CUT_FOOTER_RE.fullmatch(lines[-1]):
+        lines.pop()
+    return bool(lines) and lines[-1].endswith("?")
+
+
+PROBE_WORDS = {True: "yes", False: "no", None: "unknown"}  # what the probe command prints for each answer of probe, and nothing else
+
+
+def probe_command(run, name, directory):
+    """Print the one word that says whether the member NAME of the topic whose TOPIC.md is in DIRECTORY is waiting on John, yes, no or unknown (see
+    probe; a name that TOPIC.md does not list is unknown), and return 0. Nothing else goes to stdout, so none of a member's text reaches the steward.
+    A TOPIC.md that cannot be read is refused instead: the reason goes to stderr, without a question mark, nothing goes to stdout, and the status is 2."""
+    try:
+        members = load_roster(os.path.join(directory, "TOPIC.md"))
+    except RosterError as e:
+        print(e, file=sys.stderr)
+        return 2
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"steward-signals: {e}".replace("?", ""), file=sys.stderr)  # the path may hold a question mark
+        return 2
+    host = next((m.host for m in members if m.name == name), None)
+    print(PROBE_WORDS[probe(run, name, host)])
+    return 0
 
 
 # ---- self-test ----
@@ -1497,6 +1573,205 @@ def section_census(d):
     test_census_scales(d)
 
 
+# ---- self-test section: probe ----
+
+PROBE_TOPIC = """# +ingest
+
+## Members
+| name | host | harness |
+|------|------|---------|
+| lfm3 | hera | claude |
+| pipeline | andoria-08 | claude |
+"""
+LFM3_COMMAND = ["agent-deck", "session", "output", "lfm3", "--max-tokens", "200"]  # the command line that the probe of lfm3 runs
+# What that command prints, as agent-deck 1.16.34 does (its source, cmd/agent-deck/session_output_cmd.go and output_budget.go, and the strings of the installed
+# binary): a header, then the response. A response over the cap, 4 bytes for each token, is cut to its head and its tail around a seam, and a footer names the
+# file that keeps all of it.
+OUTPUT_HEADER = "Session: lfm3 (claude)\nTime: 2026-10-31T22:39:01Z\n---\n"
+OUTPUT_SEAM = "\n\n\u2026 output omitted \u2026\n\n"
+OUTPUT_FOOTER = "\n\n\u2026 output truncated to 200 tokens; full output at /Users/johnw/.agent-deck/output/8e1a2c/latest-response.txt\n"
+WHOLE_OUTPUT = OUTPUT_HEADER + "\u23fa Done.\n\nShould I push to main?\n"
+CUT_OUTPUT = (OUTPUT_HEADER + "\u23fa Converted all 14 shards of lfm3 and ran the evaluation against the held-out set. The table below is the e"
+              + OUTPUT_SEAM + "ion that fixed the loader, so the numbers match the reference run.\n\nShould I push to main?" + OUTPUT_FOOTER)
+
+
+def probe_text(text):
+    """What probe says of lfm3, on hera, when agent-deck prints TEXT."""
+    return probe(fake_run({"session output lfm3": text}), "lfm3", "hera")
+
+
+def raising(error):
+    """A run(argv) that raises ERROR."""
+    def run(argv):
+        raise error
+
+    return run
+
+
+@contextlib.contextmanager
+def subprocess_as(stub):
+    """Within the block, subprocess.run is STUB, so that a check which reaches real_run starts no process."""
+    run = subprocess.run
+    subprocess.run = stub
+    try:
+        yield
+    finally:
+        subprocess.run = run
+
+
+def test_probe_local(d):
+    ok(probe(fake_run({"session output lfm3": "\u23fa Done.\n\nShould I push to main?\n"}), "lfm3", "hera") is True, "probe: trailing question line is yes")
+    ok(probe(fake_run({"session output lfm3": "\u23fa Done. Waiting for mail.\n"}), "lfm3", "hera") is False, "probe: no question is no")
+    ok(probe(fake_run({"session output lfm3": ("", 1)}), "lfm3", "hera") is None, "probe: a failed command is unknown")
+
+
+def test_probe_remote_is_unknown(d):
+    ok(probe(fake_run({}), "pipeline", "andoria-08") is None, "probe: remote members are unknown (no remote output path verified)")
+    run = fake_run({"session output pipeline": "Push to main?\n", "remote andoria-08": "Push to main?\n"})  # commands that would answer, if they were run
+    ok(probe(run, "pipeline", "andoria-08") is None and probe(run, "pipeline", None) is None and run.calls == [],
+       "probe: a remote member, or a name with no host, is not asked at all")
+
+
+def test_probe_runs_the_text_form_with_the_cap(d):
+    run = fake_run({"session output lfm3": "Done.\n"})
+    probe(run, "lfm3", "hera")
+    ok(run.calls == [LFM3_COMMAND], "probe: the command is agent-deck session output lfm3 --max-tokens 200, in text form: never -q, which ignores the cap, nor --json")
+
+
+def test_probe_reads_the_last_non_empty_line(d):
+    ok(probe_text("Should I push to main?  \n\n \t\n") is True and probe_text("Should I push to main?") is True and probe_text("Should I push to main?\r\n") is True,
+       "probe: trailing spaces, blank lines and a missing or CRLF line end do not hide the question")
+    ok(probe_text(WHOLE_OUTPUT) is True and probe_text(OUTPUT_HEADER) is False, "probe: the header agent-deck prints is no part of the question, and a response with no text is no")
+    ok(probe_text("Is this the right branch?\nYes, it is. Done.\n") is False, "probe: a question earlier in the response is not its end")
+    ok(probe_text("Why? Because the loader changed.\n") is False, "probe: a question mark inside the last line is not its end")
+    ok(probe_text("") is False and probe_text("\n \n") is False, "probe: no text is no")
+
+
+def test_probe_ignores_escape_sequences(d):
+    ok(probe_text("\x1b[1mShould I push to main?\x1b[0m\n") is True, "probe: a color code after the question mark does not hide it")
+    ok(probe_text("Should I push to main?\n\x1b[0m\n\x1b[2K\n") is True, "probe: a last line of escape sequences alone is empty, so the line before it is the last")
+    ok(probe_text("Should I push to main?\x1b]0;lfm3\x07\n") is True and probe_text("Should I push to main?\x1b]8;;https://example.com\x1b\\\n") is True,
+       "probe: an OSC sequence, ended by BEL or by ST, is stripped")
+    ok(probe_text("\x1b[31mDone.\x1b[0m\n") is False, "probe: colored text with no question is no")
+
+
+def test_probe_skips_the_footer_of_a_cut_response(d):
+    ok(probe_text(CUT_OUTPUT) is True, "probe: a response cut to the cap ends with agent-deck's footer, which is not its last line: the tail before it is")
+    ok(probe_text(CUT_OUTPUT.replace("Should I push to main?", "I will wait for your answer.")) is False, "probe: a cut response whose tail asks nothing is no")
+    asked_then_cut = OUTPUT_HEADER + "Which shard first?" + OUTPUT_SEAM + "so I started with b.\n" + OUTPUT_FOOTER
+    ok(probe_text(asked_then_cut) is False, "probe: a question in the head of a cut response, before the seam, is not its end")
+
+
+def test_probe_failures_are_unknown(d):
+    ok(probe(fake_run({"session output lfm3": ("Should I push to main?\n", 1)}), "lfm3", "hera") is None, "probe: a command that failed is unknown, whatever it printed")
+    for error in (OSError("no such program"), subprocess.TimeoutExpired("agent-deck", 20), RuntimeError("boom")):
+        ok(probe(raising(error), "lfm3", "hera") is None, f"probe: a run that raises {type(error).__name__} is unknown, not an error")
+
+
+def test_probe_refuses_a_name_agent_deck_could_misread(d):
+    run = fake_run({"session output": "Should I push to main?\n"})  # would answer for any name
+    for odd in ("", "-q", "--json", "Lfm3", "lfm 3", "lfm3/x", "a" * 65, "x-"):
+        ok(probe(run, odd, "hera") is None, f"probe: {odd!r} is not an agent-mail name, so it is not passed to agent-deck")
+    ok(run.calls == [], "probe: no command was run for any of them")
+
+
+def test_real_run_contract(d):
+    def child(code):  # a Python child that prints cafe, with its accent, as UTF-8 bytes and exits with CODE
+        return [sys.executable, "-I", "-c", f"import sys; sys.stdout.buffer.write(b'caf\\xc3\\xa9\\n'); sys.exit({code})"]
+
+    ok(real_run(child(0)) == ("caf\u00e9\n", 0), "run: the argv is run as it is given, its first word the program, and gives the output decoded as UTF-8 and the status")
+    ok(real_run(child(3)) == ("caf\u00e9\n", 3), "run: a command that fails gives its own status and output")
+    ok(real_run([os.path.join(d, "no-such-program")]) == ("", 1), "run: a command that cannot be started gives no output and status 1, not an error")
+
+    def too_slow(argv, **kwargs):
+        too_slow.timeout = kwargs.get("timeout")
+        raise subprocess.TimeoutExpired(argv, too_slow.timeout)
+
+    with subprocess_as(too_slow):
+        ok(real_run(["agent-deck", "list", "--json"]) == ("", 1) and too_slow.timeout == 20, "run: a command that has not finished in 20 seconds gives no output and status 1")
+
+
+def test_probe_prints_one_word(d):
+    write(d, "TOPIC.md", PROBE_TOPIC)
+    for what, answer, word in (("a question", "SECRET-9f3a: shall I delete the release branch?\n", "yes"), ("no question", "SECRET-9f3a: done.\n", "no"),
+                               ("a failed command", ["", 1], "unknown")):
+        fixture = write(d, "fixture.json", json.dumps({"session output lfm3 --max-tokens 200": answer}))  # the whole command line: only the text form is answered
+        ok(capture(main, ["probe", "lfm3", "--dir", d, "--run-fixture", fixture]) == (word + "\n", 0, ""),
+           f"probe: {what} prints {word}, one word and its newline, and nothing else on stdout or stderr, none of the text it read")
+
+
+def test_probe_command_asks_only_for_a_listed_member_on_hera(d):
+    write(d, "TOPIC.md", PROBE_TOPIC)
+    for name, what, word, calls in (("lfm3", "a member on hera", "yes", [LFM3_COMMAND]), ("pipeline", "a member on another host", "unknown", []),
+                                    ("lfm", "a name that only starts a member's", "unknown", []), ("nosuch", "a name TOPIC.md does not list", "unknown", [])):
+        run = fake_run({"session output": "Should I push to main?\n"})  # would answer for any member
+        ok(capture(probe_command, run, name, d) == (word + "\n", 0, "") and run.calls == calls, f"probe: {what} is {word}, with {len(calls)} command run")
+
+
+def test_probe_command_refuses_a_topic_it_cannot_read(d):
+    run = fake_run({"session output": "Should I push to main?\n"})
+    out, status, err = capture(probe_command, run, "lfm3", os.path.join(d, "nowhere?"))  # the directory's name holds a question mark, which the message leaves out
+    ok(out == "" and status == 2 and err.startswith("steward-signals: ") and "?" not in err and "nowhere/TOPIC.md" in err and run.calls == [],
+       "probe: a TOPIC.md that is missing is refused on stderr, without a question mark, with nothing on stdout and no command run")
+    write(d, "TOPIC.md", PROBE_TOPIC.replace("| lfm3 |", "| Lfm3? |"))
+    ok(capture(probe_command, run, "lfm3", d) == ("", 2, "steward-signals: TOPIC.md: Lfm3: not a valid name\n") and run.calls == [],
+       "probe: a TOPIC.md that the roster reader refuses is refused with its message")
+    with open(os.path.join(d, "TOPIC.md"), "wb") as f:
+        f.write(b"## Members\n| lfm3 | \xff | claude |\n")
+    out, status, err = capture(probe_command, run, "lfm3", d)
+    ok(out == "" and status == 2 and err.startswith("steward-signals: ") and "?" not in err and run.calls == [], "probe: a TOPIC.md that is not UTF-8 is refused too")
+
+
+def test_probe_runs_agent_deck_without_a_fixture(d):
+    write(d, "TOPIC.md", PROBE_TOPIC)
+    started = []
+
+    def agent_deck(argv, **kwargs):  # in place of subprocess.run, so that the check starts no process
+        started.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="Should I push to main?\n", stderr="")
+
+    with subprocess_as(agent_deck):
+        result = capture(main, ["probe", "lfm3", "--dir", d])
+    ok(result == ("yes\n", 0, "") and started == [LFM3_COMMAND], "probe: without --run-fixture the command runs agent-deck, once, through real_run")
+
+
+def test_probe_options(d):
+    out, status, err = capture(main, ["probe", "--help"])
+    ok(status == 0 and "--dir" in out and "run-fixture" not in out + err, "probe: --run-fixture is hidden from the help")
+    out, status, err = capture(main, ["probe", "lfm3"])
+    ok(out == "" and status == 2 and "--dir" in err, "probe: --dir is required, so TOPIC.md is never looked for in a default place")
+    ok("probe" in capture(main, ["--help"])[0], "probe: the command is listed in the top-level help")
+
+
+@section("probe")
+def section_probe(d):
+    started = []
+    run = subprocess.run
+
+    def guarded(argv, *args, **kwargs):  # no check may run the real agent-deck: one that would is refused here, and fails
+        if os.path.basename(argv[0]) == "agent-deck":
+            started.append(list(argv))
+            raise OSError("agent-deck was started")
+        return run(argv, *args, **kwargs)
+
+    with subprocess_as(guarded):
+        test_probe_local(d)
+        test_probe_remote_is_unknown(d)
+        test_probe_runs_the_text_form_with_the_cap(d)
+        test_probe_reads_the_last_non_empty_line(d)
+        test_probe_ignores_escape_sequences(d)
+        test_probe_skips_the_footer_of_a_cut_response(d)
+        test_probe_failures_are_unknown(d)
+        test_probe_refuses_a_name_agent_deck_could_misread(d)
+        test_real_run_contract(d)
+        test_probe_prints_one_word(d)
+        test_probe_command_asks_only_for_a_listed_member_on_hera(d)
+        test_probe_command_refuses_a_topic_it_cannot_read(d)
+        test_probe_runs_agent_deck_without_a_fixture(d)
+        test_probe_options(d)
+    ok(started == [], "probe: no check started the real agent-deck")
+
+
 # ---- main ----
 
 def build_parser():
@@ -1506,6 +1781,13 @@ def build_parser():
                         description="Run the built-in checks, every section or the named ones, each in a fresh temporary home "
                                     "with no agent-mail, agent-deck or Claude job variables.")
     st.add_argument("sections", nargs="*", metavar="SECTION")
+    pr = sub.add_parser("probe", help="say whether a member is waiting on John",
+                        description="Print yes, no or unknown, and nothing else: whether the last response of the member NAME ends with a question. "
+                                    "The host is read from the Members table of the TOPIC.md in CONDUCTOR_DIR. Only a member on hera is asked; a member "
+                                    "on another host, a name TOPIC.md does not list, and a command that fails are unknown.")
+    pr.add_argument("name", metavar="NAME")
+    pr.add_argument("--dir", required=True, metavar="CONDUCTOR_DIR", help="the conductor directory, which holds TOPIC.md")
+    pr.add_argument("--run-fixture", metavar="FILE", help=argparse.SUPPRESS)  # for the self-test: a JSON object of the answers that fake_run gives
     return p
 
 
@@ -1513,6 +1795,8 @@ def main(argv):
     a = build_parser().parse_args(argv)
     if a.cmd == "self-test":
         return self_test(a.sections)
+    if a.cmd == "probe":
+        return probe_command(runner_for(a.run_fixture), a.name, a.dir)
 
 
 if __name__ == "__main__":
