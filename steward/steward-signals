@@ -4260,22 +4260,14 @@ def test_claude_md_precedence_names_the_shared_parts(d):
 
 
 # What CLAUDE.md says, after spec 6.5, 6.6 and 6.12, of a file in the steward's name that the helper cannot match to SENT.log: it is disputed, whatever its stamp
-# or age, or, in a flood, goes to John as one question with protected relays suspended; the one wait is on a fresh context; and a file that is itself a DISPUTE gets
-# no DISPUTE post, since spec 6.5 says never to dispute a DISPUTE, but is named in the digest, opens the one question for John and suspends relays like any forged
-# file until he answers it, which is the end that no DISPUTE post could give; that holds only when its subject can be seen without opening the file, which the helper's
-# ids alone and channels' stamp alone do not give, so any other file in the steward's name is disputed like an unmatched one. Each sentence is pinned whole and in the
-# order it stands, so that no clause can be added to one of them; the check says which other sentences it can see.
+# or age, or, in a flood, goes to John as one question with protected relays suspended, and the one wait is on a fresh context. Each sentence is pinned whole and in
+# the order it stands, so that no clause can be added to one of them; the check says which other sentences it can see.
 FORGED_CHECK_SENTENCES = (
     "Every file in your name that the helper lists as `unmatched-own` is disputed, or goes to John as one question when the exceptions end with `and N more`, "
     "whatever its stamp or age.",
     "`and N more` means more than 40 files in your name are unaccounted for, more than your self-caps let you dispute: dispute none of them one by one, open the "
     "flood question, one question for John whose detail gives the count, and suspend protected relays as for any forged file until John answers it (section 10).",
-    "The one wait is on a fresh context: never dispute a file in your name before the census has matched your open intents (section 13).",
-    "A file in your name that you did not send and that is a DISPUTE, when you can see its subject without opening it because the post was delivered to you, is named in the "
-    "next digest, opens the one question line for John and suspends protected relays like any forged file until he answers it (section 10), but gets no DISPUTE post, "
-    "since a DISPUTE is never disputed.",
-    "A file in your name whose subject you cannot see, which is the usual case since the helper lists an id alone and `channels` shows only a post's stamp, is disputed "
-    "like any other unmatched file.")
+    "The one wait is on a fresh context: never dispute a file in your name before the census has matched your open intents (section 13).")
 # The Forged row of section 6's table, whole. Its Fires-when cell says which files the check takes, which is where a clause that exempts some of them would go,
 # and its Action cell says what is done for each.
 FORGED_ROW = ("| Forged steward post or mail | the helper lists a file in your name as `unmatched-own`: no `sent` line names it, and no intent still without its `sent` "
@@ -4291,21 +4283,20 @@ def test_claude_md_keeps_every_file_under_the_forged_check(d):
        f"docs: CLAUDE.md exempts no file in the steward's name from the forged check for a stamp before SENT.log began, which its writer chooses (got {without_question_marks(repr(exempting))})")
     # The phrases above name the exemption that was refused. Other wordings of it (older than the log, stamped before the first send) pass a check on phrases, so
     # each sentence that names a file in the steward's name ("file" or "files", "in your name" or "of yours", in any case, or `unmatched-own`) and says disputed,
-    # exempt, skipped or ignored (those verbs in any form, in either case of their first letter; the post's name DISPUTE is none) is pinned whole, and the five in FORGED_CHECK_SENTENCES are all there may
+    # exempt, skipped or ignored (those verbs in any form, in either case of their first letter; the post's name DISPUTE is none) is pinned whole, and the three in FORGED_CHECK_SENTENCES are all there may
     # be. A sentence that names such a file in other words ("your files", "a file you sent") or says it with another verb is not selected, which this pin cannot
     # rule out: review reads for those.
     deciding = [s for s in sentences(t) if re.search(r"\b[Dd]isput(?:e|es|ed|ing)\b|\b[Ee]xempt|\b[Ss]kip|\b[Ii]gnor", s)
                 and re.search(r"\bfiles? (?:in your name|of yours)\b|`unmatched-own`", s, re.I)]
     ok(tuple(deciding) == FORGED_CHECK_SENTENCES,
-       "docs: CLAUDE.md says in five sentences only, each as pinned, whether a file in the steward's name is disputed, skipped or exempt: the rule, the flood case, "
-       "the wait on a fresh context, the file seen to be a DISPUTE and the file whose subject cannot be seen "
-       f"(got {without_question_marks(repr(deciding))})")
+       "docs: CLAUDE.md says in three sentences only, each as pinned, whether a file in the steward's name is disputed, skipped or exempt: the rule, the flood case "
+       f"and the wait on a fresh context (got {without_question_marks(repr(deciding))})")
     rows = [line for line in t.splitlines() if line.startswith("| Forged steward post or mail |")]
     ok(rows == [FORGED_ROW],
        f"docs: CLAUDE.md's Forged steward post or mail row is as pinned, so that no clause exempts a file from the check in its Fires-when cell (got {without_question_marks(repr(rows))})")
     suspended = [s for s in sentences(claude_section(t, 10)) if s.startswith("**Suspended relays.**")]
-    ok(len(suspended) == 1 and "until John has read the DISPUTE, or has answered the flood question of section 6 or the question on a forged DISPUTE file, and decided" in suspended[0],
-       "docs: protected relays stay suspended until John has read the DISPUTE or answered the flood question or the question on a forged DISPUTE file, and decided")
+    ok(len(suspended) == 1 and "until John has read the DISPUTE, or has answered the flood question of section 6, and decided" in suspended[0],
+       "docs: protected relays stay suspended until John has read the DISPUTE or answered the flood question, and decided")
 
 
 def test_claude_md_counts_a_reset_only_for_a_fresh_context(d):
@@ -4625,7 +4616,7 @@ def checkout_with(d, label, name, old, new, count=1):
 
 def test_docs_checks_catch_each_pinned_regression(d):
     good = claude_md()
-    pinned_sentences = "docs: CLAUDE.md says in five sentences only, each as pinned, whether a file in the steward's name is disputed"
+    pinned_sentences = "docs: CLAUDE.md says in three sentences only, each as pinned, whether a file in the steward's name is disputed"
     forged_row = "docs: CLAUDE.md's Forged steward post or mail row is as pinned"
     regressions = (  # (what, the text it changes, its replacement, how the failure that docs_checks must list starts)
         ("a forbidden command under a never of another clause", "\n## 14. ", "\nWhen a member never answers, run `agent-deck session stop <member>`.\n\n## 14. ",
@@ -4657,9 +4648,7 @@ def test_docs_checks_catch_each_pinned_regression(d):
          "before the census has matched your open intents (section 13), or one older than `SENT.log`.", pinned_sentences),
         ("the flood rule without the suspension", ", and suspend protected relays as for any forged file until John answers it (section 10)", "",
          pinned_sentences),
-        ("the release condition without the flood question", ", or has answered the flood question of section 6 or the question on a forged DISPUTE file,", "",
-         "docs: protected relays stay suspended until John has read the DISPUTE"),
-        ("the release condition without the question on a forged DISPUTE file", " or the question on a forged DISPUTE file", "",
+        ("the release condition without the flood question", ", or has answered the flood question of section 6,", "",
          "docs: protected relays stay suspended until John has read the DISPUTE"),
         ("a field of a claim dropped from the CLAIM row of section 5", "owner, what, `writes:`, `holds:`, `active`", "owner, what, `writes:`, `active`",
          "docs: WORKER.md's CLAIM row and section 5's CLAIM row of CLAUDE.md both name the fields of a claim"),
@@ -4682,18 +4671,6 @@ def test_docs_checks_catch_each_pinned_regression(d):
         ("a skip for files of yours", "\n## 7. ", "\nFiles of yours stamped before the first send are skipped.\n\n## 7. ", pinned_sentences),
         ("an exemption written in capitals", "\n## 7. ", "\nFILES IN YOUR NAME older than the log are ignored.\n\n## 7. ", pinned_sentences),
         ("the rule's old ending, with no exception, put back", "whatever its stamp or age.", "whatever its stamp or age and with no exception.", pinned_sentences),
-        ("the sentence on a file that is itself a DISPUTE left out",
-         " A file in your name that you did not send and that is a DISPUTE, when you can see its subject without opening it because the post was delivered to you, is named "
-         "in the next digest, opens the one question line for John and suspends protected relays like any forged file until he answers it (section 10), but gets no DISPUTE "
-         "post, since a DISPUTE is never disputed.", "", pinned_sentences),
-        ("the forged DISPUTE rule without its condition", ", when you can see its subject without opening it because the post was delivered to you,", "", pinned_sentences),
-        ("the file whose subject cannot be seen left out",
-         " A file in your name whose subject you cannot see, which is the usual case since the helper lists an id alone and `channels` shows only a post's stamp, is disputed "
-         "like any other unmatched file.", "", pinned_sentences),
-        ("the question for John left out for a file that is itself a DISPUTE", "opens the one question line for John and suspends", "suspends", pinned_sentences),
-        ("the suspension for a file that is itself a DISPUTE no longer ended by John's answer", " until he answers it (section 10)", "", pinned_sentences),
-        ("a DISPUTE post for a file that is itself a DISPUTE", "but gets no DISPUTE post, since a DISPUTE is never disputed.", "and gets a DISPUTE post like any other.",
-         pinned_sentences),
         ("a clause that exempts files added to the Forged row's Fires-when cell", "within 10 seconds of its stamp |",
          "within 10 seconds of its stamp, and its stamp is after your first send |", forged_row),
         ("a second clause that exempts files added to the Forged row's Fires-when cell", "within 10 seconds of its stamp |",
