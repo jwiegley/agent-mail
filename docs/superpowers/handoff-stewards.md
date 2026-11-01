@@ -4,7 +4,7 @@ Frozen plan: `docs/superpowers/plans/2026-10-31-agent-mail-stewards.md` (approve
 
 ## Refocus checkpoint
 
-- Last check: 2026-10-31 17:03 PDT. Goal unchanged. Tasks 1 and 2 complete and audited; Task 3 (c8a522e) in fix round 1 (two Important findings: whole-grammar and regular-file filtering; open-intent matching) with its fess audit running; Tasks 4 to 12 pending. No scope creep. main is 19 commits ahead; the restack onto it comes before Task 4. Next deadline: 18:00 PDT. Next step: re-review Task 3's fix, restack, dispatch Task 4.
+- Last check: 2026-10-31 18:43 PDT. Goal unchanged. Tasks 1 to 4 complete and audited; the branch sits on main 013ef0f (clean); Task 5 dispatched; Tasks 6 to 12 pending. No scope creep. Next deadline: 19:40 PDT. Next step: Task 5's review when its report arrives.
 
 ## Definition of Done (frozen)
 
@@ -20,8 +20,8 @@ Frozen plan: `docs/superpowers/plans/2026-10-31-agent-mail-stewards.md` (approve
 |---|---|---|---|---|
 | 1 POLICY.md and parser | complete | d9cdf75, fd188c4 | Approved; round 1 all addressed; 3 minors deferred | clean; 3 Low carried to Task 5, F3 parked |
 | 2 roster and agent-deck readers | complete | 8918852, d02c33b | Approved; round 1 all addressed; 6 minors deferred | clean; 6 findings carried to Task 6 |
-| 3 census | complete | c8a522e, 8006ab0, 8f8c8e5 | Needs fixes, then round 1 all addressed; 8 minors deferred | clean; findings fixed in the round |
-| 4 probe | next | | | |
+| 3 census | complete | ff22b2f, 4ee570f, 6dbed11 | Needs fixes, then round 1 all addressed; 8 minors deferred | clean; findings fixed in the round |
+| 4 probe | complete | 08ab9f0, 40492c7 | Approved (7 minors), then round 1 all addressed; 2 minors carried to Task 5 | clean on 08ab9f0; the fix commit is covered by the re-review |
 | 5 usage and metrics | | | | |
 | 6 signals command | | | | |
 | 7 CLAUDE.md and docs check | | | | |
