@@ -4,7 +4,7 @@ Frozen plan: `docs/superpowers/plans/2026-10-31-agent-mail-stewards.md` (approve
 
 ## Refocus checkpoint
 
-- Last check: 2026-10-31 19:49 PDT. Goal unchanged. Tasks 1 to 5 complete and audited; the branch sits on main 013ef0f (clean); Task 6 dispatched; Tasks 7 to 12 pending. No scope creep. Next deadline: 20:45 PDT. Next step: Task 6's review when its report arrives.
+- Last check: 2026-10-31 21:15 PDT. Goal unchanged. Tasks 1 to 5 complete and audited; the branch sits on main 013ef0f (main has moved to 4232045: restack due after Task 6 completes); Task 6 (9449e8f, 18ca927) in review and audit; Tasks 7 to 12 pending. No scope creep. Next deadline: 22:15 PDT. Next step: Task 6's verdicts, its fix round, the restack, then Task 7.
 
 ## Definition of Done (frozen)
 
@@ -30,6 +30,10 @@ Frozen plan: `docs/superpowers/plans/2026-10-31-agent-mail-stewards.md` (approve
 | 10 scanner patch | | | | |
 | 11 bridge patch | | | | |
 | 12 README, runbook, pointer | | | | |
+
+## Parallel work John approved
+
+- Decision 21 (21:27 PDT PDT, 2026-10-31): the agent-deck fork fix (design decision 13) is planned in parallel by a child agent-deck session launched from this one in `/Users/johnw/src/fork/agent-deck` (title `fork-conductor-setup`, id unknown, branch `work/conductor-setup-fix`, launched 2026-10-31 21:34 PDT; brief at /Users/johnw/Products/briefs/fork-conductor-setup-brief.md). It brainstorms with John, writes a design and a plan, and builds nothing until he approves. This session only relays its completion; the nix-config bump and hera's activation belong to the nix and pi sessions.
 
 ## Attempt counts (reset when the gate passes)
 
