@@ -1,8 +1,9 @@
 #!/usr/bin/env -S python3 -I
-"""steward-signals: the read-only helper for a topic steward, and the checks on the steward's files.
+"""steward-signals: the helper for a topic steward, which reads its mailbox and its files, keeps its daily metrics file, and checks them.
 
 A topic steward is an agent-deck conductor that watches one agent-mail channel. This helper never opens a
 message file, never writes to the mailbox and never sends anything, and it reads metadata only, with one exception: the probe (below).
+The one thing it writes is the steward's daily metrics file (below).
 
 POLICY.md holds the steward's thresholds and self-caps as a Markdown table, | key | value | meaning |, with
 one row for each key in POLICY_KEYS. A missing, unknown or repeated key, or a value its key cannot use (a
@@ -37,12 +38,23 @@ records a read of a whole, uncut response as a result read, which withdraws that
 comms ledger when the ledger is on. A member is not a child of the steward, which never launches a session or sets a parent, so no notice of the
 steward's is there to be withdrawn. The helper keeps none of the text.
 
+The metrics file, CONDUCTOR_DIR/metrics/YYYY-MM-DD.json, is the steward's count of one day: a JSON object that the steward adds to as the day goes. The
+metrics command merges what it is given into the file, so that no counter is lost: a whole number keeps the larger of the old and the new, an object is
+merged key by key, and any other value, or one of another kind than the old, is replaced by the new. The helper keeps whatever keys it is given. The new
+file is written whole to a temporary file in metrics/ and moved over the old one, so a reader never sees half of it. A file that is not a JSON object is
+moved aside to YYYY-MM-DD.json.bad, with one notice on stderr, and a fresh one is written.
+
 Commands:
   self-test [SECTION ...]
       Run the built-in checks, each section in a fresh temporary home.
   probe NAME --dir CONDUCTOR_DIR
       Print yes, no or unknown: whether the last response of the member NAME ends with a question. The member's host is read from the
       Members table of the TOPIC.md in CONDUCTOR_DIR. A TOPIC.md that cannot be read is refused: status 2, a reason on stderr, nothing on stdout.
+  metrics --dir CONDUCTOR_DIR [--date YYYY-MM-DD] --set KEY=VALUE [--set KEY=VALUE ...]
+      Merge counters into CONDUCTOR_DIR/metrics/DATE.json, DATE being today's local date unless --date gives one, and print the file's path. A value
+      of at most 12 digits, with a minus sign or none, is stored as a whole number and any other value as text; a key with dots, interventions.nudge,
+      puts its value in an object. A --set with no =, a key that is not lower-case words joined by dots, a key given twice or used both as a value and
+      as the start of another key, a DATE that is not a day, and a CONDUCTOR_DIR that does not exist are refused: exit status 2, a reason on stderr, nothing written.
 """
 
 import argparse
@@ -573,6 +585,128 @@ def probe_command(run, name, directory):
     return 0
 
 
+# ---- metrics ----
+
+DAY_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")  # a day as YYYY-MM-DD, in ASCII digits, so that no file name holds digits of another script
+KEY_RE = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*")  # a key of the metrics file: lower-case identifiers joined by dots
+INT_RE = re.compile(r"-?[0-9]{1,12}")  # a --set value stored as a whole number; int() alone would take digits of other scripts, underscores and a plus sign too
+
+
+def is_day(text):
+    """Whether TEXT is a day that exists, written YYYY-MM-DD in ASCII digits."""
+    if not isinstance(text, str) or DAY_RE.fullmatch(text) is None:
+        return False
+    try:
+        datetime.date(int(text[:4]), int(text[5:7]), int(text[8:]))
+    except ValueError:  # a month 13, a 30th of February, a year 0
+        return False
+    return True
+
+
+def merge_counters(old, new):
+    """OLD merged with NEW, two values read from JSON. Two objects merge key by key, recursively, and a key that only one of them has is kept. Two whole
+    numbers (a bool is not one) give the larger. Any other pair, two values of one kind or of two kinds, gives NEW."""
+    if isinstance(old, dict) and isinstance(new, dict):
+        return {**old, **{key: merge_counters(old[key], value) if key in old else value for key, value in new.items()}}
+    if type(old) is int and type(new) is int:
+        return max(old, new)
+    return new
+
+
+def write_metrics(conductor_dir, day, data):
+    """Merge the dict DATA, JSON values under text keys, into the metrics file of the day DAY, YYYY-MM-DD, which is CONDUCTOR_DIR/metrics/DAY.json, and return
+    its path. merge_counters says how a value is merged, so that a counter once written is never lost. metrics/ is made when it is not there. The new file is
+    written whole to a temporary file in metrics/ and moved over the old one, so that a reader sees the old file or the new one and never half of one. A file
+    that is not a JSON object (not JSON, not UTF-8, nested too deep to read, or JSON of another kind, such as an array) is moved aside to DAY.json.bad, over any
+    older one, with one notice on stderr that names no directory, and a fresh file is written. A DAY that is not a day, a CONDUCTOR_DIR that is not an existing
+    directory and a DATA that is not a dict raise ValueError with a reason that names no path, and nothing is made then; so does a merge nested too deeply to
+    write, which leaves the old file where it is. Any other failure raises OSError and leaves the old file whole. Two writers at one moment may lose an
+    update; the steward writes one at a time."""
+    if not is_day(day):
+        raise ValueError("the day must be a date written YYYY-MM-DD")
+    if not (isinstance(conductor_dir, str) and os.path.isdir(conductor_dir)):
+        raise ValueError("the conductor directory does not exist")
+    if not isinstance(data, dict):
+        raise ValueError("the metrics must be a dict")
+    folder = os.path.join(conductor_dir, "metrics")
+    path = os.path.join(folder, f"{day}.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            old = json.load(f)
+    except FileNotFoundError:
+        old, bad = {}, False
+    except (ValueError, RecursionError):  # not JSON, not UTF-8 (a UnicodeDecodeError is a ValueError), or nested too deep to read
+        old, bad = {}, True
+    else:
+        old, bad = (old, False) if isinstance(old, dict) else ({}, True)
+    try:
+        text = json.dumps(merge_counters(old, data), indent=2, sort_keys=True) + "\n"
+    except RecursionError:  # nested too deeply for json to write indented, which older Pythons cannot do beyond about a thousand levels
+        raise ValueError("the metrics are nested too deeply to write") from None
+    os.makedirs(folder, exist_ok=True)
+    temp = tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=folder, prefix=f".{day}.", suffix=".tmp", delete=False)
+    try:
+        with temp:
+            temp.write(text)
+        if bad:
+            os.replace(path, path + ".bad")
+            print(f"steward-signals: metrics: {day}.json is not a JSON object, so it is moved aside to {day}.json.bad and a fresh file is written", file=sys.stderr)
+        os.replace(temp.name, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temp.name)
+        raise
+    return path
+
+
+def parse_settings(settings):
+    """The dict that SETTINGS, the --set arguments of the metrics command, each KEY=VALUE, describe. A value of at most 12 digits, with a minus sign or none,
+    is an int and any other value is text. A key is lower-case identifiers (letters, digits and underscores, starting with a letter) joined by dots, and
+    a.b puts its value in the object a. Raises ValueError with the reason for an argument with no =, a key that is not of that form, a key given twice and a key
+    that is both a value and the start of another key (a and a.b), since the order of the two would then decide what the steward meant."""
+    data = {}
+    for setting in settings:
+        key, equals, value = setting.partition("=")
+        if not equals:
+            raise ValueError(f"--set {setting!r}: expected KEY=VALUE")
+        if KEY_RE.fullmatch(key) is None:
+            raise ValueError(f"--set {key!r}: a key is lower-case identifiers, letters, digits and underscores that start with a letter, joined by dots")
+        *parents, last = key.split(".")
+        node = data
+        for name in parents:
+            node = node.setdefault(name, {})
+            if not isinstance(node, dict):
+                raise ValueError(f"--set {key!r}: {name} is also given a value, so it cannot be an object")
+        if last in node:
+            raise ValueError(f"--set {key!r}: " + ("it is also the start of another key" if isinstance(node[last], dict) else "it is given twice"))
+        node[last] = int(value) if INT_RE.fullmatch(value) else value
+    return data
+
+
+def refused(reason):
+    """Say on stderr, in one line with no question mark, that the metrics command is refused for REASON, and return the status 2."""
+    print(f"steward-signals: metrics: {reason}".replace("?", ""), file=sys.stderr)
+    return 2
+
+
+def metrics_command(directory, day, settings):
+    """Merge SETTINGS (see parse_settings) into the metrics file of the day DAY, today's local date when DAY is None, in the conductor directory DIRECTORY (see
+    write_metrics), print the file's path and return 0. Anything refused, a reason from parse_settings or write_metrics or an OS error, is one line on stderr with
+    no question mark and the status 2, with nothing on stdout and nothing written; so is a DIRECTORY with a question mark in its name, since the path is printed.
+    An empty DAY is refused, not taken for today."""
+    try:
+        if "?" in directory:
+            raise ValueError("--dir: the directory's name holds a question mark, which the file's path would carry to stdout")
+        data = parse_settings(settings)
+        path = write_metrics(directory, datetime.date.today().isoformat() if day is None else day, data)
+    except ValueError as e:
+        return refused(e)
+    except OSError as e:
+        return refused(f"the metrics file cannot be used: {e.strerror or 'the system gave no reason'}")
+    print(path)
+    return 0
+
+
 # ---- self-test ----
 
 SECTIONS = {}  # name -> function(d), in the order the sections are defined
@@ -627,6 +761,15 @@ def read(path):
     """The text of the UTF-8 file at PATH."""
     with open(path, encoding="utf-8") as f:
         return f.read()
+
+
+ARABIC_INDIC, FULLWIDTH = 0x0660, 0xFF10  # the code points of the zero of two scripts whose digits int() and float() read as the ASCII ones
+
+
+def digits_as(text, zero):
+    """TEXT with each ASCII digit written as the digit of another script, the one whose zero is the code point ZERO. int() and float() accept such
+    digits, so only a pattern can refuse them; they are built here so that the source stays ASCII."""
+    return "".join(chr(zero + int(c)) if c in "0123456789" else c for c in text)
 
 
 STAMP_BASE = datetime.datetime(2026, 11, 2, 20, 0, 0, tzinfo=datetime.timezone.utc)
@@ -1816,7 +1959,8 @@ def test_probe_options(d):
     out, status, err = capture(main, ["probe", "lfm3"])
     ok(out == "" and status == 2 and "required: --dir" in err, "probe: --dir is required, so TOPIC.md is never looked for in a default place")
     top = " ".join(capture(main, ["--help"])[0].split())
-    ok("probe NAME --dir CONDUCTOR_DIR" in top and "status 2" in top.split("probe NAME --dir CONDUCTOR_DIR", 1)[1],
+    entry = top.split("probe NAME --dir CONDUCTOR_DIR", 1)[-1].split("metrics --dir CONDUCTOR_DIR", 1)[0]  # the text of the probe's entry, which the next command's entry follows
+    ok("probe NAME --dir CONDUCTOR_DIR" in top and "status 2" in entry,
        "probe: the command is listed in the top-level help, its entry saying that a TOPIC.md it cannot read is refused")
 
 
@@ -1862,6 +2006,396 @@ def section_probe(d):
     ok(started == [], "probe: no check started the real agent-deck")
 
 
+# ---- self-test section: metrics ----
+
+DAY = "2026-11-03"
+
+
+def conductor_in(d):
+    """The path of a new, empty directory in D, so that no check sees the files of another."""
+    return tempfile.mkdtemp(dir=d)
+
+
+def metrics_file(c, day=DAY):
+    """The path of the metrics file of DAY in the conductor directory C."""
+    return os.path.join(c, "metrics", f"{day}.json")
+
+
+def metrics_of(c, day=DAY):
+    """The JSON object in the metrics file of DAY in the conductor directory C."""
+    return json.loads(read(metrics_file(c, day)))
+
+
+def set_args(c, *pairs, day=DAY):
+    """The arguments of the metrics command for the conductor directory C that give DAY and each of PAIRS, "key=value", as a --set."""
+    return ["metrics", "--dir", c, "--date", day] + [word for pair in pairs for word in ("--set", pair)]
+
+
+def refusal_of(fn, *args):
+    """The message of the ValueError that fn(*args) raises, or None when it raises none."""
+    try:
+        fn(*args)
+    except ValueError as e:
+        return str(e)
+    return None
+
+
+def nothing_made(c):
+    """Whether the directory C holds nothing."""
+    return os.listdir(c) == []
+
+
+@contextlib.contextmanager
+def in_directory(path):
+    """Within the block, the current directory is PATH, so that a name that fell back to it would write there and not in the checkout."""
+    here = os.getcwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(here)
+
+
+@contextlib.contextmanager
+def local_zone(zone):
+    """Within the block, the local time zone of this process is ZONE, a POSIX zone such as UTC-14 (14 hours east of UTC), which needs no tz database."""
+    saved = os.environ.get("TZ")
+    os.environ["TZ"] = zone
+    time.tzset()
+    try:
+        yield
+    finally:
+        if saved is None:
+            del os.environ["TZ"]
+        else:
+            os.environ["TZ"] = saved
+        time.tzset()
+
+
+@contextlib.contextmanager
+def replace_through(hook):
+    """Within the block, os.replace calls HOOK(src, dst) and then, unless HOOK raises, moves the file as it was asked to."""
+    replace = os.replace
+
+    def watched(src, dst, *args, **kwargs):
+        hook(src, dst)
+        return replace(src, dst, *args, **kwargs)
+
+    os.replace = watched
+    try:
+        yield
+    finally:
+        os.replace = replace
+
+
+def test_write_metrics_merges(d):
+    c = conductor_in(d)
+    write_metrics(c, DAY, {"turns": 3, "interventions": {"nudge": 1}})
+    path = write_metrics(c, DAY, {"turns": 4, "interventions": {"overlap": 1}, "last_post": "20261103T0700Z"})
+    m = metrics_of(c)
+    ok(path == metrics_file(c) and m["turns"] == 4 and m["interventions"] == {"nudge": 1, "overlap": 1} and m["last_post"] == "20261103T0700Z",
+       "metrics: merge keeps the larger counter, merges dicts, takes new strings")
+
+
+def test_metrics_subcommand(d):
+    c = conductor_in(d)
+    out, code, err = capture(main, set_args(c, "turns=5", "interventions.nudge=2", "last_post=20261103T0700Z"))
+    m = metrics_of(c)
+    ok(code == 0 and m == {"turns": 5, "interventions": {"nudge": 2}, "last_post": "20261103T0700Z"} and type(m["turns"]) is int, "metrics: --set writes ints, nested keys and strings")
+    ok("?" not in out, "metrics: no question mark")
+    ok(out == metrics_file(c) + "\n" and err == "", "metrics: the command prints the file's path, one line, and says nothing on stderr")
+
+
+def test_metrics_corrupt_file(d):
+    c = conductor_in(d)
+    os.makedirs(os.path.join(c, "metrics"))
+    write(c, f"metrics/{DAY}.json", "{not json")
+    _, _, err = capture(write_metrics, c, DAY, {"turns": 1})
+    path = metrics_file(c)
+    ok(os.path.exists(path + ".bad") and metrics_of(c)["turns"] == 1 and "moved aside" in err, "metrics: a corrupt file is moved aside and a fresh one written, with a notice")
+    out, status, err = capture(main, set_args(c, "turns=2"))
+    ok(status == 0 and out == path + "\n" and err == "" and metrics_of(c) == {"turns": 2}, "metrics: the command merges into the fresh file, with no notice and the path alone on stdout")
+    pathlib.Path(path).write_text("[")
+    out, status, err = capture(main, set_args(c, "turns=3"))
+    ok(status == 0 and out == path + "\n" and err.count("\n") == 1 and "moved aside" in err and "?" not in err and metrics_of(c) == {"turns": 3},
+       "metrics: the command that finds a corrupt file still succeeds, with the path on stdout and one notice on stderr")
+
+
+def test_the_first_write_of_a_day_makes_metrics_and_its_file(d):
+    c = conductor_in(d)
+    data = {"turns": 3, "interventions": {"nudge": 1}}
+    path = write_metrics(c, DAY, data)
+    folder = os.path.join(c, "metrics")
+    ok(path == os.path.join(folder, f"{DAY}.json") and os.listdir(c) == ["metrics"] and os.listdir(folder) == [f"{DAY}.json"],
+       "metrics: the first write makes metrics/ and the day's file, returns its path, and leaves no other file")
+    text = read(path)
+    ok(json.loads(text) == data and text == json.dumps(data, indent=2, sort_keys=True) + "\n", "metrics: the file is one JSON object, indented, its keys in order, with a closing newline")
+    write_metrics(c, "2026-11-04", {"turns": 1})
+    ok(sorted(os.listdir(folder)) == [f"{DAY}.json", "2026-11-04.json"] and metrics_of(c)["turns"] == 3, "metrics: each day has a file of its own")
+
+
+def test_the_merge_rules(d):
+    c = conductor_in(d)
+    # name: (the value in the file, the value merged into it, the value the file holds after)
+    cases = {"int_up": (3, 4, 4), "int_down": (4, 3, 4), "int_same": (3, 3, 3), "int_negative": (-1, -5, -1), "int_from_zero": (0, 7, 7),
+             "text": ("a", "b", "b"), "text_to_empty": ("a", "", ""), "float_down": (1.5, 0.5, 0.5), "float_up": (0.5, 1.5, 1.5),
+             "bool": (True, False, False), "bool_to_int": (True, 0, 0), "int_to_bool": (5, True, True), "null_to_int": (None, 3, 3), "int_to_null": (3, None, None),
+             "list": ([1, 2], [3], [3]), "int_to_text": (3, "x", "x"), "text_to_int": ("x", 3, 3), "int_to_float": (3, 2.5, 2.5), "float_to_int": (2.5, 3, 3),
+             "int_to_object": (3, {"a": 1}, {"a": 1}), "object_to_int": ({"a": 1}, 3, 3), "object_to_list": ({"a": 1}, [1], [1]), "list_to_object": ([1], {"a": 1}, {"a": 1}),
+             "object": ({"a": 1, "b": "x"}, {"b": "y", "c": 2}, {"a": 1, "b": "y", "c": 2})}
+    write_metrics(c, DAY, {name: before for name, (before, _, _) in cases.items()})
+    write_metrics(c, DAY, {name: merged for name, (_, merged, _) in cases.items()})
+    m = metrics_of(c)
+    for name, (before, merged, after) in cases.items():  # compared as JSON text, so that True is not 1 and 3 is not 3.0
+        ok(json.dumps(m[name], sort_keys=True) == json.dumps(after, sort_keys=True), f"metrics: merging {merged!r} into {before!r} leaves {after!r}")
+
+
+def test_objects_merge_at_every_depth(d):
+    c = conductor_in(d)
+    write_metrics(c, DAY, {"a": {"b": {"c": 1, "d": 9}, "e": "x"}, "f": 1})
+    write_metrics(c, DAY, {"a": {"b": {"c": 5, "d": 2, "g": 3}, "h": [1]}, "i": {"j": 1}})
+    ok(metrics_of(c) == {"a": {"b": {"c": 5, "d": 9, "g": 3}, "e": "x", "h": [1]}, "f": 1, "i": {"j": 1}},
+       "metrics: objects merge key by key at every depth: a key in only one is kept, and a counter keeps the larger")
+
+
+def test_write_metrics_refuses_what_it_cannot_use(d):
+    c = conductor_in(d)
+    not_days = ["2026-13-01", "2026-02-30", "2026-02-29", "2026-00-10", "0000-01-01", "2026-1-3", "20261103", "26-11-03", " 2026-11-03", "2026-11-03 ", "2026-11-03\n",
+                "2026/11/03", "", "../2026-11-03", "2026-11-03.json", digits_as(DAY, ARABIC_INDIC), digits_as(DAY, FULLWIDTH), None, 20261103]
+    for day in not_days:
+        reason = refusal_of(write_metrics, c, day, {"turns": 1})
+        ok(bool(reason) and "?" not in reason and c not in reason, f"metrics: {day!r} is not a day, so it is refused, with a reason that names no path")
+    ok(nothing_made(c), "metrics: no day that is refused makes a directory or a file")
+    ok(os.path.basename(write_metrics(c, "2028-02-29", {"turns": 1})) == "2028-02-29.json", "metrics: a day that exists, the 29th of February of a leap year, is accepted")
+    missing = os.path.join(d, "nowhere")
+    c2 = conductor_in(d)
+    for what, where in (("a conductor directory that does not exist", missing), ("one that is a file", write(d, "afile", "")), ("an empty name", ""), ("None", None)):
+        with in_directory(c2):  # a name that fell back to the current directory would write here
+            reason = refusal_of(write_metrics, where, DAY, {"turns": 1})
+        ok(bool(reason) and "?" not in reason and d not in reason, f"metrics: {what} is refused, with a reason that names no path")
+    ok(not os.path.exists(missing) and nothing_made(c2), "metrics: nothing was made for a conductor directory that is refused, not even the one that did not exist")
+    for what, data in (("a list", []), ("None", None), ("a string", "turns"), ("a number", 3), ("a list of pairs", [("turns", 1)])):
+        reason = refusal_of(write_metrics, c2, DAY, data)
+        ok(bool(reason) and "?" not in reason and nothing_made(c2), f"metrics: data that is {what} is refused, and nothing is made")
+
+
+def test_a_file_that_is_not_a_json_object_is_moved_aside(d):
+    cases = {"text that is not JSON": b"{not json", "an empty file": b"", "an object that stops short": b'{"turns": 3, "inter', "an array": b"[1, 2]", "a number": b"3",
+             "null": b"null", "a string": b'"text"', "bytes that are not UTF-8": bytes([0xFF, 0xFE, 0x7B, 0x7D]), "JSON nested too deep to read": b"[" * 1000000,
+             "two objects": b'{"turns": 3} {"turns": 4}'}
+    for what, content in cases.items():
+        c = conductor_in(d)
+        os.makedirs(os.path.join(c, "metrics"))
+        pathlib.Path(metrics_file(c)).write_bytes(content)
+        out, _, err = capture(write_metrics, c, DAY, {"turns": 1})
+        ok(metrics_of(c) == {"turns": 1} and pathlib.Path(metrics_file(c) + ".bad").read_bytes() == content,
+           f"metrics: {what} is moved aside whole to .bad, and the fresh file holds the new data alone")
+        ok(err.count("\n") == 1 and "moved aside" in err and "?" not in err and c not in err and out == "",
+           f"metrics: and that is said once on stderr, in one line with no question mark and no path ({what})")
+    c = conductor_in(d)
+    os.makedirs(os.path.join(c, "metrics"))
+    bad = metrics_file(c) + ".bad"
+    write(c, f"metrics/{DAY}.json.bad", "older")
+    write(c, f"metrics/{DAY}.json", "newer {")
+    capture(write_metrics, c, DAY, {"turns": 1})
+    ok(read(bad) == "newer {", "metrics: an older .bad is overwritten by the file that is moved aside now")
+    _, _, err = capture(write_metrics, c, DAY, {"turns": 2})
+    ok(err == "" and read(bad) == "newer {" and metrics_of(c) == {"turns": 2} and sorted(os.listdir(os.path.join(c, "metrics"))) == [f"{DAY}.json", f"{DAY}.json.bad"],
+       "metrics: a good file is merged in place: no notice, the .bad as it was, and no other file")
+
+
+def test_the_file_is_replaced_whole(d):
+    c = conductor_in(d)
+    folder = os.path.join(c, "metrics")
+    write_metrics(c, DAY, {"turns": 1})
+    moves = []
+
+    def watch(src, dst):
+        moves.append((src, dst, read(src)))  # the text of the new file at the moment it is moved over the old one
+
+    with replace_through(watch):
+        write_metrics(c, DAY, {"turns": 2})
+    ok(len(moves) == 1 and os.path.samefile(os.path.dirname(moves[0][0]), folder) and moves[0][1] == metrics_file(c) and not moves[0][0].endswith(".json"),
+       "metrics: the new file is written in metrics/, under a name no reader takes for a day's file, and moved over the old one")
+    ok(json.loads(moves[0][2]) == {"turns": 2} and read(metrics_file(c)) == moves[0][2], "metrics: it is whole when it is moved, so a reader sees the old file or the new one and never half of one")
+    before = read(metrics_file(c))
+    error = OSError(errno.ENOSPC, "No space left on device")
+
+    def refuse(src, dst):
+        raise error
+
+    with replace_through(refuse):
+        ok(raises(OSError, write_metrics, c, DAY, {"turns": 9}) is error, "metrics: a file that cannot be moved into place is an error, not a silent loss")
+    ok(read(metrics_file(c)) == before and os.listdir(folder) == [f"{DAY}.json"], "metrics: and the old file is whole and no temporary file is left behind")
+
+
+def test_set_values_are_whole_numbers_or_text(d):
+    cases = {"0": 0, "5": 5, "-3": -3, "-0": 0, "007": 7, "999999999999": 999999999999, "-999999999999": -999999999999,
+             "1000000000000": "1000000000000", "+5": "+5", "1.5": "1.5", "1_000": "1_000", " 5": " 5", "5 ": "5 ", "5\n": "5\n", "0x10": "0x10", "1e3": "1e3", "five": "five",
+             "": "", "-": "-", "a=b": "a=b", digits_as("45", ARABIC_INDIC): digits_as("45", ARABIC_INDIC), digits_as("45", FULLWIDTH): digits_as("45", FULLWIDTH)}
+    for value, want in cases.items():
+        c = conductor_in(d)
+        out, status, err = capture(main, set_args(c, f"turns={value}"))
+        ok(status == 0 and json.dumps(metrics_of(c)["turns"]) == json.dumps(want), f"metrics: --set turns={value!r} is stored as {want!r}")
+
+
+def test_set_keys_are_dotted_lower_case_identifiers(d):
+    def under(m, key):
+        for part in key.split("."):
+            m = m[part]
+        return m
+
+    for key in ("turns", "a", "last_post", "interventions.nudge", "a.b.c.d", "p50", "notice_delay.p50", "x_1", "a_.b_"):
+        c = conductor_in(d)
+        out, status, err = capture(main, set_args(c, f"{key}=1"))
+        ok(status == 0 and under(metrics_of(c), key) == 1, f"metrics: {key!r} is a key")
+    for key in ("Turns", "tURNS", "1turns", "_turns", "a-b", "a b", "a..b", ".a", "a.", "a.1b", "a._b", "", ".", "a.B", "a/b", "a\n", " a", "turns ",
+                digits_as("a1", ARABIC_INDIC), digits_as("a1", FULLWIDTH)):
+        c = conductor_in(d)
+        out, status, err = capture(main, set_args(c, f"{key}=1"))
+        ok(status == 2 and out == "" and err.count("\n") == 1 and "?" not in err and nothing_made(c), f"metrics: {key!r} is not a key, so it is refused and nothing is written")
+
+
+def test_dotted_keys_nest(d):
+    c = conductor_in(d)
+    capture(main, set_args(c, "interventions.nudge=2", "interventions.overlap=1", "notice_delay.p50=12", "notice_delay.max=95", "a.b.c.d=1", "turns=4"))
+    ok(metrics_of(c) == {"interventions": {"nudge": 2, "overlap": 1}, "notice_delay": {"p50": 12, "max": 95}, "a": {"b": {"c": {"d": 1}}}, "turns": 4},
+       "metrics: a dotted key puts its value in an object, and keys that start alike share it")
+
+
+def test_a_key_given_twice_or_used_two_ways_is_refused(d):
+    cases = (("a key given twice", ("turns=1", "turns=2")), ("a key given twice with one value", ("turns=1", "turns=1")), ("a value, then a key below it", ("a=1", "a.b=2")),
+             ("a key below it, then the value", ("a.b=2", "a=1")), ("a key two levels below a value", ("a=1", "a.b.c=2")), ("a key below a key below it", ("a.b.c=2", "a.b=1")),
+             ("a nested key given twice", ("a.b=1", "a.b=2")))
+    for what, pairs in cases:
+        c = conductor_in(d)
+        out, status, err = capture(main, set_args(c, *pairs))
+        ok(status == 2 and out == "" and err.count("\n") == 1 and "?" not in err and nothing_made(c), f"metrics: {what} is refused, and nothing is written")
+
+
+def test_metrics_refuses_what_it_cannot_carry_out(d):
+    c = conductor_in(d)
+    missing = os.path.join(d, "nowhere?")  # a name with a question mark, which no message may carry
+    question = os.path.join(d, "what?")  # a directory that exists, whose path the command would print
+    os.mkdir(question)
+    cases = (("a --set with no =", set_args(c, "turns")), ("a --set with no = and a question mark", set_args(c, "turns?")), ("a key with a question mark", set_args(c, "tur?ns=1")),
+             ("a date that is not a day", set_args(c, "turns=1", day="2026-13-01")), ("a date in words", set_args(c, "turns=1", day="tomorrow")),
+             ("a date of one-digit parts", set_args(c, "turns=1", day="2026-11-3")), ("an empty date", set_args(c, "turns=1", day="")),
+             ("a conductor directory that does not exist", set_args(missing, "turns=1")), ("a conductor directory that is a file", set_args(write(d, "afile", ""), "turns=1")),
+             ("an empty conductor directory name", set_args("", "turns=1")), ("a conductor directory with a question mark in its name", set_args(question, "turns=1")))
+    for what, argv in cases:
+        with in_directory(c):
+            out, status, err = capture(main, argv)
+        ok(status == 2 and out == "" and err.count("\n") == 1 and err.startswith("steward-signals: metrics: ") and "?" not in err,
+           f"metrics: {what} is refused: status 2, one line on stderr with no question mark, nothing on stdout")
+    ok(nothing_made(c) and os.listdir(question) == [], "metrics: and nothing was written for any of them")
+
+
+def test_runs_add_up_the_day(d):
+    c = conductor_in(d)
+    capture(main, set_args(c, "turns=5", "interventions.nudge=2"))
+    out, status, err = capture(main, set_args(c, "turns=3", "interventions.overlap=1", "last_post=x"))
+    ok(status == 0 and metrics_of(c) == {"turns": 5, "interventions": {"nudge": 2, "overlap": 1}, "last_post": "x"}, "metrics: a second run merges into the first, and the larger counter stays")
+    capture(main, set_args(c, "turns=1", day="2026-11-04"))
+    ok(metrics_of(c)["turns"] == 5 and metrics_of(c, "2026-11-04") == {"turns": 1}, "metrics: another day's run goes to another file")
+
+
+def test_the_day_defaults_to_the_local_date(d):
+    days = {}
+    for zone in ("UTC-14", "UTC+11"):  # 25 hours apart, so that their dates differ at any time and the date in UTC cannot be the local date of both
+        with local_zone(zone):
+            c = conductor_in(d)
+            before = datetime.date.today().isoformat()
+            out, status, err = capture(main, ["metrics", "--dir", c, "--set", "turns=1"])
+            after = datetime.date.today().isoformat()  # the run may straddle midnight
+            days[zone] = before
+            ok(status == 0 and out in (metrics_file(c, before) + "\n", metrics_file(c, after) + "\n") and err == "", f"metrics: --date is the local date when it is not given (zone {zone})")
+    ok(days["UTC-14"] != days["UTC+11"], "metrics: the two zones are on different dates, so a day taken from UTC would fail one of the checks above")
+
+
+def test_a_merge_too_deep_for_json_to_write_is_refused(d):
+    c = conductor_in(d)
+    write_metrics(c, DAY, {"turns": 1})
+    folder, before = os.path.join(c, "metrics"), read(metrics_file(c))
+    dumps = json.dumps
+
+    def overflow(*args, **kwargs):  # what json.dumps does with an object nested more deeply than this Python can write indented
+        raise RecursionError("maximum recursion depth exceeded")
+
+    json.dumps = overflow
+    try:
+        reason = refusal_of(write_metrics, c, DAY, {"turns": 2})
+        out, status, err = capture(main, set_args(c, "turns=2"))
+    finally:
+        json.dumps = dumps
+    ok(bool(reason) and "?" not in reason and read(metrics_file(c)) == before and os.listdir(folder) == [f"{DAY}.json"],
+       "metrics: a merge that json cannot write is refused with a reason, and the old file is left whole with no temporary file")
+    ok(out == "" and status == 2 and err.count("\n") == 1 and "?" not in err and "Traceback" not in err, "metrics: the command refuses it: status 2, one line on stderr, nothing on stdout")
+
+
+def test_a_file_the_system_refuses_is_an_error_not_a_loss(d):
+    c = conductor_in(d)
+    write(c, "metrics", "a file where the directory should be")
+    ok(isinstance(raises(OSError, write_metrics, c, DAY, {"turns": 1}), OSError), "metrics: a metrics that is a file is an OSError, not a ValueError and not a silent loss")
+    ok(capture(main, set_args(c, "turns=1")) == ("", 2, f"steward-signals: metrics: the metrics file cannot be used: {os.strerror(errno.ENOTDIR)}\n"),
+       "metrics: the command refuses it with the system's reason, no path, and nothing on stdout")
+    ok(read(os.path.join(c, "metrics")) == "a file where the directory should be", "metrics: and leaves it as it was")
+    c = conductor_in(d)
+    os.makedirs(metrics_file(c))  # a directory where the day's file should be
+    ok(capture(main, set_args(c, "turns=1")) == ("", 2, f"steward-signals: metrics: the metrics file cannot be used: {os.strerror(errno.EISDIR)}\n") and os.path.isdir(metrics_file(c)),
+       "metrics: a day's file that is a directory is refused the same way, and left as it was")
+    c = conductor_in(d)
+    write_metrics(c, DAY, {"turns": 1})
+    folder, before = os.path.join(c, "metrics"), read(metrics_file(c))
+    os.chmod(folder, 0o555)
+    try:
+        try:
+            tempfile.TemporaryFile(dir=folder).close()  # made and removed at once when the mode is not enforced, as for root
+            enforced = False
+        except PermissionError:
+            enforced = True
+        if enforced:
+            ok(isinstance(raises(PermissionError, write_metrics, c, DAY, {"turns": 2}), PermissionError) and read(metrics_file(c)) == before and os.listdir(folder) == [f"{DAY}.json"],
+               "metrics: a metrics/ that cannot be written to is a PermissionError, with the old file whole and no temporary file")
+            ok(capture(main, set_args(c, "turns=2")) == ("", 2, f"steward-signals: metrics: the metrics file cannot be used: {os.strerror(errno.EACCES)}\n"),
+               "metrics: the command refuses it with the system's reason")
+    finally:
+        os.chmod(folder, 0o755)
+
+
+def test_metrics_options(d):
+    out, status, err = capture(main, ["metrics", "--help"])
+    ok(status == 0 and all(flag in out for flag in ("--dir", "--date", "--set")) and "?" not in out + err, "metrics: its help names --dir, --date and --set, and holds no question mark")
+    top = capture(main, ["--help"])[0]
+    ok("metrics --dir CONDUCTOR_DIR" in " ".join(top.split()) and "?" not in top, "metrics: the command is listed in the top-level help, which holds no question mark")
+    for argv, flag in ((["metrics", "--set", "turns=1"], "--dir"), (["metrics", "--dir", d], "--set")):
+        out, status, err = capture(main, argv)
+        ok(out == "" and status == 2 and f"required: {flag}" in err and "?" not in err, f"metrics: {flag} is required, so no file is merged into a default place or from an empty set")
+
+
+@section("metrics")
+def section_metrics(d):
+    test_write_metrics_merges(d)
+    test_metrics_subcommand(d)
+    test_metrics_corrupt_file(d)
+    test_the_first_write_of_a_day_makes_metrics_and_its_file(d)
+    test_the_merge_rules(d)
+    test_objects_merge_at_every_depth(d)
+    test_write_metrics_refuses_what_it_cannot_use(d)
+    test_a_file_that_is_not_a_json_object_is_moved_aside(d)
+    test_the_file_is_replaced_whole(d)
+    test_set_values_are_whole_numbers_or_text(d)
+    test_set_keys_are_dotted_lower_case_identifiers(d)
+    test_dotted_keys_nest(d)
+    test_a_key_given_twice_or_used_two_ways_is_refused(d)
+    test_metrics_refuses_what_it_cannot_carry_out(d)
+    test_runs_add_up_the_day(d)
+    test_the_day_defaults_to_the_local_date(d)
+    test_a_merge_too_deep_for_json_to_write_is_refused(d)
+    test_a_file_the_system_refuses_is_an_error_not_a_loss(d)
+    test_metrics_options(d)
+
+
 # ---- main ----
 
 def build_parser():
@@ -1879,6 +2413,16 @@ def build_parser():
     pr.add_argument("name", metavar="NAME")
     pr.add_argument("--dir", required=True, metavar="CONDUCTOR_DIR", help="the conductor directory, which holds TOPIC.md")
     pr.add_argument("--run-fixture", metavar="FILE", help=argparse.SUPPRESS)  # for the self-test: a JSON object of the answers that fake_run gives
+    me = sub.add_parser("metrics", help="merge counters into the day's metrics file",
+                        description="Merge counters into the metrics file of a day, CONDUCTOR_DIR/metrics/DATE.json, and print its path. Each --set is KEY=VALUE: "
+                                    "a value of at most 12 digits, with a minus sign or none, is stored as a whole number and any other value as text, and a key "
+                                    "with dots, interventions.nudge, puts its value in an object. A whole number keeps the larger of the old and the new, an "
+                                    "object is merged key by key, and any other value is replaced. A --set with no =, a key that is not lower-case words joined "
+                                    "by dots, a key given twice or used both as a value and as the start of another key, a DATE that is not a day, and a "
+                                    "CONDUCTOR_DIR that does not exist are refused: exit status 2, a reason on stderr, nothing written.")
+    me.add_argument("--dir", required=True, metavar="CONDUCTOR_DIR", help="the conductor directory, which must exist; the file goes in its metrics/")
+    me.add_argument("--date", metavar="YYYY-MM-DD", help="the day of the file; today's local date when it is not given")
+    me.add_argument("--set", dest="settings", action="append", required=True, metavar="KEY=VALUE", help="a counter or a text to merge in; repeat the option for each key, and give at least one")
     return p
 
 
@@ -1888,6 +2432,8 @@ def main(argv):
         return self_test(a.sections)
     if a.cmd == "probe":
         return probe_command(runner_for(a.run_fixture), a.name, a.dir)
+    if a.cmd == "metrics":
+        return metrics_command(a.dir, a.date, a.settings)
 
 
 if __name__ == "__main__":
