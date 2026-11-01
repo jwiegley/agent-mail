@@ -4,7 +4,7 @@ Frozen plan: `docs/superpowers/plans/2026-10-31-agent-mail-stewards.md` (approve
 
 ## Refocus checkpoint
 
-- Last check: 2026-11-01 12:27 PST. Goal unchanged. Tasks 1 to 9 complete and audited (Task 9's round of five commits closed every review and audit finding; one ruling reversed on agent-mail's code: the forged-DISPUTE branch removed as dead text); the branch is current on main fbe7949; Tasks 10 to 12 pending. No scope creep. Next deadline: 2026-11-01 13:27 PST. Next step: commit this file, dispatch Task 10 (opus; the scanner patch in a scratch copy under /Users/johnw/Products/steward-patch-scratch/ with John's venv), then its review and fess audit in parallel; Task 11, Task 12, the final review.
+- Last check: 2026-11-01 15:26 PST. Goal unchanged. Tasks 1 to 9 complete and audited; Task 10 committed (5babf37), reviewed (Needs fixes: one spec fixture the plan omitted, five minors) and audited (no blocker), its fix round committed (f88c3cd) and under scoped re-review; main moved to 8723960 (docs only), so a restack is due at Task 10's close; Tasks 11 and 12 pending. No scope creep (a misaddressed mail from the nix session was answered and resolved without work). Next deadline: 2026-11-01 16:26 PST. Next step: the re-review's verdict, close Task 10, commit this file, restack onto 8723960, dispatch Task 11 (reusing /Users/johnw/Products/steward-patch-scratch/, whose monitor_sessions.py is the round-1 patched copy), then Task 12 with the accumulated runbook carries, the final review.
 
 ## Definition of Done (frozen)
 
@@ -27,7 +27,7 @@ Frozen plan: `docs/superpowers/plans/2026-10-31-agent-mail-stewards.md` (approve
 | 7 CLAUDE.md and docs check | complete | 982281c, 4d0f4c6, 23c0165, fdeb564, ac4ccc1 | Needs fixes (2 Important, 10 Minor), then round 1 all 18 addressed; 4 minors and 1 unpinned-command observation carried to Task 8 | claims verified on f21c3e1..4d0f4c6; its Important (the SENT.log exemption) closed by 23c0165; its blind-spot pins landed in the round, which the re-review covers |
 | 8 SHARED.md, HEARTBEAT_RULES.md | complete | 26a00c7 (Task 7's carries), a89e677 | Approved (5 minors carried to Task 9) | no blocker; 4 Minor (3 carried to Task 9, 1 accepted), 5 nits noted for the final review |
 | 9 WORKER.md | complete | 6d942df (Task 8's carries), 23bf16c, then the round: cab4f13, 6fba08e, cad1072, 9757020, e1e2a09 | Needs fixes (2 Important, 10 Minor), then round 1 all addressed; 2 comment minors carried to Task 12 or the final wave | no blocker on 89fd4bb..23bf16c (its Medium fixed in the round); the fix commits are covered by the re-review |
-| 10 scanner patch | | | | |
+| 10 scanner patch | complete | 5babf37, f88c3cd | Needs fixes (1 Important: a spec fixture the plan omitted; 5 minors), then round 1 all addressed; 3 minors and one README fix carried to Task 11 | no blocker; its Medium (the same fixtures) fixed in the round; the fix commit is covered by the re-review |
 | 11 bridge patch | | | | |
 | 12 README, runbook, pointer | | | | |
 
@@ -39,7 +39,8 @@ Frozen plan: `docs/superpowers/plans/2026-10-31-agent-mail-stewards.md` (approve
 
 ## Attempt counts (reset when the gate passes)
 
-- None open (Task 9's review gate passed at round 1).
+- Task 10 implementer stall: attempt 1 (impl-task-10, opus) went silent after its GREEN runs at 12:47 PST and was stopped at 13:38; attempt 2 (impl-task-10b, opus) finished from its draft at 13:59 (5babf37). Resolved.
+- None open (Task 10's review gate passed at round 1).
 
 ## Independence probe
 
@@ -60,9 +61,20 @@ Frozen plan: `docs/superpowers/plans/2026-10-31-agent-mail-stewards.md` (approve
 
 - Decision 20 (14:5x PDT): no steward cost measurement at all ("I don't care about steward costs. Drop this feature and functionality entirely."): Task 1 has 19 policy keys, Task 5 is the metrics file alone, the design's 6.10, 6.13 and section 11 are amended.
 - From mail-dev (22:00 UTC): the three channels exist since 14:59 PDT under John's decision 36 in that session; agent-mail main carries a LICENSE (c8b7707f); the program is unchanged since b2b912c.
+- From nix (2026-11-01 15:18 PST, asserted): John's Q16 in nix's pane assigns "the mailbox rollout's leftovers" (the work/syncthing-mailbox branches, worktrees and a clone; archive first) to "mail-conductor" for retirement once three nix sessions are done with them. Not acted on here: destructive, outside this plan, unauthorizable by mail, and the rollout is mail-dev's; nix was told so by mail and confirmed at 15:20 PST that the note was misaddressed and the retirement is mail-dev's alone. Resolved; nothing for John to decide.
+
+## Revisit after real use (John said he would revisit decisions once the system has run in earnest)
+
+- A STATUS line out of form (a missing `tick=` or `open=`, a `last-post=` that is no stamp) is silent to the director's scanner, and nothing checks the line on the writer's side: have the helper write or check it, or have the scanner page a malformed STATUS older than two ticks under a second pinned text (Task 10's review, concern 4).
+- A drop relay needs no checks, so one forged drop can close a worker's question line and force a fail-closed DISPUTE on the genuine answer; a drop could carry the checks minus the option match (Task 9's re-review).
+- A decoy flood of more than 40 unmatched files in the steward's name suppresses per-file DISPUTEs behind one question to John (Task 7's re-review).
+- The NOTE reminder of spec 6.12 is once per topic, in the first summary whose count is above zero, because the census gives a count and not the senders; a census change would allow one direct reminder per sender (Task 7's ruling).
+- Unclaimed direct mail is pruned after 14 days (agent-mail 2.1.0), so a NUDGE that old vanishes unread and `nudges_unread` never shows an older age; the time classes escalate long before (mail-dev's note of 2026-11-01).
+- The quadratic-listing mutant is parked for the final whole-branch review (a candidate pin counts scandir calls).
+- A steward's unreadable STATUS or TOPIC.md is recorded in the scanner's shared error list, so while it lasts the fleet scan counts as incomplete (the attention indicator holds and the Discord Q&A expiry pauses), as every live pass already does for the clio error; a separate result key would keep steward errors off the fleet-level behaviour (Task 10's re-review).
 
 ## How to resume
 
-1. Re-read the wiggum and refocus skills, the frozen plan, the spec's section 11, this file and the SDD ledger; refocus; check the watcher and the live tree's HEAD. The live agent-mail checkout was last verified at fbe7949, agent-mail 2.1.0 (2026-11-01 09:42 PST, 456 checks); rerun its self-test whenever its HEAD moves. Mailbox after a restart: hera now has agent-mail 2.0.0 and its MCP server (mail-dev's note of 23:27 PDT), so join with `/wiggum join the mailbox as mail-conductor` (the `channels` tool for the binding, `receive` with `me`, the doorbell watch) instead of the old /setup-mailbox procedure; until then the CLI watcher stays.
+1. Re-read the wiggum and refocus skills, the frozen plan, the spec's section 11, this file and the SDD ledger; refocus; check the watcher and the live tree's HEAD. The live agent-mail checkout was last verified at 8723960, agent-mail 2.1.0 (2026-11-01 15:20 PST, 456 checks); rerun its self-test whenever its HEAD moves. Mailbox after a restart: hera now has agent-mail 2.0.0 and its MCP server (mail-dev's note of 23:27 PDT), so join with `/wiggum join the mailbox as mail-conductor` (the `channels` tool for the binding, `receive` with `me`, the doorbell watch) instead of the old /setup-mailbox procedure; until then the CLI watcher stays.
 2. Baseline: `python3 -I ./agent-mail self-test` and, once Task 1 exists, `python3 -I steward/steward-signals self-test`; `git log --oneline main..HEAD`.
 3. Resume the SDD loop at the first task without a `complete` line in the ledger (a task whose last line is a fix round resumes at the next round). Dispatch the fess audit for any completed task whose row above has no fess entry.
