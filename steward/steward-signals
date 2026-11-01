@@ -4223,22 +4223,27 @@ def test_claude_md_quotes_the_exact_copy(d):
        "docs: CLAUDE.md says in the summary's own sentence that its body is at most 400 bytes with no question mark, as the plan's exact copy has it")
 
 
-def governed_namings(text, command):
-    """The namings of COMMAND in TEXT that a never run or a never use governs: each ends a list of backticked commands that "never run" or "never use" opens, so
-    that a never in another clause of the sentence ("When a member never answers, run ...") forbids nothing."""
-    return re.findall(rf"\bnever (?:run|use) (?:`[^`\n]*`(?:, or |, and |, | or | and ))*`{re.escape(command)}(?: [^`\n]*)?`", text, re.I)
+# What may follow never in front of a naming of /send in SHARED.md and HEARTBEAT_RULES.md: forward, relay or type it (forward takes an article, "never forward a
+# `/send ...` line"), or run or use it.
+SEND_VERBS = r"(?:forward|relay|type)(?: (?:a|an|each|every|any|the))?|run|use"
+
+
+def governed_namings(text, command, verbs="run|use"):
+    """The namings of COMMAND in TEXT that a never governs: each ends a list of backticked commands that "never" and one of VERBS (a pattern, "run|use" unless
+    given) opens, so that a never in another clause of the sentence ("When a member never answers, run ...") forbids nothing."""
+    return re.findall(rf"\bnever (?:{verbs}) (?:`[^`\n]*`(?:, or |, and |, | or | and ))*`{re.escape(command)}(?: [^`\n]*)?`", text, re.I)
 
 
 def test_claude_md_names_the_forbidden_commands_only_in_never_sentences(d):
     t = claude_md()
     for command in NEVER_COMMANDS:
-        said = re.search(rf"never[^.\n]*{re.escape(command)}", t, re.I)
+        # A never that belongs to another clause of the line ("When a member never answers, run ...") forbids nothing, so a naming counts only when it ends a list of
+        # commands that a never run or never use opens, which governed_namings tells whatever dots a name holds (notify_discord.py): said is those namings, and
+        # there must be one.
+        said = governed_namings(t, command)
         stray = re.search(rf"^(?!.*never).*{re.escape(command)}", t, re.M | re.I)
         ok(said and not stray, f"docs: CLAUDE.md names {command} in a sentence that says never, and on no line that does not say it")
-        # A never that belongs to another clause of the line ("When a member never answers, run ...") forbids nothing, so each naming of the command must end a
-        # list of commands that a never run or never use opens.
-        governed = governed_namings(t, command)
-        ok(len(governed) == len(re.findall(re.escape(command), t, re.I)),
+        ok(len(said) == len(re.findall(re.escape(command), t, re.I)),
            f"docs: each time CLAUDE.md names {command}, a never run or never use governs it, not a never in another clause of the sentence")
 
 
@@ -4254,15 +4259,23 @@ def test_claude_md_precedence_names_the_shared_parts(d):
         ok(part in precedence, f"docs: CLAUDE.md's precedence section names {part} among the parts of the shared conductor text that do not apply")
 
 
-# What CLAUDE.md says, after spec 6.5, 6.6 and 6.12, of a file in the steward's name that the helper cannot match to SENT.log: it is disputed, whatever its stamp,
-# or, in a flood, goes to John as one question with protected relays suspended, and the one wait is on a fresh context. These are the only sentences that may say
-# whether such a file is disputed, skipped or exempt, and each is pinned whole, so that no clause can be added to one of them.
+# What CLAUDE.md says, after spec 6.5, 6.6 and 6.12, of a file in the steward's name that the helper cannot match to SENT.log: it is disputed, whatever its stamp
+# or age, or, in a flood, goes to John as one question with protected relays suspended; the one wait is on a fresh context; and a file that is itself a DISPUTE gets
+# no DISPUTE post, since spec 6.5 says never to dispute a DISPUTE, but is named in the digest and suspends relays like any forged file. Each sentence is pinned
+# whole and in the order it stands, so that no clause can be added to one of them; the check says which other sentences it can see.
 FORGED_CHECK_SENTENCES = (
     "Every file in your name that the helper lists as `unmatched-own` is disputed, or goes to John as one question when the exceptions end with `and N more`, "
-    "whatever its stamp or age and with no exception.",
+    "whatever its stamp or age.",
     "`and N more` means more than 40 files in your name are unaccounted for, more than your self-caps let you dispute: dispute none of them one by one, open the "
     "flood question, one question for John whose detail gives the count, and suspend protected relays as for any forged file until John answers it (section 10).",
-    "The one wait is on a fresh context: never dispute a file in your name before the census has matched your open intents (section 13).")
+    "The one wait is on a fresh context: never dispute a file in your name before the census has matched your open intents (section 13).",
+    "A file in your name that you did not send and that is a DISPUTE is named in the next digest and suspends protected relays like any forged file, but gets no "
+    "DISPUTE post, since a DISPUTE is never disputed.")
+# The Forged row of section 6's table, whole. Its Fires-when cell says which files the check takes, which is where a clause that exempts some of them would go,
+# and its Action cell says what is done for each.
+FORGED_ROW = ("| Forged steward post or mail | the helper lists a file in your name as `unmatched-own`: no `sent` line names it, and no intent still without its `sent` "
+              "line names its recipient within 10 seconds of its stamp | post `DISPUTE <id>: not sent by me`, mail the addressee of a direct mail the same, suspend "
+              "protected relays (section 10), and open one question line for John, at most one such page a day; never answer a DISPUTE with a DISPUTE |")
 
 
 def test_claude_md_keeps_every_file_under_the_forged_check(d):
@@ -4272,12 +4285,18 @@ def test_claude_md_keeps_every_file_under_the_forged_check(d):
     ok("first line of `SENT.log`" not in t and "`SENT.log`'s first line" not in t and exempting == [],
        f"docs: CLAUDE.md exempts no file in the steward's name from the forged check for a stamp before SENT.log began, which its writer chooses (got {without_question_marks(repr(exempting))})")
     # The phrases above name the exemption that was refused. Other wordings of it (older than the log, stamped before the first send) pass a check on phrases, so
-    # the sentences that say whether a file in the steward's name is disputed, skipped or exempt are pinned whole, three and no others.
+    # each sentence that names a file in the steward's name ("file" or "files", "in your name" or "of yours", in any case, or `unmatched-own`) and says disputed,
+    # exempt, skipped or ignored (those verbs in any form; the post's name DISPUTE is none) is pinned whole, and the four in FORGED_CHECK_SENTENCES are all there may
+    # be. A sentence that names such a file in other words ("your files", "a file you sent") or says it with another verb is not selected, which this pin cannot
+    # rule out: review reads for those.
     deciding = [s for s in sentences(t) if re.search(r"\b[Dd]isput(?:e|es|ed|ing)\b|\b[Ee]xempt|\b[Ss]kip|\b[Ii]gnor", s)
-                and re.search(r"\bfiles? (?:in your name|of yours)\b|`unmatched-own`", s)]
+                and re.search(r"\bfiles? (?:in your name|of yours)\b|`unmatched-own`", s, re.I)]
     ok(tuple(deciding) == FORGED_CHECK_SENTENCES,
-       "docs: CLAUDE.md says in three sentences only, each as pinned, whether a file in the steward's name is disputed, skipped or exempt: the rule, with no exception, "
-       f"the flood case, and the wait on a fresh context (got {without_question_marks(repr(deciding))})")
+       "docs: CLAUDE.md says in four sentences only, each as pinned, whether a file in the steward's name is disputed, skipped or exempt: the rule, the flood case, "
+       f"the wait on a fresh context and the file that is itself a DISPUTE (got {without_question_marks(repr(deciding))})")
+    rows = [line for line in t.splitlines() if line.startswith("| Forged steward post or mail |")]
+    ok(rows == [FORGED_ROW],
+       f"docs: CLAUDE.md's Forged steward post or mail row is as pinned, so that no clause exempts a file from the check in its Fires-when cell (got {without_question_marks(repr(rows))})")
     suspended = [s for s in sentences(claude_section(t, 10)) if s.startswith("**Suspended relays.**")]
     ok(len(suspended) == 1 and "until John has read the DISPUTE, or has answered the flood question of section 6, and decided" in suspended[0],
        "docs: protected relays stay suspended until John has read the DISPUTE or answered the flood question, and decided")
@@ -4373,7 +4392,38 @@ def test_shared_and_heartbeat(d):
     ok(len(s) < 1500 and len(h) < 800, "docs: both files short")
 
 
-def test_shared_and_heartbeat_say_only_what_spec_6_4_lists(d):
+# What SHARED.md and HEARTBEAT_RULES.md say, sentence for sentence, which is all that spec 6.4 and 7.1 give them: the shared file defers, grants nothing and forbids
+# four things; the heartbeat file runs the turn of CLAUDE.md section 4, prints the status line and refuses agent-deck's STATUS form. A check on words cannot see an
+# exception tacked onto a prohibition, a new sentence that grants or adds in other words, or a prohibition turned round while another never is left in the file, so
+# each file is pinned whole.
+SHARED_SENTENCES = (
+    "# Shared conductor instructions",
+    "A conductor's own CLAUDE.md governs, and this file defers to it in everything.",
+    "This file grants nothing: it adds no permission and no behaviour.",
+    "- Never auto-respond to a waiting session.",
+    "- Never forward a `/send <session> <message>` line, and never run `agent-deck session send`.",
+    "- Never restart or launch a session.",
+    "- Keep no `state.json` or `task-log.md` of agent-deck's shape.")
+HEARTBEAT_SENTENCES = (
+    "# Heartbeat rules",
+    "A heartbeat is a turn like any other: run the turn in CLAUDE.md section 4 and end as its step 7 says.",
+    "Print the status line and nothing else unless a check fires or a question is open, and then only what step 7 names.",
+    "Never answer in agent-deck's `[STATUS]` or `NEED:` form.")
+
+
+def test_shared_and_heartbeat_hold_exactly_their_pinned_sentences(d):
+    for name, pinned in (("SHARED.md", SHARED_SENTENCES), ("HEARTBEAT_RULES.md", HEARTBEAT_SENTENCES)):
+        text = read(os.path.join(REPO, "steward", name))
+        found, blocks = tuple(sentences(text)), [part for fenced, part in fenced_parts(text) if fenced]
+        ok(found == pinned and blocks == [],
+           f"docs: {name} holds exactly its pinned sentences in order and no fenced code block, which a read of its sentences would skip "
+           f"(got {without_question_marks(repr(found))}, and {len(blocks)} fenced blocks)")
+
+
+# What the two files forbid and that they grant nothing, read by words: a question mark, a word that grants a permission, the four prohibitions, the heartbeat's rule
+# and the commands that a never must govern. It cannot see an exception tacked onto a prohibition or a sentence that grants in other words: the pin above holds the
+# text whole for that.
+def test_shared_and_heartbeat_forbid_what_spec_6_4_lists_and_grant_nothing(d):
     s = read(os.path.join(REPO, "steward", "SHARED.md")); h = read(os.path.join(REPO, "steward", "HEARTBEAT_RULES.md"))
     ok("?" not in s and "?" not in h, "docs: neither SHARED.md nor HEARTBEAT_RULES.md holds a question mark")
     ok("grants nothing" in s and not re.search(r"\b(?:may|can|allowed|permitted|must|should)\b", s, re.I),
@@ -4391,6 +4441,8 @@ def test_shared_and_heartbeat_say_only_what_spec_6_4_lists(d):
            f"docs: {name} names /send and the commands the steward never runs only in sentences that open with never (got {without_question_marks(repr(named))})")
         loose = [command for command in NEVER_COMMANDS if len(governed_namings(text, command)) != len(re.findall(re.escape(command), text, re.I))]
         ok(loose == [], f"docs: each time {name} names a command the steward never runs, a never run or never use governs it (got {loose})")
+        ok(len(governed_namings(text, "/send", SEND_VERBS)) == len(re.findall(re.escape("/send"), text, re.I)),
+           f"docs: each time {name} names /send, a never forward, relay or type, or a never run or never use, governs it, not a never in another clause of the sentence")
 
 
 # The check functions that read the instruction files in a checkout, which section docs runs on this one and docs_checks runs on any. Under docs_checks a
@@ -4402,7 +4454,7 @@ DOCS_CHECKS = (test_claude_md, test_claude_md_headings_are_in_order, test_claude
                test_claude_md_counts_a_reset_only_for_a_fresh_context, test_claude_md_keeps_its_state_unambiguous, test_claude_md_names_its_system_tools_by_path,
                test_claude_md_keeps_the_never_rules_of_spec_7_1, test_claude_md_prints_no_question_mark_in_its_templates, test_claude_md_routes_requests_and_marks_joins,
                test_claude_md_reminds_of_notes_once, test_claude_md_follows_the_worked_example_and_its_keys, test_shared_and_heartbeat,
-               test_shared_and_heartbeat_say_only_what_spec_6_4_lists)
+               test_shared_and_heartbeat_forbid_what_spec_6_4_lists_and_grant_nothing, test_shared_and_heartbeat_hold_exactly_their_pinned_sentences)
 
 
 def test_strip_code_and_template(d):
@@ -4437,7 +4489,8 @@ def test_the_docs_readers(d):
 
 def test_docs_checks_catch_each_pinned_regression(d):
     good = claude_md()
-    three_sentences = "docs: CLAUDE.md says in three sentences only, each as pinned, whether a file in the steward's name is disputed"
+    pinned_sentences = "docs: CLAUDE.md says in four sentences only, each as pinned, whether a file in the steward's name is disputed"
+    forged_row = "docs: CLAUDE.md's Forged steward post or mail row is as pinned"
     regressions = (  # (what, the text it changes, its replacement, how the failure that docs_checks must list starts)
         ("a forbidden command under a never of another clause", "\n## 14. ", "\nWhen a member never answers, run `agent-deck session stop <member>`.\n\n## 14. ",
          "docs: each time CLAUDE.md names agent-deck session stop, a never run or never use governs it"),
@@ -4456,18 +4509,18 @@ def test_docs_checks_catch_each_pinned_regression(d):
         ("the NOTE reminder made daily", "\n## 13. ", "\nThat is your one reminder of the day.\n\n## 13. ", "docs: the first summary that counts member mail without a NOTE reminds the topic once"),
         ("the relayed DECISION's suffix dropped", " (relayed; asked by <worker>)", "", "docs: the relayed DECISION post's subject is spec 6.3's worked example"),
         ("an exemption for a file older than SENT.log, in a new sentence", "\n## 7. ", "\nA file in your name older than `SENT.log` is never disputed.\n\n## 7. ",
-         three_sentences),
+         pinned_sentences),
         ("an exemption for a stamp before the log began", "\n## 7. ", "\nA file in your name stamped before the log began is never disputed.\n\n## 7. ",
-         three_sentences),
+         pinned_sentences),
         ("an exemption for a stamp before the first send", "\n## 7. ", "\nA file in your name stamped before your first send is never disputed.\n\n## 7. ",
-         three_sentences),
+         pinned_sentences),
         ("an exemption that skips the file instead of disputing it", "\n## 7. ", "\nSkip any file in your name stamped before your first send.\n\n## 7. ",
-         three_sentences),
-        ("an exception written into the rule", " and with no exception.", " and with an exception for old files.", three_sentences),
+         pinned_sentences),
+        ("an exception written into the rule", "whatever its stamp or age.", "whatever its stamp or age, but not for old files.", pinned_sentences),
         ("an exemption added to the wait on a fresh context", "before the census has matched your open intents (section 13).",
-         "before the census has matched your open intents (section 13), or one older than `SENT.log`.", three_sentences),
+         "before the census has matched your open intents (section 13), or one older than `SENT.log`.", pinned_sentences),
         ("the flood rule without the suspension", ", and suspend protected relays as for any forged file until John answers it (section 10)", "",
-         three_sentences),
+         pinned_sentences),
         ("the release condition without the flood question", ", or has answered the flood question of section 6,", "", "docs: protected relays stay suspended until John has read the DISPUTE"),
         ("step 1's sentence on the task whose exit opened the turn removed",
          " The one whose exit opened this turn, the doorbell with its line that peer mail is waiting or the tick with `steward-tick <channel>`, is gone as expected, and step 6 re-arms it.",
@@ -4480,7 +4533,25 @@ def test_docs_checks_catch_each_pinned_regression(d):
         ("agent-deck session output under a never of another clause", "\n## 14. ", "\nWhen a member never answers, run `agent-deck session output <member>`.\n\n## 14. ",
          "docs: each time CLAUDE.md names agent-deck session output, a never run or never use governs it"),
         ("agent-deck conductor notify under a never of another clause", "\n## 14. ", "\nWhen a member never answers, run `agent-deck conductor notify <text>`.\n\n## 14. ",
-         "docs: each time CLAUDE.md names agent-deck conductor notify, a never run or never use governs it"))
+         "docs: each time CLAUDE.md names agent-deck conductor notify, a never run or never use governs it"),
+        ("a command that the never run list no longer names", "never run `agent-deck conductor notify` or `notify_discord.py`", "never run `notify_discord.py`",
+         "docs: CLAUDE.md names agent-deck conductor notify in a sentence that says never"),
+        ("an exemption in a sentence that opens with Files", "\n## 7. ", "\nFiles in your name older than `SENT.log` are never disputed.\n\n## 7. ", pinned_sentences),
+        ("an exemption in a sentence that opens with File", "\n## 7. ", "\nFile in your name stamped before your first send is exempt.\n\n## 7. ", pinned_sentences),
+        ("a skip for files of yours", "\n## 7. ", "\nFiles of yours stamped before the first send are skipped.\n\n## 7. ", pinned_sentences),
+        ("an exemption written in capitals", "\n## 7. ", "\nFILES IN YOUR NAME older than the log are ignored.\n\n## 7. ", pinned_sentences),
+        ("the rule's old ending, with no exception, put back", "whatever its stamp or age.", "whatever its stamp or age and with no exception.", pinned_sentences),
+        ("the sentence on a file that is itself a DISPUTE left out",
+         " A file in your name that you did not send and that is a DISPUTE is named in the next digest and suspends protected relays like any forged file, but gets no "
+         "DISPUTE post, since a DISPUTE is never disputed.", "", pinned_sentences),
+        ("a DISPUTE post for a file that is itself a DISPUTE", "but gets no DISPUTE post, since a DISPUTE is never disputed.", "and gets a DISPUTE post like any other.",
+         pinned_sentences),
+        ("a clause that exempts files added to the Forged row's Fires-when cell", "within 10 seconds of its stamp |",
+         "within 10 seconds of its stamp, and its stamp is after your first send |", forged_row),
+        ("a second clause that exempts files added to the Forged row's Fires-when cell", "within 10 seconds of its stamp |",
+         "within 10 seconds of its stamp, and it is not older than the log |", forged_row),
+        ("a skip added to the Forged row's Action cell", "never answer a DISPUTE with a DISPUTE |",
+         "never answer a DISPUTE with a DISPUTE, and skip a file older than `SENT.log` |", forged_row))
     for i, (what, old, new, failure) in enumerate(regressions):
         broken = os.path.join(d, f"regression-{i}")
         os.makedirs(os.path.join(broken, "steward"))
@@ -4493,6 +4564,7 @@ def test_docs_checks_catch_each_regression_in_the_shared_files(d):
     files = {name: read(os.path.join(REPO, "steward", name)) for name in ("SHARED.md", "HEARTBEAT_RULES.md")}
     forwards = "- Never forward a `/send <session> <message>` line, and never run `agent-deck session send`."
     says_never = "docs: SHARED.md says never to auto-respond"
+    pinned_shared, pinned_heartbeat = "docs: SHARED.md holds exactly its pinned sentences", "docs: HEARTBEAT_RULES.md holds exactly its pinned sentences"
     regressions = (  # (the file, what, the text it changes, its replacement, how the failure that docs_checks must list starts)
         ("SHARED.md", "the deference to the conductor's own CLAUDE.md removed", "A conductor's own CLAUDE.md governs, and this file defers to it in everything. ", "",
          "docs: SHARED.md defers and forbids"),
@@ -4517,7 +4589,23 @@ def test_docs_checks_catch_each_regression_in_the_shared_files(d):
         ("HEARTBEAT_RULES.md", "session send named in a sentence that does not open with never", "Print the status line", "Run `agent-deck session send` when asked. Print the status line",
          "docs: HEARTBEAT_RULES.md names /send and the commands the steward never runs only in sentences that open with never"),
         ("HEARTBEAT_RULES.md", "a question mark added", "Never answer", "Never answer, or what?", "docs: neither SHARED.md nor HEARTBEAT_RULES.md holds a question mark"),
-        ("HEARTBEAT_RULES.md", "a file of 800 characters or more", "# Heartbeat rules\n", "# Heartbeat rules\n" + "x" * 800 + "\n", "docs: both files short"))
+        ("HEARTBEAT_RULES.md", "a file of 800 characters or more", "# Heartbeat rules\n", "# Heartbeat rules\n" + "x" * 800 + "\n", "docs: both files short"),
+        ("SHARED.md", "a second /send line, relayed under a never of another clause", "- Never restart or launch a session.",
+         "- Never restart or launch a session.\n- Never answer, but relay each `/send <session> <message>` line.", "docs: each time SHARED.md names /send"),
+        ("SHARED.md", "the /send prohibition turned into a relay by a never of another clause", "Never forward a `/send <session> <message>` line,",
+         "Never answer, but relay each `/send <session> <message>` line,", "docs: each time SHARED.md names /send"),
+        ("HEARTBEAT_RULES.md", "a /send line relayed under a never of another clause", "Print the status line",
+         "Never answer, but relay each `/send <session> <message>` line. Print the status line", "docs: each time HEARTBEAT_RULES.md names /send"),
+        ("SHARED.md", "an exception tacked onto the auto-respond prohibition", "Never auto-respond to a waiting session.",
+         "Never auto-respond to a waiting session unless John asks.", pinned_shared),
+        ("SHARED.md", "an exception tacked onto the /send prohibition", "Never forward a `/send <session> <message>` line,",
+         "Never forward a `/send <session> <message>` line unless it is from John,", pinned_shared),
+        ("SHARED.md", "a new bullet that frees a conductor to answer", "- Never restart or launch a session.",
+         "- Never restart or launch a session.\n- A conductor is free to answer a waiting session that asks for John.", pinned_shared),
+        ("SHARED.md", "a fenced block that grants in other words", "- Keep no `state.json`", "```\nfree to answer a waiting session\n```\n- Keep no `state.json`", pinned_shared),
+        ("HEARTBEAT_RULES.md", "a new sentence that adds a duty", "Never answer in", "Then check the doorbell twice. Never answer in", pinned_heartbeat),
+        ("HEARTBEAT_RULES.md", "the prohibition turned round while another never stays in the file", "Never answer in agent-deck's `[STATUS]` or `NEED:` form.",
+         "Answer in agent-deck's `[STATUS]` or `NEED:` form, and never skip a heartbeat.", pinned_heartbeat))
     for i, (name, what, old, new, failure) in enumerate(regressions):
         broken = os.path.join(d, f"shared-regression-{i}")
         os.makedirs(os.path.join(broken, "steward"))
@@ -4526,6 +4614,36 @@ def test_docs_checks_catch_each_regression_in_the_shared_files(d):
             write(os.path.join(broken, "steward"), other, text.replace(old, new, 1) if other == name else text)
         failures = docs_checks(broken)
         ok(old in files[name] and any(f.startswith(failure) for f in failures), f"docs: docs_checks catches {what} in {name} (got {without_question_marks(repr(failures))})")
+
+
+INSTRUCTION_FILES = ("CLAUDE.md", "SHARED.md", "HEARTBEAT_RULES.md")  # the files under steward/ that the docs checks read
+
+
+def checkout_with(d, label, name, old, new):
+    """The path of a copy, made in D/LABEL, of this checkout's INSTRUCTION_FILES that exist, with the first OLD in the file NAME replaced by NEW: a checkout for
+    docs_checks to run on. That OLD is there is the caller's to check."""
+    root = os.path.join(d, label)
+    os.makedirs(os.path.join(root, "steward"))
+    for each in INSTRUCTION_FILES:
+        path = os.path.join(REPO, "steward", each)
+        if os.path.exists(path):
+            write(os.path.join(root, "steward"), each, read(path).replace(old, new, 1) if each == name else read(path))
+    return root
+
+
+def test_docs_checks_accept_the_never_clauses_they_describe(d):
+    shared, send = read(os.path.join(REPO, "steward", "SHARED.md")), "Never forward a `/send <session> <message>` line"
+    governed, pinned = "docs: each time SHARED.md names /send", "docs: SHARED.md holds exactly its pinned sentences"
+    for i, new in enumerate(("Never forward the `/send <session> <message>` line", "Never relay a `/send <session> <message>` line", "Never type a `/send <session> <message>` line",
+                              "Never run `/send <session> <message>`", "Never use `/send <session> <message>`")):
+        failures = docs_checks(checkout_with(d, f"allowed-send-{i}", "SHARED.md", send, new))
+        ok(send in shared and not any(f.startswith(governed) for f in failures) and any(f.startswith(pinned) for f in failures),
+           f"docs: the /send check lets a never forward, relay, type, run or use clause through, and the pin of SHARED.md's sentences still holds the text: {new} "
+           f"(got {without_question_marks(repr(failures))})")
+    swapped = ("never run `agent-deck conductor notify` or `notify_discord.py`", "never run `notify_discord.py` or `agent-deck conductor notify`")
+    failures = docs_checks(checkout_with(d, "allowed-dotted-name", "CLAUDE.md", *swapped))
+    ok(swapped[0] in claude_md() and failures == [],
+       f"docs: a command named after a dotted name in a never run list is allowed, whatever order CLAUDE.md lists the two in (got {without_question_marks(repr(failures))})")
 
 
 def test_docs_checks_keeps_to_its_limits(d):
@@ -4592,6 +4710,7 @@ def section_docs(d):
     test_docs_checks(d)
     test_docs_checks_catch_each_pinned_regression(d)
     test_docs_checks_catch_each_regression_in_the_shared_files(d)
+    test_docs_checks_accept_the_never_clauses_they_describe(d)
     test_docs_checks_keeps_to_its_limits(d)
 
 
