@@ -26,16 +26,23 @@ stamp), the mail from one member to another that no NOTE names, and how many pos
 The probe tells whether a member is waiting on John without any text of the member's entering the steward's context. It asks agent-deck for the
 end of the member's last response (`session output NAME --max-tokens 200`, in text form: -q would ignore the cap) and reduces it to a word: yes
 when its last non-empty line, less the footer agent-deck puts after a response it cut to the cap, ends with a question mark, no when it does not.
-It prints that word, or unknown, and nothing else. Only a member on hera is asked, since no output command for a remote member is verified; a
-member on another host, one that TOPIC.md does not list, and a command that fails or does not finish in 20 seconds are unknown. agent-deck logs
-the read and keeps the whole text of a response it cut in a file of its own; the helper keeps none of the text.
+The rule is literal: a question followed by its options, or wrapped in emphasis or quotes, reads no, so the steward takes no and unknown alike as
+no evidence of a question, never as proof that the member is not waiting on John. The probe prints that word, or unknown, and nothing else. Only a
+member on hera is asked, since no output command for a remote member is verified. Unknown too are a member on another host, one that TOPIC.md does
+not list, a command that fails or does not finish in 20 seconds, a cut response whose footer is not the one agent-deck 1.16.34 writes (the seam line
+of the cut is there, but the last line is not that footer, so where the response ends cannot be told), and a title that two sessions hold, which
+agent-deck refuses, so that the wrong session is never read. A TOPIC.md that cannot be read is refused instead: status 2, a reason on stderr and
+nothing on stdout. agent-deck logs the read and keeps the whole text of a response it cut in a file of its own. Run from inside a session, it also
+records a read of a whole, uncut response as a result read, which withdraws that session's own inbox notice for the turn, and spools a call to the
+comms ledger when the ledger is on. A member is not a child of the steward, which never launches a session or sets a parent, so no notice of the
+steward's is there to be withdrawn. The helper keeps none of the text.
 
 Commands:
   self-test [SECTION ...]
       Run the built-in checks, each section in a fresh temporary home.
   probe NAME --dir CONDUCTOR_DIR
       Print yes, no or unknown: whether the last response of the member NAME ends with a question. The member's host is read from the
-      Members table of the TOPIC.md in CONDUCTOR_DIR.
+      Members table of the TOPIC.md in CONDUCTOR_DIR. A TOPIC.md that cannot be read is refused: status 2, a reason on stderr, nothing on stdout.
 """
 
 import argparse
@@ -65,6 +72,7 @@ POLICY_KEYS = (
 NUMBER_RE = re.compile(r"[0-9]+(?:\.[0-9]+)?")
 TIME_RE = re.compile(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]")
 NAME_RE = re.compile(r"[a-z0-9](?:[a-z0-9.]|-(?!-))*")  # agent-mail's NAME_PAT; see grammatical
+HERA = "hera"  # the host that agent-deck answers for when it is run without a remote: its list and its session output
 BACKGROUND_SUBSTATES = ("background-work", "watching")  # the substates agent-deck gives a session whose pane shows background work
 SHELL_WORDS = ("sleep", "watch", "sh -c", "bash -c", "tail")  # in a background task's text they mark a shell command
 # A message file's name: agent-mail's MSG_RE, with groups for the recipient, the stamp and the sender, and none for the hex tail. The
@@ -74,6 +82,8 @@ STAMP_RE = re.compile(r"([0-9]{4})([0-9]{2})([0-9]{2})T([0-9]{2})([0-9]{2})([0-9
 INTENT_WINDOW_S = 10  # how near, in seconds, an intent line's time must be to a file's stamp for the intent to account for the file
 ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-_])")  # a CSI sequence, an OSC sequence (ended by BEL or ST), or another escape of two characters
 CUT_FOOTER_RE = re.compile(r"\u2026 output truncated to [0-9]+ tokens; full output at .+")  # what agent-deck ends a response with when it cut it to --max-tokens
+CUT_SEAM = "\u2026 output omitted \u2026"  # the line that agent-deck puts between the head and the tail of a response it cut to --max-tokens
+PROBE_WORDS = {True: "yes", False: "no", None: "unknown"}  # what the probe command prints for each answer of probe, and nothing else
 
 
 # ---- policy ----
@@ -275,7 +285,7 @@ def row_rank(session):
     return live, utc_of(session.get("last_activity_at")) or ""
 
 
-def deck_rows(run, members, hera_host="hera"):
+def deck_rows(run, members, hera_host=HERA):
     """The agent-deck row of each member, by name: dict(status, substate, bg, last_activity, archived, host_ok).
     RUN(argv) returns (stdout, returncode) and does not raise. Members on HERA_HOST are read from `agent-deck list
     --json`, the others from `agent-deck remote sessions HOST --json --with-errors`, one call for each host, and
@@ -303,6 +313,26 @@ def deck_rows(run, members, hera_host="hera"):
                                 "last_activity": utc_of(session.get("last_activity_at")), "archived": bool_of(session.get("archived")),
                                 "host_ok": sessions is not None}
     return rows
+
+
+def real_run(argv):
+    """The run(argv) of deck_rows and probe, for real: (stdout, returncode) of the command ARGV, whose first word is the program, as they build it
+    ("agent-deck", then its arguments). It never raises: a command that cannot be started, has not finished in 20 seconds, or prints what is not UTF-8
+    gives ("", 1). The stderr of the command is dropped: none of it reaches the text it returns or the stderr of this process."""
+    try:
+        done = subprocess.run(argv, capture_output=True, encoding="utf-8", timeout=20)
+    except Exception:
+        return "", 1
+    return done.stdout, done.returncode
+
+
+def runner_for(fixture):
+    """The run(argv) the commands use: real_run, or, when FIXTURE is a path (the hidden --run-fixture, which only the self-test gives), a fake_run
+    that answers as the JSON object in that file says, so that no check runs the real agent-deck."""
+    if fixture is None:
+        return real_run
+    with open(fixture, encoding="utf-8") as f:
+        return fake_run(json.load(f))
 
 
 # ---- census ----
@@ -494,25 +524,6 @@ def census(entries, members, steward, sent, notes, nudge_ids, now):
 
 # ---- probe ----
 
-def real_run(argv):
-    """The run(argv) of deck_rows and probe, for real: (stdout, returncode) of the command ARGV, whose first word is the program, as they build it
-    ("agent-deck", then its arguments). It never raises: a command that cannot be started, or has not finished in 20 seconds, gives ("", 1)."""
-    try:
-        done = subprocess.run(argv, capture_output=True, encoding="utf-8", timeout=20)
-    except Exception:
-        return "", 1
-    return done.stdout, done.returncode
-
-
-def runner_for(fixture):
-    """The run(argv) the commands use: real_run, or, when FIXTURE is a path (the hidden --run-fixture, which only the self-test gives), a fake_run
-    that answers as the JSON object in that file says, so that no check runs the real agent-deck."""
-    if fixture is None:
-        return real_run
-    with open(fixture, encoding="utf-8") as f:
-        return fake_run(json.load(f))
-
-
 def probe(run, name, host):
     """Whether the member NAME, on the host HOST, is waiting on John: True when its last response ends with a question, False when it does not,
     None when that cannot be told. RUN(argv) is the runner of deck_rows. Only a member on hera is asked, since no output command for a remote member
@@ -520,8 +531,10 @@ def probe(run, name, host):
     the caller's own session. The command is the text form of `agent-deck session output NAME --max-tokens 200`; -q would ignore the cap. Its text
     is reduced here: with the ANSI escape sequences stripped, the last non-empty line decides, less the footer that agent-deck puts after a response
     it cut to the cap (a response over 200 tokens, about 800 bytes, is cut to its head and its tail around a seam, so the footer would otherwise be
-    its last line). None of the text is kept or printed. A command that fails, or a run that raises, is None."""
-    if host != "hera" or not grammatical(name):  # hera is the host that `agent-deck list` answers for, as in deck_rows
+    its last line). A cut response, one with the seam line of agent-deck in it, whose last line is not that footer is None: where it ends cannot be
+    told. None of the text is kept or printed. A command that fails (any status but 0, the negative one that a signal gives included), or a run that
+    raises, is None."""
+    if host != HERA or not grammatical(name):
         return None
     try:
         out, code = run(["agent-deck", "session", "output", name, "--max-tokens", "200"])
@@ -532,23 +545,28 @@ def probe(run, name, host):
     lines = [line for line in map(str.strip, ANSI_RE.sub("", out).splitlines()) if line]
     if lines and CUT_FOOTER_RE.fullmatch(lines[-1]):
         lines.pop()
+    elif CUT_SEAM in lines:  # cut, and not ended by the footer that is known: where the response ends cannot be told
+        return None
+    # The rule is literal: a question followed by its options, or wrapped in emphasis or quotes, reads no. The steward takes no and unknown alike as no
+    # evidence of a question, never as proof that the member is not waiting on John.
     return bool(lines) and lines[-1].endswith("?")
-
-
-PROBE_WORDS = {True: "yes", False: "no", None: "unknown"}  # what the probe command prints for each answer of probe, and nothing else
 
 
 def probe_command(run, name, directory):
     """Print the one word that says whether the member NAME of the topic whose TOPIC.md is in DIRECTORY is waiting on John, yes, no or unknown (see
     probe; a name that TOPIC.md does not list is unknown), and return 0. Nothing else goes to stdout, so none of a member's text reaches the steward.
-    A TOPIC.md that cannot be read is refused instead: the reason goes to stderr, without a question mark, nothing goes to stdout, and the status is 2."""
+    A TOPIC.md that cannot be read is refused instead: the status is 2 and nothing goes to stdout. The reason goes to stderr in a line with no question mark:
+    the roster reader's message, or, for the file itself, the OS error's reason (or that it is not UTF-8) and not the path, which may hold a question mark."""
     try:
         members = load_roster(os.path.join(directory, "TOPIC.md"))
     except RosterError as e:
         print(e, file=sys.stderr)
         return 2
-    except (OSError, UnicodeDecodeError) as e:
-        print(f"steward-signals: {e}".replace("?", ""), file=sys.stderr)  # the path may hold a question mark
+    except OSError as e:
+        print(f"steward-signals: TOPIC.md in --dir: {e.strerror or 'cannot be read'}", file=sys.stderr)
+        return 2
+    except UnicodeDecodeError:
+        print("steward-signals: TOPIC.md in --dir: not valid UTF-8", file=sys.stderr)
         return 2
     host = next((m.host for m in members if m.name == name), None)
     print(PROBE_WORDS[probe(run, name, host)])
@@ -1619,6 +1637,40 @@ def subprocess_as(stub):
         subprocess.run = run
 
 
+@contextlib.contextmanager
+def fd2_to(path):
+    """Within the block, the file descriptor 2 of this process is the file at PATH. A child inherits it, and sys.stderr does not reach it."""
+    saved = os.dup(2)
+    try:
+        with open(path, "wb") as f:
+            os.dup2(f.fileno(), 2)
+            yield
+    finally:
+        os.dup2(saved, 2)
+        os.close(saved)
+
+
+@contextlib.contextmanager
+def agent_deck_refused():
+    """Within the block, no check can start agent-deck: subprocess.Popen, which subprocess.run and the other ways of starting a process call, records
+    the command of a start whose program is named agent-deck in the list the block gets, and raises OSError. Any other program starts as it is given."""
+    started = []
+    popen = subprocess.Popen
+
+    def guarded(args, *rest, **kwargs):
+        words = args.split() if isinstance(args, str) else list(args)
+        if words and os.path.basename(words[0]) == "agent-deck":
+            started.append(words)
+            raise OSError("agent-deck was started")
+        return popen(args, *rest, **kwargs)
+
+    subprocess.Popen = guarded
+    try:
+        yield started
+    finally:
+        subprocess.Popen = popen
+
+
 def test_probe_local(d):
     ok(probe(fake_run({"session output lfm3": "\u23fa Done.\n\nShould I push to main?\n"}), "lfm3", "hera") is True, "probe: trailing question line is yes")
     ok(probe(fake_run({"session output lfm3": "\u23fa Done. Waiting for mail.\n"}), "lfm3", "hera") is False, "probe: no question is no")
@@ -1645,6 +1697,7 @@ def test_probe_reads_the_last_non_empty_line(d):
     ok(probe_text("Is this the right branch?\nYes, it is. Done.\n") is False, "probe: a question earlier in the response is not its end")
     ok(probe_text("Why? Because the loader changed.\n") is False, "probe: a question mark inside the last line is not its end")
     ok(probe_text("") is False and probe_text("\n \n") is False, "probe: no text is no")
+    ok(probe_text("?\n") is True and probe_text("Done.\n???\n") is True, "probe: the rule is literal, so a last line of question marks alone is a question")
 
 
 def test_probe_ignores_escape_sequences(d):
@@ -1660,17 +1713,28 @@ def test_probe_skips_the_footer_of_a_cut_response(d):
     ok(probe_text(CUT_OUTPUT.replace("Should I push to main?", "I will wait for your answer.")) is False, "probe: a cut response whose tail asks nothing is no")
     asked_then_cut = OUTPUT_HEADER + "Which shard first?" + OUTPUT_SEAM + "so I started with b.\n" + OUTPUT_FOOTER
     ok(probe_text(asked_then_cut) is False, "probe: a question in the head of a cut response, before the seam, is not its end")
+    ok(probe_text(OUTPUT_FOOTER) is False and probe_text(OUTPUT_HEADER + OUTPUT_FOOTER) is False, "probe: output that is only the footer, or only the header and the footer, is no")
+
+
+def test_probe_does_not_guess_at_a_cut_response_whose_footer_it_does_not_know(d):
+    reworded = CUT_OUTPUT.replace("output truncated to 200 tokens", "output was cut at 200 tokens")  # the footer, in other words
+    no_count = CUT_OUTPUT.replace("truncated to 200 tokens", "truncated")
+    no_footer = CUT_OUTPUT.replace(OUTPUT_FOOTER, "")  # the tail ends the output, but nothing says that it is the end of the response
+    for what, text in (("a reworded footer", reworded), ("a footer without its token count", no_count), ("no footer", no_footer)):
+        ok(probe_text(text) is None, f"probe: a cut response with {what} is unknown, since where it ends cannot be told")
+    ok(probe_text("The log says it was cut at 200 tokens; should I push to main?\n") is True, "probe: text that agent-deck did not cut is judged as it stands")
 
 
 def test_probe_failures_are_unknown(d):
     ok(probe(fake_run({"session output lfm3": ("Should I push to main?\n", 1)}), "lfm3", "hera") is None, "probe: a command that failed is unknown, whatever it printed")
+    ok(probe(fake_run({"session output lfm3": ("Should I push to main?\n", -9)}), "lfm3", "hera") is None, "probe: so is one that a signal killed, whose status is negative")
     for error in (OSError("no such program"), subprocess.TimeoutExpired("agent-deck", 20), RuntimeError("boom")):
         ok(probe(raising(error), "lfm3", "hera") is None, f"probe: a run that raises {type(error).__name__} is unknown, not an error")
 
 
 def test_probe_refuses_a_name_agent_deck_could_misread(d):
     run = fake_run({"session output": "Should I push to main?\n"})  # would answer for any name
-    for odd in ("", "-q", "--json", "Lfm3", "lfm 3", "lfm3/x", "a" * 65, "x-"):
+    for odd in ("", "-q", "--json", "Lfm3", "lfm 3", "lfm3/x", "lfm3?", "a" * 65, "x-"):
         ok(probe(run, odd, "hera") is None, f"probe: {odd!r} is not an agent-mail name, so it is not passed to agent-deck")
     ok(run.calls == [], "probe: no command was run for any of them")
 
@@ -1682,6 +1746,11 @@ def test_real_run_contract(d):
     ok(real_run(child(0)) == ("caf\u00e9\n", 0), "run: the argv is run as it is given, its first word the program, and gives the output decoded as UTF-8 and the status")
     ok(real_run(child(3)) == ("caf\u00e9\n", 3), "run: a command that fails gives its own status and output")
     ok(real_run([os.path.join(d, "no-such-program")]) == ("", 1), "run: a command that cannot be started gives no output and status 1, not an error")
+    ok(real_run([sys.executable, "-I", "-c", "import sys; sys.stdout.buffer.write(b'\\xff\\n')"]) == ("", 1), "run: output that is not UTF-8 gives no output and status 1, not an error")
+    marker = "STDERR-MARKER-31c9"
+    with fd2_to(os.path.join(d, "fd2.txt")):
+        result = real_run([sys.executable, "-I", "-c", f"import sys; print('out'); print('{marker}', file=sys.stderr)"])
+    ok(result == ("out\n", 0) and marker not in read(os.path.join(d, "fd2.txt")), "run: a command's stderr is neither in the text it returns nor on this process's stderr")
 
     def too_slow(argv, **kwargs):
         too_slow.timeout = kwargs.get("timeout")
@@ -1694,7 +1763,8 @@ def test_real_run_contract(d):
 def test_probe_prints_one_word(d):
     write(d, "TOPIC.md", PROBE_TOPIC)
     for what, answer, word in (("a question", "SECRET-9f3a: shall I delete the release branch?\n", "yes"), ("no question", "SECRET-9f3a: done.\n", "no"),
-                               ("a failed command", ["", 1], "unknown")):
+                               ("a failed command", ["", 1], "unknown"), ("a command that a signal killed", ["SECRET-9f3a: shall I delete the release branch?\n", -9], "unknown"),
+                               ("a cut response with a footer it does not know", CUT_OUTPUT.replace("output truncated to 200 tokens", "output was cut at 200 tokens"), "unknown")):
         fixture = write(d, "fixture.json", json.dumps({"session output lfm3 --max-tokens 200": answer}))  # the whole command line: only the text form is answered
         ok(capture(main, ["probe", "lfm3", "--dir", d, "--run-fixture", fixture]) == (word + "\n", 0, ""),
            f"probe: {what} prints {word}, one word and its newline, and nothing else on stdout or stderr, none of the text it read")
@@ -1710,16 +1780,20 @@ def test_probe_command_asks_only_for_a_listed_member_on_hera(d):
 
 def test_probe_command_refuses_a_topic_it_cannot_read(d):
     run = fake_run({"session output": "Should I push to main?\n"})
-    out, status, err = capture(probe_command, run, "lfm3", os.path.join(d, "nowhere?"))  # the directory's name holds a question mark, which the message leaves out
-    ok(out == "" and status == 2 and err.startswith("steward-signals: ") and "?" not in err and "nowhere/TOPIC.md" in err and run.calls == [],
-       "probe: a TOPIC.md that is missing is refused on stderr, without a question mark, with nothing on stdout and no command run")
+    refusal = capture(probe_command, run, "lfm3", os.path.join(d, "nowhere?"))  # the directory's name holds a question mark, which the message must neither carry nor alter
+    ok(refusal == ("", 2, f"steward-signals: TOPIC.md in --dir: {os.strerror(errno.ENOENT)}\n"),
+       "probe: a TOPIC.md that is missing is refused on stderr with the OS error's reason alone, not the path, and nothing on stdout")
+    os.makedirs(os.path.join(d, "dir-in-place", "TOPIC.md"))  # a directory where the file should be
+    ok(capture(probe_command, run, "lfm3", os.path.join(d, "dir-in-place")) == ("", 2, f"steward-signals: TOPIC.md in --dir: {os.strerror(errno.EISDIR)}\n"),
+       "probe: so is one that is a directory, with that error's reason")
     write(d, "TOPIC.md", PROBE_TOPIC.replace("| lfm3 |", "| Lfm3? |"))
-    ok(capture(probe_command, run, "lfm3", d) == ("", 2, "steward-signals: TOPIC.md: Lfm3: not a valid name\n") and run.calls == [],
-       "probe: a TOPIC.md that the roster reader refuses is refused with its message")
+    ok(capture(probe_command, run, "lfm3", d) == ("", 2, "steward-signals: TOPIC.md: Lfm3: not a valid name\n"), "probe: a TOPIC.md that the roster reader refuses is refused with its message")
     with open(os.path.join(d, "TOPIC.md"), "wb") as f:
         f.write(b"## Members\n| lfm3 | \xff | claude |\n")
-    out, status, err = capture(probe_command, run, "lfm3", d)
-    ok(out == "" and status == 2 and err.startswith("steward-signals: ") and "?" not in err and run.calls == [], "probe: a TOPIC.md that is not UTF-8 is refused too")
+    ok(capture(probe_command, run, "lfm3", d) == ("", 2, "steward-signals: TOPIC.md in --dir: not valid UTF-8\n"), "probe: a TOPIC.md that is not UTF-8 is refused too")
+    with files_refused():  # an OSError that carries no reason of its own
+        ok(capture(probe_command, run, "lfm3", d) == ("", 2, "steward-signals: TOPIC.md in --dir: cannot be read\n"), "probe: an error with no reason of its own is refused as a TOPIC.md that cannot be read")
+    ok(run.calls == [], "probe: no command was run for any refused TOPIC.md")
 
 
 def test_probe_runs_agent_deck_without_a_fixture(d):
@@ -1738,29 +1812,45 @@ def test_probe_runs_agent_deck_without_a_fixture(d):
 def test_probe_options(d):
     out, status, err = capture(main, ["probe", "--help"])
     ok(status == 0 and "--dir" in out and "run-fixture" not in out + err, "probe: --run-fixture is hidden from the help")
+    ok("status 2" in " ".join(out.split()), "probe: its help says that a TOPIC.md it cannot read is refused, with status 2")
     out, status, err = capture(main, ["probe", "lfm3"])
-    ok(out == "" and status == 2 and "--dir" in err, "probe: --dir is required, so TOPIC.md is never looked for in a default place")
-    ok("probe" in capture(main, ["--help"])[0], "probe: the command is listed in the top-level help")
+    ok(out == "" and status == 2 and "required: --dir" in err, "probe: --dir is required, so TOPIC.md is never looked for in a default place")
+    top = " ".join(capture(main, ["--help"])[0].split())
+    ok("probe NAME --dir CONDUCTOR_DIR" in top and "status 2" in top.split("probe NAME --dir CONDUCTOR_DIR", 1)[1],
+       "probe: the command is listed in the top-level help, its entry saying that a TOPIC.md it cannot read is refused")
+
+
+def test_the_guard_refuses_every_way_to_start_agent_deck(d):
+    bin_dir = os.path.join(d, "bin")
+    os.mkdir(bin_dir)
+    stand_in = write(bin_dir, "agent-deck", f"#!{sys.executable}\n")  # a program of that name that does nothing, so that a guard that fails starts this and not the real one
+    os.chmod(stand_in, 0o755)
+    ways = {"subprocess.run": lambda: subprocess.run([stand_in]), "subprocess.Popen": lambda: subprocess.Popen([stand_in]).wait(),
+            "subprocess.check_output": lambda: subprocess.check_output([stand_in]), "a command line for a shell": lambda: subprocess.run(f"{stand_in} list", shell=True)}
+    run, popen = subprocess.run, subprocess.Popen
+    with agent_deck_refused() as started:
+        for name, way in ways.items():
+            try:
+                way()
+            except OSError:
+                continue
+            ok(False, f"probe: the guard let {name} start agent-deck")
+        ok(subprocess.run([sys.executable, "-I", "-c", "pass"]).returncode == 0, "probe: the guard lets another program start")
+    ok(len(started) == len(ways), "probe: the guard refuses subprocess.run, subprocess.Popen, subprocess.check_output and a shell command line, and records each")
+    ok(subprocess.run is run and subprocess.Popen is popen, "probe: the guard puts every way to start a process back")
 
 
 @section("probe")
 def section_probe(d):
-    started = []
-    run = subprocess.run
-
-    def guarded(argv, *args, **kwargs):  # no check may run the real agent-deck: one that would is refused here, and fails
-        if os.path.basename(argv[0]) == "agent-deck":
-            started.append(list(argv))
-            raise OSError("agent-deck was started")
-        return run(argv, *args, **kwargs)
-
-    with subprocess_as(guarded):
+    test_the_guard_refuses_every_way_to_start_agent_deck(d)  # first: no check runs under a guard that does not hold
+    with agent_deck_refused() as started:  # no check may run the real agent-deck: one that would is refused here, and fails
         test_probe_local(d)
         test_probe_remote_is_unknown(d)
         test_probe_runs_the_text_form_with_the_cap(d)
         test_probe_reads_the_last_non_empty_line(d)
         test_probe_ignores_escape_sequences(d)
         test_probe_skips_the_footer_of_a_cut_response(d)
+        test_probe_does_not_guess_at_a_cut_response_whose_footer_it_does_not_know(d)
         test_probe_failures_are_unknown(d)
         test_probe_refuses_a_name_agent_deck_could_misread(d)
         test_real_run_contract(d)
@@ -1784,7 +1874,8 @@ def build_parser():
     pr = sub.add_parser("probe", help="say whether a member is waiting on John",
                         description="Print yes, no or unknown, and nothing else: whether the last response of the member NAME ends with a question. "
                                     "The host is read from the Members table of the TOPIC.md in CONDUCTOR_DIR. Only a member on hera is asked; a member "
-                                    "on another host, a name TOPIC.md does not list, and a command that fails are unknown.")
+                                    "on another host, a name TOPIC.md does not list, a command that fails, and a cut response whose footer is not the "
+                                    "known one are unknown. A TOPIC.md that cannot be read is refused instead: status 2, a reason on stderr, nothing on stdout.")
     pr.add_argument("name", metavar="NAME")
     pr.add_argument("--dir", required=True, metavar="CONDUCTOR_DIR", help="the conductor directory, which holds TOPIC.md")
     pr.add_argument("--run-fixture", metavar="FILE", help=argparse.SUPPRESS)  # for the self-test: a JSON object of the answers that fake_run gives
