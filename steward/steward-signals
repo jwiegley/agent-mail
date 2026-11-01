@@ -4097,6 +4097,184 @@ def section_signals(d):
     ok(started == [], "signals: no check started the real agent-deck")
 
 
+# ---- self-test section: docs ----
+
+CLAUDE_HEADINGS = ("# Topic steward", "## 1. Your standing", "## 2. Precedence", "## 3. Starting a topic", "## 4. Every turn", "## 5. Each delivered item",
+                   "## 6. Exception checks", "## 7. Waking", "## 8. Time checks", "## 9. Questions to John", "## 10. Relaying John's answers",
+                   "## 11. The ledger and the logs", "## 12. Digest, summary and STATUS", "## 13. Restarts and resets", "## 14. Ending a topic")
+QUESTION_TEMPLATE = "Q <prefix>-<n>: <text>: A <x>, B <y>?"  # the steward's question line: the one line it prints that holds a question mark
+# What CLAUDE.md copies exactly, from the plan's Global Constraints and spec 6.6: the STATUS line, the page John's scanner sends when it goes stale, the start of
+# the summary, the ledger states, and the subjects of the steward's message templates.
+STATUS_LINE = "<UTC> tick=<min> open=<n> active=<n> waiting-john=<n> last-post=<UTC> doorbell=<ok|missing>"
+STALE_PAGE = "NEED(steward): <steward> STATUS unchanged since <UTC> (tick <m>m, <n> open)"
+SUMMARY_FORM = "SUMMARY +<channel> <date>: "
+LEDGER_STATES = "unclaimed active blocked waiting-john done dropped orphaned"
+SUBJECT_TEMPLATES = ("OVERLAP <a> / <b>: both write <place>", "DUPLICATE <new> looks like <old> (<owner>, claimed <time>)", "ALREADY-DONE <slug>: <refs>",
+                     "NUDGE <slug>: no update since <time>", "OFFER: <n> unclaimed items you can take", "ROUTE <slug>: <asker> asked the topic <one line> (post <id>)",
+                     "NEEDS-JOHN <slug>: <action> needs John in your own session", "DECISION <q-id>: <letter>, <option text>", "DEFAULT <q-id>: <hold|wait|skip>",
+                     "DISPUTE <id>: not sent by me", "STEWARD back after <duration>")
+# The commands the steward never runs (spec 4 and 6.6), which an instruction file names only in a sentence that says never, so that no sentence can be read as
+# telling the steward to run one.
+NEVER_COMMANDS = ("agent-deck session send", "agent-deck launch", "agent-deck session stop", "agent-deck session restart", "agent-deck session set-parent",
+                  "agent-deck inbox drain", "notify_discord.py")
+SHARED_PARTS = ("auto-respond", "/send", "session control", "NEED", "state.json", "task-log.md")  # the parts of the shared conductor text that do not apply (spec 6.4)
+FENCE_RE = re.compile(r"\s*(`{3,}|~{3,})")  # a line that opens a fenced code block: three backticks or tildes or more, after any indentation
+
+
+def strip_code_and_template(text):
+    """TEXT less its fenced code blocks and less each copy of QUESTION_TEMPLATE: the prose of an instruction file, where no question mark may stand, since
+    the question line is the one line holding one that the steward prints. A block opens with a line of three backticks or tildes or more, after any
+    indentation and before any info string (a backtick fence with a backtick after it on the line opens an inline span instead), and runs to the first line
+    of the same character, at least as many of it and nothing else; both lines go with it. A fence that is never closed strips nothing, so that what follows
+    it is still read as prose."""
+    lines, kept, i = text.splitlines(keepends=True), [], 0
+    while i < len(lines):
+        opening = FENCE_RE.match(lines[i])
+        if opening and not (opening[1][0] == "`" and "`" in lines[i][opening.end():]):
+            closing = re.compile(rf"\s*{re.escape(opening[1][0])}{{{len(opening[1])},}}\s*")
+            end = next((j for j in range(i + 1, len(lines)) if closing.fullmatch(lines[j])), None)
+            if end is not None:
+                i = end + 1
+                continue
+        kept.append(lines[i])
+        i += 1
+    return "".join(kept).replace(QUESTION_TEMPLATE, "")
+
+
+def docs_checks(repo_dir):
+    """The failures of the checks in DOCS_CHECKS, run on the instruction files of the checkout REPO_DIR, the directory that holds steward/: the text of each
+    check that does not hold, in the order they run, or [] when every one holds. Unlike a self-test run, which ends at the first failure, this runs them all:
+    while it runs, REPO is REPO_DIR and ok lists a failed check instead of raising it, and counts nothing; both are put back however it ends. A check function
+    that cannot go on, for a file that is missing or a heading that a split needs, adds one failure that names it and the error, and the next one runs. It
+    writes nothing: each check function is given None for its directory, so that one which tried to write would fail rather than write in the checkout."""
+    failures = []
+
+    def listed(cond, what):
+        if not cond:
+            failures.append(what)
+
+    saved = {name: globals()[name] for name in ("ok", "REPO")}
+    globals().update(ok=listed, REPO=repo_dir)
+    try:
+        for check in DOCS_CHECKS:
+            try:
+                check(None)
+            except Exception as e:  # the check could not go on; the rest still run
+                failures.append(f"docs: {check.__name__} could not go on: {type(e).__name__}: {e}")
+    finally:
+        globals().update(saved)
+    return failures
+
+
+def test_claude_md(d):
+    t = read(os.path.join(REPO, "steward", "CLAUDE.md"))
+    for h in CLAUDE_HEADINGS: ok(h in t, f"docs: CLAUDE.md has '{h}'")
+    ok("Q <prefix>-<n>: <text>: A <x>, B <y>?" in t and "80" in t, "docs: question template and limit")
+    ok(all(s in t for s in ("unclaimed", "active", "blocked", "waiting-john", "done", "dropped", "orphaned")) and "| open |" not in t, "docs: ledger states, no 'open' state")
+    for subj in ("OVERLAP", "DUPLICATE", "ALREADY-DONE", "NUDGE", "OFFER", "ROUTE", "NEEDS-JOHN", "DECISION", "DEFAULT", "DISPUTE", "STEWARD back"): ok(subj in t, f"docs: template {subj}")
+    ok("NEED:" not in t.replace("NEED(steward)", ""), "docs: no NEED: lines (the scanner pages Q lines)")
+    ok(re.search(r"never[^.\n]*agent-deck session send", t, re.I) and not re.search(r"^(?!.*never).*agent-deck session send", t, re.M | re.I), "docs: session send appears only in a never-sentence")
+    ok("steward-tick <channel>" in t and "echo steward-tick" in t, "docs: the tick is named by channel")
+    ok("intent " in t and "sent " in t and "RECEIVED.log" in t and "NOTES.log" in t, "docs: two-phase SENT.log, RECEIVED.log and NOTES.log")
+    ok("DECISION" in t.split("## 10.")[1].split("## 11.")[0] and "post first" in t.split("## 10.")[1].split("## 11.")[0].lower(), "docs: DECISION post before the relay mail")
+    ok("steward-signals signals" in t and "steward-signals metrics" in t, "docs: the helper is called by name")
+    for num in ("45 min", "20 min", "2 h"): ok(num not in t, f"docs: threshold {num} is cited by POLICY key, not value")
+    ok("?" not in strip_code_and_template(t), "docs: no stray question marks outside code blocks and the template")
+
+
+def claude_md():
+    """The text of steward/CLAUDE.md in the checkout at REPO, read when it is asked for, so that docs_checks can point REPO elsewhere."""
+    return read(os.path.join(REPO, "steward", "CLAUDE.md"))
+
+
+def test_claude_md_headings_are_in_order(d):
+    found = [line.rstrip() for line in strip_code_and_template(claude_md()).splitlines() if line.startswith(("# ", "## "))]
+    ok(found == list(CLAUDE_HEADINGS), f"docs: CLAUDE.md's headings of the first two levels are the plan's fifteen, each once and in order (got {without_question_marks(repr(found))})")
+
+
+def test_claude_md_quotes_the_exact_copy(d):
+    t = claude_md()
+    copies = (("the STATUS line", STATUS_LINE), ("the page for a stale STATUS", STALE_PAGE), ("the summary form", SUMMARY_FORM), ("the ledger states", LEDGER_STATES),
+              ("the characters of the question line", "letters, digits, spaces and `- . , : ( )`"), ("the summary's limit", "at most 400 bytes"),
+              *((f"the subject of {subject.split()[0].rstrip(':')}", subject) for subject in SUBJECT_TEMPLATES))
+    for what, copy in copies:
+        ok(copy in t, f"docs: CLAUDE.md quotes {what} exactly: {copy}")
+
+
+def test_claude_md_names_the_forbidden_commands_only_in_never_sentences(d):
+    t = claude_md()
+    for command in NEVER_COMMANDS:
+        said = re.search(rf"never[^.\n]*{re.escape(command)}", t, re.I)
+        stray = re.search(rf"^(?!.*never).*{re.escape(command)}", t, re.M | re.I)
+        ok(said and not stray, f"docs: CLAUDE.md names {command} in a sentence that says never, and on no line that does not say it")
+
+
+def test_claude_md_cites_every_policy_key(d):
+    t = claude_md()
+    for key in POLICY_KEYS:
+        ok(f"`{key}`" in t, f"docs: CLAUDE.md cites the POLICY.md key {key} by name")
+
+
+def test_claude_md_precedence_names_the_shared_parts(d):
+    precedence = claude_md().split("## 2. Precedence")[1].split("## 3. ")[0]
+    for part in SHARED_PARTS:
+        ok(part in precedence, f"docs: CLAUDE.md's precedence section names {part} among the parts of the shared conductor text that do not apply")
+
+
+# The check functions that read the instruction files in a checkout, which section docs runs on this one and docs_checks runs on any.
+DOCS_CHECKS = (test_claude_md, test_claude_md_headings_are_in_order, test_claude_md_quotes_the_exact_copy, test_claude_md_names_the_forbidden_commands_only_in_never_sentences,
+               test_claude_md_cites_every_policy_key, test_claude_md_precedence_names_the_shared_parts)
+
+
+def test_strip_code_and_template(d):
+    text = ("Prose with no question.\n"
+            "```sh\npgrep -f 'steward-tick x' || echo none?\n```\n"
+            f"The line is `{QUESTION_TEMPLATE}`, no other.\n"
+            "  ~~~~\n  an indented tilde block holds one too?\n  ~~~~~\n"
+            "````\n```\na fence of fewer backticks inside does not close it?\n````\n"
+            "End.\n")
+    ok(strip_code_and_template(text) == "Prose with no question.\nThe line is ``, no other.\nEnd.\n",
+       "docs: strip_code_and_template takes out each fenced block, of backticks or tildes, indented or not, closed by a fence as long or longer, and the template")
+    ok(strip_code_and_template("Is this prose?\n") == "Is this prose?\n", "docs: a question mark in prose is kept")
+    ok(strip_code_and_template("```\nnever closed?\n") == "```\nnever closed?\n", "docs: a fence that is never closed strips nothing, so the text after it is still read")
+    ok(strip_code_and_template("```x``` and y?\nmore prose\n```\ncode?\n```\n") == "```x``` and y?\nmore prose\n",
+       "docs: three backticks with another after them on the line open an inline span, not a block that a later fence would close")
+    ok(strip_code_and_template("Q <prefix>-<n> still open 4h: <text>: A <x>, B <y>?\n").count("?") == 1, "docs: only the template itself is taken out, never a line that looks like it")
+
+
+def test_docs_checks(d):
+    real_ok, repo = globals()["ok"], REPO
+    ok(docs_checks(REPO) == [], "docs: docs_checks finds nothing wrong in this checkout")
+    broken = os.path.join(d, "broken")
+    os.makedirs(os.path.join(broken, "steward"))
+    write(os.path.join(broken, "steward"), "CLAUDE.md", claude_md().replace("## 9. Questions to John\n", "## 9. Questions\n", 1) + "\nIs this a stray question?\n")
+    before = CHECKS
+    failures = docs_checks(broken)
+    restored = globals()["ok"] is real_ok and REPO == repo
+    if not restored:  # raised here, not through ok, which would be the collector if docs_checks had not put it back
+        raise TestFailed("docs: docs_checks puts ok and REPO back as they were")
+    ok(restored and CHECKS == before and len(failures) == 3
+       and failures[:2] == ["docs: CLAUDE.md has '## 9. Questions to John'", "docs: no stray question marks outside code blocks and the template"]
+       and failures[2].startswith("docs: CLAUDE.md's headings of the first two levels"),
+       f"docs: docs_checks lists every failure in the checkout it is given, in order, without stopping at the first or counting a check, and puts ok and REPO back (got {failures!r})")
+    nothing = os.path.join(d, "nothing")
+    os.makedirs(os.path.join(nothing, "steward"))
+    failures = docs_checks(nothing)
+    restored = globals()["ok"] is real_ok and REPO == repo
+    if not restored:
+        raise TestFailed("docs: docs_checks puts ok and REPO back as they were, after a check that could not go on")
+    ok(restored and len(failures) == len(DOCS_CHECKS) and all(f"docs: {check.__name__} could not go on: FileNotFoundError" in failure for check, failure in zip(DOCS_CHECKS, failures)),
+       "docs: in a checkout with no CLAUDE.md, each check function adds one failure that names it and the error, the next one still runs, and ok and REPO are put back")
+
+
+@section("docs")
+def section_docs(d):
+    test_strip_code_and_template(d)  # first: the checks below read CLAUDE.md's prose through it
+    for check in DOCS_CHECKS:
+        check(d)
+    test_docs_checks(d)
+
+
 # ---- main ----
 
 def build_parser():
