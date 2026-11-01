@@ -953,7 +953,9 @@ def create_channel(d, ch, purpose):
 
 def list_channels(d, now):
     """Each channel, sorted by name, with its purpose, its posts in the last 7 days, its
-    last post's stamp and the subscribers that member records list (display only)."""
+    newest post's stamp and the subscribers that member records list (display only). The
+    stamp is the post name's own text: as a float, a stamp late in the year 9999 rounds
+    past what utc() can show."""
     try:
         entries = os.listdir(d)
     except (FileNotFoundError, NotADirectoryError):
@@ -972,11 +974,11 @@ def list_channels(d, now):
             continue
         try:
             purpose = read_purpose(fd)
-            stamps = [m.stamp for m in channel_posts(fd, entry[1:])]
+            posts = list(channel_posts(fd, entry[1:]))
         finally:
             os.close(fd)
-        out.append({"name": entry[1:], "purpose": purpose, "posts_7d": sum(1 for s in stamps if s >= now - WEEK),
-                    "last_post": utc(max(stamps)) if stamps else None, "subscribers": sorted(listed.get(entry[1:], []))})
+        out.append({"name": entry[1:], "purpose": purpose, "posts_7d": sum(1 for m in posts if m.stamp >= now - WEEK),
+                    "last_post": max(m.utc for m in posts) if posts else None, "subscribers": sorted(listed.get(entry[1:], []))})
     return out
 
 
@@ -3913,8 +3915,26 @@ def section_channels(t):
     touch_member(d, "pi", effective_subs(st, s, now), now)
     c = next(c for c in list_channels(d, now) if c["name"] == "fleet")
     t.ok(c["posts_7d"] == 5 and c["subscribers"] == ["pi"], "lists posts in the last 7 days and published subscribers")
+    t.ok(c["last_post"] == parse_msg(f"{ids[-1]}.txt").utc, "the last post is shown as the newest post's own stamp")
     unsubscribe(st, s, "fleet")
     t.ok("fleet" not in st["subs"] and "+fleet" not in st["seen"], "unsubscribe drops the channel and its seen set")
+
+    # A peer can plant a post stamped as late as a stamp can be; as a float it rounds past
+    # the year 9999 that utc() can show, so the listing must show the stamp's own text.
+    late = t.box("late")
+    create_channel(late, "fleet", "fleet-wide notices")
+    t.post(late, "fleet", "nix", "AN-ORDINARY-POST")
+    t.mk(os.path.join(late, "+fleet", "fleet_99991231T235959.999999Z_from-nix_0000000a.txt"), "stamped as late as a stamp can be\n")
+    try:
+        out, code, err = t.run(["--dir", late, "channels"])
+    except ValueError as e:
+        out, code, err = "", None, f"ValueError: {e}"
+    t.ok(code == 0 and err == "" and "; last post 99991231T235959.999999Z; " in out,
+         "the CLI's channels shows a post stamped in the year 9999 by its own stamp instead of failing")
+    request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "channels", "arguments": {}}}
+    answer = t.serve_lines(t.server(late, "pi"), [json.dumps(request)])[0]
+    t.ok("error" not in answer and "; last post 99991231T235959.999999Z; " in answer["result"]["content"][0]["text"],
+         "the MCP channels tool answers it normally, not with -32603")
 
 
 def section_receive(t):
