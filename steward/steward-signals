@@ -7,8 +7,9 @@ The one thing it writes is the steward's daily metrics file (below).
 
 POLICY.md holds the steward's thresholds and self-caps as a Markdown table, | key | value | meaning |, with
 one row for each key in POLICY_KEYS. A missing, unknown or repeated key, or a value its key cannot use (a
-number above zero; for summary_local_time a time of day, HH:MM; for summary_tz a tz database name), is
-refused with the key named; nothing falls back to a default.
+number above zero of at most 12 ASCII digits, a whole number for the six keys that count things; for
+summary_local_time a time of day, HH:MM; for summary_tz a tz database name), is refused with the key named;
+nothing falls back to a default.
 
 TOPIC.md lists the topic's members as a Markdown table, | name | host | harness |, under a "## Members" heading. A
 name that is not an agent-mail name or is listed twice, or a member with no host, is refused with the name shown, and
@@ -68,6 +69,7 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -82,6 +84,9 @@ POLICY_KEYS = (
     "doorbell_delay_min", "tick_active_min", "tick_idle_min", "summary_local_time", "summary_tz",
 )
 NUMBER_RE = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+MAX_DIGITS = 12  # the most digits a number in POLICY.md may have: more is no policy, and 400 would read as inf where 4301 would make int() raise
+WHOLE_RE = re.compile(r"[0-9]+")
+COUNT_KEYS = ("nudges_per_item_day", "offer_items", "sends_per_turn", "sends_per_hour", "log_days", "ledger_kb")  # the keys whose value counts things, so a whole number
 TIME_RE = re.compile(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]")
 NAME_RE = re.compile(r"[a-z0-9](?:[a-z0-9.]|-(?!-))*")  # agent-mail's NAME_PAT; see grammatical
 HERA = "hera"  # the host that agent-deck answers for when it is run without a remote: its list and its session output
@@ -101,8 +106,9 @@ PROBE_WORDS = {True: "yes", False: "no", None: "unknown"}  # what the probe comm
 # ---- policy ----
 
 class PolicyError(Exception):
-    """A POLICY.md the helper refuses. .key names the row that is wrong and .reason says how, both as the file has
-    them. The message leaves out any question mark they hold, because nothing the steward prints may carry one."""
+    """A POLICY.md the helper refuses. .key is the key of the row that is wrong, as the file has it, and .reason says how, quoting the value as the file has
+    it where the value is part of the reason (a number of too many digits is counted, not quoted). Both keep any question mark the file holds. The message,
+    str(e), is the file, the key and the reason with every question mark taken out, because nothing the steward prints may carry one."""
 
     def __init__(self, key, reason):
         super().__init__(f"steward-signals: POLICY.md: {key}: {reason}".replace("?", ""))
@@ -131,8 +137,8 @@ def policy_rows(text):
 
 
 def policy_value(key, text):
-    """The value of one row: the time of day for summary_local_time, a tz database name for summary_tz,
-    else a number above zero."""
+    """The value of one row: the time of day for summary_local_time, a tz database name for summary_tz, a whole number above zero for each of
+    COUNT_KEYS, else a number above zero. A number is written in ASCII digits, at most MAX_DIGITS of them, those on both sides of the point counted."""
     if not text:
         raise PolicyError(key, "no value")
     if key == "summary_local_time":
@@ -145,8 +151,17 @@ def policy_value(key, text):
         except (zoneinfo.ZoneInfoNotFoundError, ValueError, OSError):
             raise PolicyError(key, f"expected a tz database name such as America/Los_Angeles, got {text!r}") from None
         return text
-    if NUMBER_RE.fullmatch(text) is None or float(text) == 0:
-        raise PolicyError(key, f"expected a number above zero, such as 45 or 0.5, got {text!r}")
+    if key in COUNT_KEYS:
+        pattern, wanted = WHOLE_RE, "a whole number above zero, such as 3"
+    else:
+        pattern, wanted = NUMBER_RE, "a number above zero, such as 45 or 0.5"
+    if pattern.fullmatch(text) is None:
+        raise PolicyError(key, f"expected {wanted}, got {text!r}")
+    digits = len(text) - text.count(".")
+    if digits > MAX_DIGITS:
+        raise PolicyError(key, f"expected a number of at most {MAX_DIGITS} digits, got one of {digits}")
+    if float(text) == 0:
+        raise PolicyError(key, f"expected {wanted}, got {text!r}")
     return float(text) if "." in text else int(text)
 
 
@@ -876,8 +891,8 @@ def self_test(names=()):
 
 def test_harness_contract(d):
     before = CHECKS
-    ok(True, "harness: a true check passes")
-    ok(CHECKS == before + 1, "harness: a pass is counted")
+    out, _, err = capture(ok, True, "unused")  # the call under test: a check that holds
+    ok(out == "" and err == "" and CHECKS == before + 1, "harness: a true check passes in silence and is counted once")
     ok(str(raises(TestFailed, ok, False, "boom")) == "boom", "harness: a false check raises TestFailed naming itself")
     ok("raised no KeyError" in str(raises(TestFailed, raises, KeyError, dict)), "harness: raises fails when nothing is raised")
     ok(str(raises(TestFailed, raises, SystemExit, ok, False, "inner")) == "inner", "harness: raises does not absorb a failed check, even when it expects SystemExit")
@@ -917,6 +932,43 @@ def test_sections_are_isolated(d):
     ok(restored and os.environ["HOME"] == d, "harness: the caller's variables are restored")
 
 
+# What a child Python runs to load this file as a module (its main block does not run), add a section that fails and one that passes, and exit with the status
+# of main on the arguments after the file's path. The sections are added after loading, so that the file holds nothing that only a check uses.
+LOAD_AND_RUN = """\
+import importlib.machinery, importlib.util, sys
+sys.dont_write_bytecode = True
+loader = importlib.machinery.SourceFileLoader("steward_signals_under_test", sys.argv[1])
+module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(module)
+module.SECTIONS["failing"] = lambda root: module.ok(False, "boom")
+module.SECTIONS["passing"] = lambda root: (module.ok(True, "one"), module.ok(True, "two"))
+sys.exit(module.main(sys.argv[2:]))
+"""
+
+
+def child(*args, loading=False):
+    """(status, stdout, stderr) of a child Python, started with -I, that runs this file's main on ARGS: the file run as a script, with its main block, or, when
+    LOADING, loaded as a module by LOAD_AND_RUN. It starts no agent-deck, and a section it runs has a temporary home of its own."""
+    script = os.path.realpath(__file__)
+    argv = [sys.executable, "-I", "-c", LOAD_AND_RUN, script, *args] if loading else [sys.executable, "-I", script, *args]
+    done = subprocess.run(argv, capture_output=True, encoding="utf-8", timeout=120)
+    return done.returncode, done.stdout, done.stderr
+
+
+def test_the_process_exits_with_the_self_tests_status(d):
+    got = child("self-test", "failing", loading=True)
+    ok(got == (1, "", "steward-signals self-test FAILED: boom\n"), f"harness: a failed check ends the process with status 1, the FAILED line on stderr and nothing on stdout (got {got!r})")
+    got = child("self-test", "passing", loading=True)
+    ok(got == (0, "steward-signals self-test: 2 checks passed\n", ""), f"harness: a run that passes ends the process with status 0 and says on stdout how many checks passed (got {got!r})")
+    status, out, err = got = child("self-test", "deck")  # a real section that is small and is not this one, which would run this check again and again
+    ok(status == 0 and re.fullmatch(r"steward-signals self-test: [1-9][0-9]* checks passed\n", out) is not None and err == "",
+       f"harness: the file run as a script ends a real section with status 0 and the count of its checks (got {got!r})")
+    status, out, err = got = child("self-test", "nosuch")
+    ok(status == 2 and out == "" and "no self-test section 'nosuch'" in err, f"harness: the file run as a script ends with status 2 for a section it does not have (got {got!r})")
+    status, out, err = got = child()
+    ok(status == 2 and out == "" and "required" in err, f"harness: and with status 2 for no command at all (got {got!r})")
+
+
 def test_policy_parses_spec_values(d):
     p = load_policy(os.path.join(REPO, "steward", "POLICY.md"))
     ok(p["stale_min"] == 45 and p["idle_min"] == 20 and p["question_min"] == 30, "policy: spec thresholds")
@@ -933,6 +985,11 @@ def test_policy_parses_spec_values(d):
 def table_with(table, key, row):
     """The Markdown TABLE with the row for KEY replaced by ROW, which may be empty."""
     return "".join(row if line.startswith(f"| {key} |") else line for line in table.splitlines(True))
+
+
+def policy_with(d, key, value):
+    """The path of a POLICY.md that is the checkout's with the value of KEY changed to VALUE, written over d/POLICY.md and to be used at once."""
+    return write(d, "POLICY.md", table_with(read(os.path.join(REPO, "steward", "POLICY.md")), key, f"| {key} | {value} | odd |\n"))
 
 
 def test_policy_refuses_bad_values(d):
@@ -953,7 +1010,7 @@ def test_policy_refuses_bad_values(d):
     ok(all(test[k] == p[k] for k in p if k not in day_zero), "policy: test policy leaves the rest unchanged")
     twice = write(d, "POLICY.md", TABLE + "| stale_min | 99 | again |\n")
     ok(raises(PolicyError, load_policy, twice).key == "stale_min", "policy: a key listed twice is refused, not resolved")
-    for value in ("nan", "inf", "-5", "1e3", "45 min", "4,5"):
+    for value in ("nan", "inf", "-5", "1e3", "45 min", "4,5", ".5", "5.", "1.2.3", "+5", "0x10", "1_000"):
         odd = write(d, "POLICY.md", table_with(TABLE, "deaf_min", f"| deaf_min | {value} | odd |\n"))
         ok(raises(PolicyError, load_policy, odd).key == "deaf_min", f"policy: {value!r} is not a number")
     novalue = write(d, "POLICY.md", table_with(TABLE, "deaf_min", "| deaf_min |  | blank |\n"))
@@ -977,22 +1034,16 @@ def test_policy_header_and_stray_rows(d):
 
 
 def test_policy_checks_values(d):
-    TABLE = read(os.path.join(REPO, "steward", "POLICY.md"))
-
-    def with_value(key, value):
-        """The path of a POLICY.md in which KEY has VALUE, written over d/POLICY.md and to be used at once."""
-        return write(d, "POLICY.md", table_with(TABLE, key, f"| {key} | {value} | odd |\n"))
-
-    for value in ("banana", "7:30", "24:00", "07:60", "0730", "07:30pm"):
-        ok(raises(PolicyError, load_policy, with_value("summary_local_time", value)).key == "summary_local_time", f"policy: {value!r} is not a time of day")
+    for value in ("banana", "7:30", "24:00", "07:60", "0730", "07:30pm", "07:3", "07:300", "07:30:00"):
+        ok(raises(PolicyError, load_policy, policy_with(d, "summary_local_time", value)).key == "summary_local_time", f"policy: {value!r} is not a time of day")
     for value in ("00:00", "23:59"):
-        ok(load_policy(with_value("summary_local_time", value))["summary_local_time"] == value, f"policy: {value} is a time of day")
+        ok(load_policy(policy_with(d, "summary_local_time", value))["summary_local_time"] == value, f"policy: {value} is a time of day")
     for value in ("America/Los_Angelas", "banana", "America/", "../etc/passwd"):
-        ok(raises(PolicyError, load_policy, with_value("summary_tz", value)).key == "summary_tz", f"policy: {value!r} is not a tz database name")
-    ok(load_policy(with_value("summary_tz", "UTC"))["summary_tz"] == "UTC", "policy: UTC is a tz database name")
+        ok(raises(PolicyError, load_policy, policy_with(d, "summary_tz", value)).key == "summary_tz", f"policy: {value!r} is not a tz database name")
+    ok(load_policy(policy_with(d, "summary_tz", "UTC"))["summary_tz"] == "UTC", "policy: UTC is a tz database name")
     for value in ("0", "0.0", "00"):
-        ok(raises(PolicyError, load_policy, with_value("tick_active_min", value)).key == "tick_active_min", f"policy: {value!r} is not above zero")
-    ok(load_policy(with_value("tick_active_min", "0.5"))["tick_active_min"] == 0.5, "policy: a fraction above zero is a number")
+        ok(raises(PolicyError, load_policy, policy_with(d, "tick_active_min", value)).key == "tick_active_min", f"policy: {value!r} is not above zero")
+    ok(load_policy(policy_with(d, "tick_active_min", "0.5"))["tick_active_min"] == 0.5, "policy: a fraction above zero is a number")
 
 
 def test_policy_message_has_no_question_mark(d):
@@ -1000,20 +1051,70 @@ def test_policy_message_has_no_question_mark(d):
     variants = (("a value", table_with(TABLE, "stale_min", "| stale_min | 45? | odd |\n"), "stale_min"),
                 ("a key", TABLE + "| idel_min? | 20 | typo |\n", "idel_min?"),
                 ("a time", table_with(TABLE, "summary_local_time", "| summary_local_time | soon? | odd |\n"), "summary_local_time"),
-                ("a zone", table_with(TABLE, "summary_tz", "| summary_tz | Mars/Olympus? | odd |\n"), "summary_tz"))
+                ("a zone", table_with(TABLE, "summary_tz", "| summary_tz | Mars/Olympus? | odd |\n"), "summary_tz"),
+                ("a value with two", table_with(TABLE, "stale_min", "| stale_min | 4?5? | odd |\n"), "stale_min"),
+                ("a key with two", TABLE + "| id?el_min? | 20 | typo |\n", "id?el_min?"),
+                ("a time with two", table_with(TABLE, "summary_local_time", "| summary_local_time | so?on? | odd |\n"), "summary_local_time"),
+                ("a zone with two", table_with(TABLE, "summary_tz", "| summary_tz | Mars/?Olympus? | odd |\n"), "summary_tz"),
+                ("a count with two", table_with(TABLE, "log_days", "| log_days | 1?4? | odd |\n"), "log_days"))
     for what, text, key in variants:
         e = raises(PolicyError, load_policy, write(d, "POLICY.md", text))
         ok(e.key == key and "?" not in str(e) and key.replace("?", "") in str(e), f"policy: a question mark in {what} does not reach the message")
+    e = raises(PolicyError, load_policy, write(d, "POLICY.md", table_with(TABLE, "stale_min", "| stale_min | 4?5? | odd |\n")))
+    ok(e.key == "stale_min" and e.reason.count("?") == 2 and "?" not in str(e), "policy: .reason keeps every question mark of the file's text, and the message loses all of them")
+
+
+def test_policy_reads_ascii_digits_only(d):
+    for what, zero in (("Arabic-Indic", ARABIC_INDIC), ("fullwidth", FULLWIDTH)):
+        def other(text):
+            return digits_as(text, zero)
+
+        # all the digits of another script, and one of them among ASCII ones, in each place that a pattern could take by mistake
+        for key, odd in (("stale_min", other("45")), ("stale_min", "4" + other("5")), ("busy_stuck_h", other("4.5")), ("busy_stuck_h", "4." + other("5")),
+                         ("sends_per_hour", other("20")), ("sends_per_hour", "2" + other("0")), ("summary_local_time", other("07:30")),
+                         ("summary_local_time", "0" + other("7") + ":30"), ("summary_local_time", "07:3" + other("0"))):
+            ok(raises(PolicyError, load_policy, policy_with(d, key, odd)).key == key, f"policy: {odd!r} is not a value of {key}, since a digit of it is a {what} one")
+
+
+def test_policy_numbers_have_at_most_12_digits(d):
+    for key in ("stale_min", "sends_per_hour"):
+        ok(load_policy(policy_with(d, key, "9" * 12))[key] == 10 ** 12 - 1, f"policy: a number of 12 digits is read ({key})")
+        e = raises(PolicyError, load_policy, policy_with(d, key, "9" * 13))
+        ok(e.key == key and "12 digits" in e.reason, f"policy: a number of 13 digits is refused, saying why ({key})")
+    ok(load_policy(policy_with(d, "stale_min", "0." + "1" * 11))["stale_min"] == float("0." + "1" * 11), "policy: a decimal of 12 digits is read")
+    ok(raises(PolicyError, load_policy, policy_with(d, "stale_min", "0." + "1" * 12)).key == "stale_min", "policy: a decimal of 13 digits is refused: the digits on both sides of the point count")
+    for what, value in (("5000 digits", "9" * 5000), ("4301 digits", "1" * 4301), ("a fraction of 400 digits", "1" + "0" * 400 + ".5")):
+        e = raises(PolicyError, load_policy, policy_with(d, "idle_min", value))
+        ok(e.key == "idle_min" and len(str(e)) < 200, f"policy: {what} is refused with the key named, neither read as inf nor left to int() to refuse, and the message does not echo it")
+
+
+def test_policy_counts_are_whole_numbers(d):
+    counts = ("nudges_per_item_day", "offer_items", "sends_per_turn", "sends_per_hour", "log_days", "ledger_kb")
+    ok(COUNT_KEYS == counts, "policy: the keys that count things are the six the spec names")
+    real = load_policy(os.path.join(REPO, "steward", "POLICY.md"))
+    ok(all(type(real[key]) is int for key in counts), "policy: each count of the checkout's POLICY.md is an int")
+    for key in counts:
+        for value in ("2.5", "5.0", "0.5", ".5", "5.", "0", "00", "-1", "banana"):
+            e = raises(PolicyError, load_policy, policy_with(d, key, value))
+            ok(e.key == key and "whole number" in e.reason, f"policy: {value!r} is not a count of {key}, which is a whole number above zero")
+        ok(load_policy(policy_with(d, key, "3"))[key] == 3, f"policy: 3 is a count of {key}")
+    for key in POLICY_KEYS:
+        if key not in counts and not key.startswith("summary_"):
+            ok(load_policy(policy_with(d, key, "2.5"))[key] == 2.5, f"policy: {key} does not count anything, so a fraction is a value of it")
 
 
 @section("policy")
 def section_policy(d):
     test_harness_contract(d)
     test_sections_are_isolated(d)
+    test_the_process_exits_with_the_self_tests_status(d)
     test_policy_parses_spec_values(d)
     test_policy_refuses_bad_values(d)
     test_policy_header_and_stray_rows(d)
     test_policy_checks_values(d)
+    test_policy_reads_ascii_digits_only(d)
+    test_policy_numbers_have_at_most_12_digits(d)
+    test_policy_counts_are_whole_numbers(d)
     test_policy_message_has_no_question_mark(d)
 
 
@@ -1795,13 +1896,22 @@ def fd2_to(path):
 
 @contextlib.contextmanager
 def agent_deck_refused():
-    """Within the block, no check can start agent-deck: subprocess.Popen, which subprocess.run and the other ways of starting a process call, records
-    the command of a start whose program is named agent-deck in the list the block gets, and raises OSError. Any other program starts as it is given."""
+    """Within the block, a start of agent-deck through subprocess.Popen is refused. Popen is the only way this file starts a process, and subprocess.run
+    and the other ways of starting one that subprocess has call it; a start by another way, os.system, os.exec* or os.posix_spawn, would not be caught, and
+    the file makes none. A start whose program is named agent-deck, by whatever path, is recorded in the list the block gets, as the words of its command,
+    and raises OSError. A command line for a shell is split as a shell splits it, so that a quoted path with spaces in it is one word, and one that cannot be
+    split, for a quote that is never closed, is read as plain words. Any other program starts as it is given."""
     started = []
     popen = subprocess.Popen
 
     def guarded(args, *rest, **kwargs):
-        words = args.split() if isinstance(args, str) else list(args)
+        if isinstance(args, str):
+            try:
+                words = shlex.split(args)
+            except ValueError:  # a quote that is never closed: the shell would refuse the line, but the guard reads it as plain words
+                words = args.split()
+        else:
+            words = list(args)
         if words and os.path.basename(words[0]) == "agent-deck":
             started.append(words)
             raise OSError("agent-deck was started")
@@ -1965,12 +2075,13 @@ def test_probe_options(d):
 
 
 def test_the_guard_refuses_every_way_to_start_agent_deck(d):
-    bin_dir = os.path.join(d, "bin")
+    bin_dir = os.path.join(d, "a directory with spaces")  # as a $TMPDIR may give: a path that is quoted in a command line is one word of it, not several
     os.mkdir(bin_dir)
     stand_in = write(bin_dir, "agent-deck", f"#!{sys.executable}\n")  # a program of that name that does nothing, so that a guard that fails starts this and not the real one
     os.chmod(stand_in, 0o755)
     ways = {"subprocess.run": lambda: subprocess.run([stand_in]), "subprocess.Popen": lambda: subprocess.Popen([stand_in]).wait(),
-            "subprocess.check_output": lambda: subprocess.check_output([stand_in]), "a command line for a shell": lambda: subprocess.run(f"{stand_in} list", shell=True)}
+            "subprocess.check_output": lambda: subprocess.check_output([stand_in]), "a command line for a shell": lambda: subprocess.run(shlex.join([stand_in, "list"]), shell=True),
+            "a command line for a shell that does not parse": lambda: subprocess.run("agent-deck 'unclosed", shell=True)}
     run, popen = subprocess.run, subprocess.Popen
     with agent_deck_refused() as started:
         for name, way in ways.items():
@@ -1980,7 +2091,9 @@ def test_the_guard_refuses_every_way_to_start_agent_deck(d):
                 continue
             ok(False, f"probe: the guard let {name} start agent-deck")
         ok(subprocess.run([sys.executable, "-I", "-c", "pass"]).returncode == 0, "probe: the guard lets another program start")
-    ok(len(started) == len(ways), "probe: the guard refuses subprocess.run, subprocess.Popen, subprocess.check_output and a shell command line, and records each")
+    ok(started == [[stand_in], [stand_in], [stand_in], [stand_in, "list"], ["agent-deck", "'unclosed"]],
+       "probe: the guard refuses subprocess.run, subprocess.Popen, subprocess.check_output and a shell command line, and records each as the words of its command: a quoted path with spaces in it is "
+       "one word, and a line the shell could not parse is read as plain words")
     ok(subprocess.run is run and subprocess.Popen is popen, "probe: the guard puts every way to start a process back")
 
 
