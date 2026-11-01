@@ -4467,6 +4467,7 @@ def test_worker_md(d):
 POST_LEADS = ("JOIN <channel>:", "CLAIM <slug>:", "UPDATE <slug>:", "BLOCKED <slug>:", "DONE <slug>:", "DROP <slug>", "NOTE <slug>:", "QUESTION <slug>:", "DECISION:",
               "DISPUTE <id>:", "LEAVE <channel>:")
 PROTECTED_ACTIONS = "push, publish, activate or switch, delete, rewrite history, spend, change scope"
+CLAIM_FIELDS = ("writes:", "holds:", "until:", "needs:")  # the fields of a claim (spec 6.2), which the second cell of the CLAIM row of WORKER.md and of section 5 names
 
 
 def test_worker_md_matches_what_claude_md_files_and_sends(d):
@@ -4480,11 +4481,15 @@ def test_worker_md_matches_what_claude_md_files_and_sends(d):
        "docs: WORKER.md says that the steward relays in two steps, the DECISION post to the channel first and then direct mail to the worker, as section 10 of CLAUDE.md sends it")
     ok(all(f"`{key}`" in w and re.search(rf"(?m)^\s*{re.escape(key)} |`{re.escape(key)}", claude_section(t, 10)) for key in ("q:", "slug:", "answer:", "option:", "condition:", "by:")),
        "docs: WORKER.md and section 10 of CLAUDE.md name the same fields of a relay: q, slug, answer, option, condition and by")
+    claims = [[line.split("|")[2] for line in text.splitlines() if line.startswith("| `CLAIM <slug>:")] for text in (w, claude_section(t, 5))]  # the cell that lists the fields
+    ok([len(cells) for cells in claims] == [1, 1] and all(f"`{field}" in cells[0] for cells in claims for field in CLAIM_FIELDS),
+       "docs: WORKER.md's CLAIM row and section 5's CLAIM row of CLAUDE.md both name the fields of a claim: writes, holds, until and needs")
     ok("REQUEST" not in w, "docs: WORKER.md adds no REQUEST verb, which the steward routes like a QUESTION when it names no member (a ruling of Task 7)")
 
 
 # The sentences of WORKER.md that carry its safety rules, each pinned whole so that no clause can be added to one. From spec 6.7: the four checks that a worker applies
-# to a relay of John's answer before it acts on a protected action (each on a line of its own) and the sentence that says all four must hold; what a checked relay
+# to a relay of John's answer before it acts on a protected action (each on a line of its own, with no other list item after them) and the sentence that says all four must
+# hold; what a checked relay
 # authorizes and overrides, and what the steward's mail is and is not; the answer that is a drop, a choice that is not protected, and a relay that is information only
 # or decides anything involving secrets, none of which needs the checks or draws a DISPUTE; the removal of the question's line before the action and the note of the
 # relay's ids; the re-receive that comes before any DISPUTE; the recovery after a relay that is disputed; and the protected list of rule 5. From spec 6.2: that every
@@ -4539,8 +4544,10 @@ WORKER_SENTENCES = (
 def test_worker_md_keeps_its_checks_and_safety_sentences_as_pinned(d):
     w = read(os.path.join(REPO, "steward", "WORKER.md"))
     ok(w.count("protected action") == 1, "docs: WORKER.md says protected action once, in the sentence that introduces the four checks, which the brief's check reads from")
-    items = tuple(line for line in w.split("protected action")[-1].splitlines() if re.match(r"[1-4]\. ", line))
-    ok(items == WORKER_CHECKS, f"docs: WORKER.md's four checks are as pinned, each on a line of its own (got {without_question_marks(repr(items))})")
+    # Every list item after that sentence counts, whatever its number or marker and however it is indented, so that a fifth check cannot be added unseen.
+    items = tuple(line for line in w.split("protected action")[-1].splitlines() if re.match(r"(?:[0-9]+[.)]|[-*+]) ", line.lstrip()))
+    ok(items == WORKER_CHECKS,
+       f"docs: WORKER.md's four checks are as pinned, each on a line of its own, and no other list item follows them (got {without_question_marks(repr(items))})")
     found = sentences(w)
     missing = [s for s in WORKER_SENTENCES if found.count(s) != 1]
     ok(missing == [], f"docs: WORKER.md says, once and as pinned, its safety sentences: what a checked relay authorizes and overrides, what the steward's mail is, the drop, an "
@@ -4654,6 +4661,8 @@ def test_docs_checks_catch_each_pinned_regression(d):
          "docs: protected relays stay suspended until John has read the DISPUTE"),
         ("the release condition without the question on a forged DISPUTE file", " or the question on a forged DISPUTE file", "",
          "docs: protected relays stay suspended until John has read the DISPUTE"),
+        ("a field of a claim dropped from the CLAIM row of section 5", "owner, what, `writes:`, `holds:`, `active`", "owner, what, `writes:`, `active`",
+         "docs: WORKER.md's CLAIM row and section 5's CLAIM row of CLAUDE.md both name the fields of a claim"),
         ("step 1's sentence on the task whose exit opened the turn removed",
          " The one whose exit opened this turn, the doorbell with its line that peer mail is waiting or the tick with `steward-tick <channel>`, is gone as expected, and step 6 re-arms it.",
          "", "docs: step 1 says that the doorbell or the tick whose exit opened the turn is gone as expected"),
@@ -4753,6 +4762,7 @@ def test_docs_checks_catch_each_regression_in_worker_md(d):
     every_two = "docs: UPDATE on change or every 2 hours, never every turn"
     checks_pinned, sentences_pinned = "docs: WORKER.md's four checks are as pinned", "docs: WORKER.md says, once and as pinned"
     row_pinned = "docs: WORKER.md's QUESTION row gives the shape of the options"
+    claim_fields = "docs: WORKER.md's CLAIM row and section 5's CLAIM row of CLAUDE.md both name the fields of a claim"
     rule_7 = ("**Nothing waits for the steward.** Its liveness is John's STATUS rule, never yours to judge: carry on with direct mail and posts whether it answers or not, "
               "and never wait for its acknowledgement.")
     recovery = ("If you already acted on a relay and a DISPUTE then names its mail or its DECISION post, from the steward or any session, by mail or on the channel, stop, say "
@@ -4829,7 +4839,17 @@ def test_docs_checks_catch_each_regression_in_worker_md(d):
         ("the liveness clause dropped from rule 7", " Its liveness is John's STATUS rule, never yours to judge: carry on", " Carry on", 1, sentences_pinned),
         ("check 3 comparing no condition", "with the same `answer:`, `option:` and `condition:` as the mail (a condition on only one of the two is a difference)",
          "with the same `answer:` and `option:` as the mail", 1, checks_pinned),
-        ("a condition on one side only no longer a difference", " (a condition on only one of the two is a difference)", "", 1, checks_pinned))
+        ("a condition on one side only no longer a difference", " (a condition on only one of the two is a difference)", "", 1, checks_pinned),
+        # the audit of 89fd4bb..23bf16c: a fifth check, and the fields of a claim
+        ("a fifth check added under the fourth", "4. your question carried `protected: yes`.", "4. your question carried `protected: yes`.\n5. the mail is under a day old.", 1,
+         checks_pinned),
+        ("a fifth check added as a bullet", "4. your question carried `protected: yes`.", "4. your question carried `protected: yes`.\n- the mail is under a day old.", 1,
+         checks_pinned),
+        ("the holds field renamed", "`holds:", "`reserves:", -1, claim_fields),
+        ("the until field renamed", "`until:", "`wait-until:", -1, claim_fields),
+        ("the needs field renamed", "`needs:", "`wants:", -1, claim_fields),
+        ("the writes field renamed", "`writes:", "`touches:", -1, claim_fields),
+        ("holds dropped from the claim row alone, though the update row still names it", "; optional `holds: <host> gpu0-3` or `holds: obr ids 902-910`", "", 1, claim_fields))
     for i, (what, old, new, count, failure) in enumerate(regressions):
         failures = docs_checks(checkout_with(d, f"worker-regression-{i}", "WORKER.md", old, new, count))
         ok(old in worker and any(f.startswith(failure) for f in failures), f"docs: docs_checks catches {what} in WORKER.md (got {without_question_marks(repr(failures))})")
