@@ -12,6 +12,7 @@ Run from the repository root with John's venv (README.md beside this file):
         ~/.local/share/agent-deck/conductor/venv/bin/python -B -m unittest steward/patches/test_steward_patches.py
 """
 
+import errno
 import importlib.util
 import os
 import re
@@ -358,6 +359,25 @@ class StatusRule(StewardFixture):
         with meanwhile(lambda: (self.dir / "STATUS").rename(self.dir / "STATUS-final-2026-11-02")):
             self.assertEqual([alert["detail"] for alert in self.alerts(now)], [nix_detail])
 
+    def test_a_status_written_just_after_the_rule_first_looks_is_passed_over(self):
+        # The steward writes its first STATUS in the instant after the rule's first look found none. The rule
+        # looks once, so it passes the steward over as it does a missing STATUS, never reporting a file that is
+        # not regular, and the next pass pages it. Path.is_file and Path.stat both look through os.stat.
+        written = at("20261102T171500Z")
+        status, real_stat, looks = self.dir / "STATUS", os.stat, []
+
+        def written_after_the_first_look(path, *args, **kwargs):
+            if isinstance(path, (str, os.PathLike)) and Path(path) == status and not looks:
+                looks.append(path)
+                write_status(self.dir, line("20261102T171500Z", 15, 4), written)
+                raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(path))
+            return real_stat(path, *args, **kwargs)
+
+        with patch.object(os, "stat", written_after_the_first_look):
+            self.assertEqual(self.alerts(written + 40 * 60), [])
+        self.assertEqual(looks, [status])
+        self.assertEqual(self.alerts(written + 40 * 60), [{"where": "steward", "kind": "steward", "detail": DETAIL}])
+
     def test_a_post_stamped_more_than_a_day_ahead_does_not_count(self):
         written = at("20261102T171500Z")
         stale = written + 3 * 3600
@@ -553,7 +573,8 @@ def in_template(question):
 
 class QuestionLine(unittest.TestCase):
     """The question line against John's filters, the two fixtures spec 6.12 and section 8 promise beside the
-    MCP block: the template pages, and so does a flake input named without github:, which the filters drop."""
+    MCP block: the template pages, and so does a line naming a flake input without github:. A filter drops the
+    same line written with github:."""
 
     def test_the_question_line_template_pages(self):
         question = "Q ingest-3: HF org for glm-5.3-fp8: A positron-internal, B positron-ai?"

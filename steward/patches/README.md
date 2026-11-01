@@ -12,10 +12,12 @@ The patch was made against the scanner of 2026-10-31 11:46 (73,768 bytes, sha256
 Keep a copy of the live scanner, then check, then apply:
 
 ```sh
-cp -p ~/.local/share/agent-deck/conductor/director/monitor_sessions.py ~/.local/share/agent-deck/conductor/director/monitor_sessions.py.pre-steward
-patch -p0 --dry-run -d ~/.local/share/agent-deck/conductor/director < steward/patches/monitor_sessions-steward.patch
-patch -p0 -d ~/.local/share/agent-deck/conductor/director < steward/patches/monitor_sessions-steward.patch
+cp -n -p ~/.local/share/agent-deck/conductor/director/monitor_sessions.py ~/.local/share/agent-deck/conductor/director/monitor_sessions.py.pre-steward
+patch -p0 --dry-run -d ~/.local/share/agent-deck/conductor/director < steward/patches/monitor_sessions-steward.patch &&
+    patch -p0 -d ~/.local/share/agent-deck/conductor/director < steward/patches/monitor_sessions-steward.patch
 ```
+
+`cp -n` never replaces a copy that is already there, so running this block a second time cannot make the patched scanner the copy that Undo restores. The `&&` runs the real patch only after a clean dry run, since a patch that rejects a hunk still applies the hunks that fit.
 
 If the dry run reports a rejected hunk, the scanner has changed since the patch was made: regenerate the patch against the new file rather than forcing it.
 

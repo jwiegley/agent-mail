@@ -1,6 +1,14 @@
 --- monitor_sessions.py
 +++ monitor_sessions.py
-@@ -98,6 +98,10 @@
+@@ -14,6 +14,7 @@
+ import json
+ import re
+ import shlex
++import stat
+ import subprocess
+ import sys
+ import time
+@@ -98,6 +99,10 @@
  SCHEDULED_ERR = CWD / "scheduled_continue.err"
  DEAD_LETTER_DIR = CWD.parents[1] / "inboxes" / "dead-letter"
  TERMINAL_DEAD_LETTER_REASONS = {"parent_removed", "unresolvable"}
@@ -11,7 +19,7 @@
  
  
  def run(args: list[str], timeout: int = 20) -> subprocess.CompletedProcess[str]:
-@@ -742,6 +746,19 @@
+@@ -742,6 +747,19 @@
      result["questions"].append(item)
  
  
@@ -31,7 +39,7 @@
  def visible_prompt_or_question(text: str) -> str | None:
      lines = [clean(line) for line in text.splitlines() if clean(line)]
      # Native question forms remain actionable even when '?' is mid-wrap or
-@@ -801,7 +818,7 @@
+@@ -801,7 +819,7 @@
          if lines[index].startswith(("⏺", "●")):
              if "User answered Claude's questions" in lines[index]:
                  return None
@@ -40,7 +48,7 @@
                  return None
              lines = lines[index:]
              break
-@@ -1122,6 +1139,129 @@
+@@ -1122,6 +1140,129 @@
      state["attention_indicator"] = {**result["indicator"], "checked_at": result["timestamp"]}
  
  
@@ -116,8 +124,8 @@
 +    pass.  A missing file raises FileNotFoundError, and any other trouble
 +    raises OSError or ValueError with a message that names the file.
 +    """
-+    if not path.is_file():
-+        path.stat()  # FileNotFoundError when it is gone; another OSError when it cannot be looked at
++    # One stat, so a file that appears between two looks is never reported as not regular.
++    if not stat.S_ISREG(path.stat().st_mode):
 +        raise OSError(f"{path.name} is not a regular file")
 +    try:
 +        with path.open(encoding="utf-8") as handle:
@@ -170,7 +178,7 @@
  def deliver_attention(state: dict, result: dict) -> None:
      """Send actionable alerts; retain deduplication only after confirmed delivery."""
      try:
-@@ -1141,6 +1281,8 @@
+@@ -1141,6 +1282,8 @@
          {"where": item["where"], "kind": "stall", "detail": "No meaningful pane progress for the policy threshold."}
          for item in result["stalled_sessions"]
      )
@@ -179,7 +187,7 @@
      recovered = {
          item["where"] for item in result["actions"]
          if item["action"] == "Continue" and item.get("reason") == "errored-session recovery"
-@@ -1200,6 +1342,7 @@
+@@ -1200,6 +1343,7 @@
          "actions": [],
          "questions": [],
          "stalled_sessions": [],
@@ -187,7 +195,7 @@
          "errors": [],
          "session_ids": {},
      }
-@@ -1603,6 +1746,12 @@
+@@ -1603,6 +1747,12 @@
              finally:
                  run(["tmux", "kill-session", "-t", scan], timeout=10)
  
