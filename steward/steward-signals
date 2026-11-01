@@ -50,20 +50,23 @@ The signals command is the one call the steward makes at the start of a turn. It
 refused before it acts), SENT.log, NOTES.log and steward-state.json in the conductor directory, lists the mailbox and +CHANNEL, reads the mtimes of the member
 records, asks agent-deck once for each host, and prints one table: a row for each member, in roster order, with its host, its harness, agent-deck's status,
 substate and background work, the age of its last activity, its unread direct mail with the age of the oldest, and the age of its member record (never for a
-member with none). A member whose host could not be listed is unknown in each agent-deck column, and one that agent-deck lists as archived, or does not list,
-is not in agent-deck. Then come the exceptions (each file in the steward's name that SENT.log does not account for, and each NUDGE of the steward's still
-unread), the counts (the posts to +CHANNEL stamped after the last call, and the mail between members that no NOTE names) and, with --probe, the probe's word
-for one member; --json prints the same as one JSON object. The steward's name is conductor- and the name of the conductor directory. After the report, the
-time of the call is written whole to steward-state.json as signals_last; the other keys the steward keeps there are left as they are, and a file that is not
-a JSON object, or a signals_last that is not a stamp, is kept as steward-state.json.bad and every post is counted, with one notice on stderr. That file is
-all the command writes. Ages are rounded down: 45m, 3h, 2d.
+member with none). A member whose host could not be listed is unknown in each agent-deck column; one its host's listing does not hold is not in
+agent-deck, an archived one is archived, and a listed one with no status that can be read is unknown. Then come the exceptions (each file in the steward's
+name that SENT.log does not account for, and each NUDGE of the steward's still unread; 40 lines at most, then how many more), the counts (the posts to
++CHANNEL by others than the steward that arrived after the last call, by their ctimes, and the mail between members that no NOTE names) and, with
+--probe, the probe's word for one member; --json prints the same as one JSON object, with every exception. The steward's name is
+conductor- and the name of the conductor directory, and a TOPIC.md that lists the steward is refused. The mailbox is found as agent-mail finds its own:
+--mailbox, else $AGENT_MAIL_DIR, else the dir that agent-mail's config file gives the steward, this host or every host, else ~/Mailbox. After the report,
+the time of the call is written whole to steward-state.json as signals_last; the other keys the steward keeps there are left as they are, and a file that is
+not a JSON object, or a signals_last that is not a stamp or is in the future, is kept as steward-state.json.bad and every post is counted, with one notice on
+stderr. That file is all the command writes. Ages are rounded down: 45m, 3h, 2d.
 
 Commands:
   self-test [SECTION ...]
       Run the built-in checks, each section in a fresh temporary home.
   signals CHANNEL --dir CONDUCTOR_DIR [--mailbox DIR] [--json] [--probe NAME]
       Print the topic's signals: a row for each member of the TOPIC.md in CONDUCTOR_DIR, the exceptions, the counts and, with --probe, the probe's word for
-      one member. The mailbox is DIR, else $AGENT_MAIL_DIR, else ~/Mailbox. The call's time is written to CONDUCTOR_DIR/steward-state.json as signals_last,
+      one member. The mailbox is DIR, else found as agent-mail finds its own. The call's time is written to CONDUCTOR_DIR/steward-state.json as signals_last,
       and nothing else is written. A file, mailbox or channel that cannot be read is refused: status 2, a reason on stderr, nothing on stdout.
   probe NAME --dir CONDUCTOR_DIR
       Print yes, no or unknown: whether the last response of the member NAME ends with a question. The member's host is read from the
@@ -90,6 +93,7 @@ import pathlib
 import re
 import shlex
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -248,6 +252,17 @@ def grammatical(name):
     return NAME_RE.fullmatch(name) is not None and len(name) <= 64 and not name.endswith("-")
 
 
+def first_table(lines):
+    """The lines of the first Markdown table in LINES: the first run of lines that start with "|", up to the first line that does not."""
+    table = []
+    for line in lines:
+        if line.lstrip().startswith("|"):
+            table.append(line)
+        elif table:
+            break
+    return table
+
+
 def section_lines(text, heading):
     """The lines of TEXT under the Markdown heading HEADING (in any case), up to the next heading or the end of the
     file; None when TEXT has no such heading."""
@@ -264,8 +279,9 @@ def section_lines(text, heading):
 
 def load_roster(path):
     """The members in the "## Members" table of the TOPIC.md at PATH, in table order, as Member(name, host, harness).
-    The table's first row is its header, name | host | harness in any case, so that no cell is read in the wrong
-    place; the header row of a second table under the heading is skipped. A name that is not an agent-mail name or is
+    The roster is the first table under the heading, and a table after it is not read; its first row is its header,
+    name | host | harness in any case, so that no cell is read in the wrong place, and a row that repeats the header
+    is skipped. A name that is not an agent-mail name or is
     listed twice, a member with no host or with a host that HOST_RE does not match, a table whose header is another
     (or no table at all), and a file with no such heading raise RosterError, so the steward never watches a name it
     cannot mail or a member it cannot look up, agent-deck never takes a host for a flag, and a typo in the heading is
@@ -275,7 +291,7 @@ def load_roster(path):
     section = section_lines(text, "## Members")
     if section is None:
         raise RosterError("## Members", "no such heading")
-    rows = [tuple(row) for row in table_rows(section, 3)]
+    rows = [tuple(row) for row in table_rows(first_table(section), 3)]
     header = ("name", "host", "harness")
     if not rows or tuple(cell.casefold() for cell in rows[0]) != header:
         raise RosterError("Members", "the table's header must be name | host | harness")
@@ -325,8 +341,9 @@ def background_kind(row):
     steward does not rely on it), "tool" (any other), None (none) or "unknown" (some, but nothing says what). It is
     shell when the kind says shell or the text holds one of SHELL_WORDS, the word shell among them. A shell word
     anywhere in the text counts, so a task named for one reads as shell work too, which errs on the safe side: the
-    steward treats shell work as unknown. A watching substate is always shell, since agent-deck's detail for it
-    starts "1 watching", which holds watch."""
+    steward treats shell work as unknown. A watching substate whose detail is agent-deck's own is shell, since that
+    detail starts "1 watching", which holds watch; one with no detail is unknown, as any background work is that
+    nothing describes."""
     work = row.get("background_work")  # hera's rows: background_work.kind and .task
     if isinstance(work, dict) and work:
         kind, text = work.get("kind"), work.get("task")
@@ -370,14 +387,15 @@ def row_rank(session):
 
 
 def deck_rows(run, members, hera_host=HERA):
-    """The agent-deck row of each member, by name: dict(status, substate, bg, last_activity, archived, host_ok).
+    """The agent-deck row of each member, by name: dict(status, substate, bg, last_activity, archived, listed, host_ok).
     RUN(argv) returns (stdout, returncode) and should not raise; a host whose RUN raises is one that does not answer.
     The rows are keyed host by host, not in roster order. Members on HERA_HOST are read from `agent-deck list
     --json`, the others from `agent-deck remote sessions HOST --json --with-errors`, one call for each host, and
-    matched to rows by title, exactly; of several rows with one title the best by row_rank is read. A member its
-    host's listing does not hold has host_ok true and every other field None; a host that does not answer (see
-    deck_sessions), or has no name, gives each of its members host_ok false and every other field None, so a silent
-    host is never read as stopped members. A field a row lacks or holds in the wrong form is None, or "unknown" for
+    matched to rows by title, exactly; of several rows with one title the best by row_rank is read. listed is True
+    for a member whose title its host's listing holds, whatever else the row says. A member the listing does not hold
+    has listed False, host_ok true and every other field None; a host that does not answer (see deck_sessions), or
+    has no name, gives each of its members host_ok false and every other field None, listed included, so a silent
+    host is never read as stopped or missing members. A field a row lacks or holds in the wrong form is None, or "unknown" for
     bg; nothing raises."""
     rows = {}
     for host in dict.fromkeys(m.host for m in members):  # each host once, in roster order
@@ -396,7 +414,7 @@ def deck_rows(run, members, hera_host=HERA):
                 session = by_title.get(m.name, {})
                 rows[m.name] = {"status": text_of(session.get("status")), "substate": text_of(session.get("substate")), "bg": background_kind(session),
                                 "last_activity": utc_of(session.get("last_activity_at")), "archived": bool_of(session.get("archived")),
-                                "host_ok": sessions is not None}
+                                "listed": None if sessions is None else m.name in by_title, "host_ok": sessions is not None}
     return rows
 
 
@@ -413,11 +431,20 @@ def real_run(argv):
 
 def runner_for(fixture):
     """The run(argv) the commands use: real_run, or, when FIXTURE is a path (the hidden --run-fixture, which only the self-test gives), a fake_run
-    that answers as the JSON object in that file says, so that no check runs the real agent-deck."""
+    that answers as the JSON object in that file says, so that no check runs the real agent-deck. A fixture file that cannot be read, is not JSON or
+    holds no JSON object raises ValueError with the reason."""
     if fixture is None:
         return real_run
-    with open(fixture, encoding="utf-8") as f:
-        return fake_run(json.load(f))
+    try:
+        with open(fixture, encoding="utf-8") as f:
+            answers = json.load(f)
+    except OSError as e:
+        raise ValueError(e.strerror or "it cannot be read") from None
+    except (ValueError, RecursionError):  # not JSON, not UTF-8, or nested too deep to read
+        raise ValueError("not valid JSON") from None
+    if not isinstance(answers, dict):
+        raise ValueError("not a JSON object")
+    return fake_run(answers)
 
 
 # ---- census ----
@@ -637,21 +664,32 @@ def probe(run, name, host):
     return bool(lines) and lines[-1].endswith("?")
 
 
+class Refusal(Exception):
+    """A signals call that is refused. The message is the line it prints on stderr."""
+
+
+def conductor_file(directory, name, reader):
+    """READER(path) for the file NAME in the conductor directory DIRECTORY. A failure is raised as a Refusal: the reader's own message for a PolicyError or a
+    RosterError, and otherwise the OS error's reason, or that the file is not UTF-8, with the file's name and not its path, which may hold a question mark."""
+    try:
+        return reader(os.path.join(directory, name))
+    except (PolicyError, RosterError) as e:
+        raise Refusal(str(e)) from None
+    except OSError as e:
+        raise Refusal(f"steward-signals: {name} in --dir: {e.strerror or 'cannot be read'}") from None
+    except UnicodeDecodeError:
+        raise Refusal(f"steward-signals: {name} in --dir: not valid UTF-8") from None
+
+
 def probe_command(run, name, directory):
     """Print the one word that says whether the member NAME of the topic whose TOPIC.md is in DIRECTORY is waiting on John, yes, no or unknown (see
     probe; a name that TOPIC.md does not list is unknown), and return 0. Nothing else goes to stdout, so none of a member's text reaches the steward.
     A TOPIC.md that cannot be read is refused instead: the status is 2 and nothing goes to stdout. The reason goes to stderr in a line with no question mark:
     the roster reader's message, or, for the file itself, the OS error's reason (or that it is not UTF-8) and not the path, which may hold a question mark."""
     try:
-        members = load_roster(os.path.join(directory, "TOPIC.md"))
-    except RosterError as e:
-        print(e, file=sys.stderr)
-        return 2
-    except OSError as e:
-        print(without_question_marks(f"steward-signals: TOPIC.md in --dir: {e.strerror or 'cannot be read'}"), file=sys.stderr)
-        return 2
-    except UnicodeDecodeError:
-        print("steward-signals: TOPIC.md in --dir: not valid UTF-8", file=sys.stderr)
+        members = conductor_file(directory, "TOPIC.md", load_roster)
+    except Refusal as e:
+        print(without_question_marks(str(e)), file=sys.stderr)
         return 2
     host = next((m.host for m in members if m.name == name), None)
     print(PROBE_WORDS[probe(run, name, host)])
@@ -693,6 +731,23 @@ def json_text(value):
     """VALUE as the text of a JSON file the helper writes, a metrics file or steward-state.json: indented, its keys in order, in ASCII, ending in a newline.
     ValueError for NaN or an infinity, which JSON has not, and TypeError for a value it cannot hold."""
     return json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n"
+
+
+def read_json_object(path):
+    """(the JSON object in the file at PATH, trouble): ({}, "missing") when there is no file; ({}, "damaged") when it holds no JSON object that can be read
+    and written again (not UTF-8, not JSON, nested too deep to read, JSON of another kind, or holding NaN or an infinity, which json_text cannot write back);
+    else (the object, None). A file that cannot be read, a directory or one without read permission, raises OSError."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            value = json.load(f)
+        if not isinstance(value, dict):
+            return {}, "damaged"
+        json_text(value)  # a file that could not be written again is as damaged as one that could not be read, and would block every write after it
+    except FileNotFoundError:
+        return {}, "missing"
+    except (ValueError, RecursionError):  # not UTF-8 (a UnicodeDecodeError is a ValueError), not JSON, nested too deep, or with NaN or 1e999 in it
+        return {}, "damaged"
+    return value, None
 
 
 def replace_whole(path, text, keep_bad):
@@ -740,18 +795,8 @@ def write_metrics(conductor_dir, day, data):
         raise ValueError("the metrics must be a dict")
     folder = os.path.join(conductor_dir, "metrics")
     path = os.path.join(folder, f"{day}.json")
-    try:
-        with open(path, encoding="utf-8") as f:
-            old = json.load(f)
-        if isinstance(old, dict):
-            json_text(old)  # a file that could not be written again is as damaged as one that could not be read, and would block every write after it
-            bad = False
-        else:
-            old, bad = {}, True
-    except FileNotFoundError:
-        old, bad = {}, False
-    except (ValueError, RecursionError):  # not JSON, not UTF-8 (a UnicodeDecodeError is a ValueError), nested too deep to read, or with NaN or 1e999 in it
-        old, bad = {}, True
+    old, trouble = read_json_object(path)
+    bad = trouble == "damaged"
     try:
         text = json_text(merge_counters(old, data))
     except RecursionError:  # nested too deeply for json to write indented, which Python 3.12 and older cannot do beyond about a thousand levels
@@ -837,12 +882,16 @@ def metrics_command(directory, day, settings):
 
 # ---- signals ----
 
+CONFIG_PATH = "~/.config/agent-mail/config.json"  # the agent-mail config file where $AGENT_MAIL_CONFIG names none, as agent-mail has it
 STATE_FILE = "steward-state.json"  # the steward's own state in its conductor directory, where the signals command keeps signals_last and nothing else
 TABLE_COLUMNS = ("name", "host", "harness", "status", "substate", "bg", "last-activity", "unread(oldest)", "checked-age")
+EXCEPTION_LINES = 40  # the most exception lines the text form prints: a lost SENT.log would otherwise list a month of the steward's posts into its context
 STATE_WHY = {"missing": f"there is no {STATE_FILE} yet", "unset": f"{STATE_FILE} has no signals_last yet",
-             "damaged": f"{STATE_FILE} is not a JSON object that can be read and written again", "not a stamp": f"signals_last in {STATE_FILE} is not a stamp"}
+             "damaged": f"{STATE_FILE} is not a JSON object that can be read and written again", "not a stamp": f"signals_last in {STATE_FILE} is not a stamp",
+             "in the future": f"signals_last in {STATE_FILE} is in the future"}
 STATE_KEPT = {"damaged": f"it is moved aside to {STATE_FILE}.bad and a fresh one is written",  # what a write that succeeds did with a state it could not use
-              "not a stamp": f"the file is kept as {STATE_FILE}.bad and written again with its other keys"}
+              "not a stamp": f"the file is kept as {STATE_FILE}.bad and written again with its other keys",
+              "in the future": f"the file is kept as {STATE_FILE}.bad and written again with its other keys"}
 
 
 def utc_stamp(epoch):
@@ -871,9 +920,10 @@ def table_cell(text):
 def member_checked(mailbox, names):
     """When each member of NAMES last read its mail, as agent-mail records it: {name: the mtime of MAILBOX/.agent-mail/members/NAME.json in epoch seconds, or
     None for no record}. agent-mail rewrites a member's record when the member reads, at most every 300 seconds. Only metadata is read and no file is opened.
-    As agent-mail reads a record, it is a regular file reached through real directories: a record that is a symlink or not a file, or one under a .agent-mail
-    or members that is a symlink or not a directory, is no record. Any failure but a missing name raises OSError, so that a record that cannot be looked up is
-    never taken for none."""
+    What is mirrored of agent-mail's reader is the path: a record counts only as a regular file reached through .agent-mail and members as real directories,
+    so a record that is a symlink or not a file, or one under a symlink or a file, is no record. What is not: agent-mail also checks a record's owner, its
+    size and its content, which the helper does not, since it reads the mtime alone. Any failure but a missing name raises OSError, so that a record that
+    cannot be looked up is never taken for none."""
     times = dict.fromkeys(names)
     folder = os.path.join(mailbox, ".agent-mail", "members")
     for where in (os.path.dirname(folder), folder):
@@ -892,60 +942,76 @@ def member_checked(mailbox, names):
     return times
 
 
-def posts_after(entries, channel, since):
-    """How many of ENTRIES (from list_entries) are posts to CHANNEL stamped later than SINCE, in epoch seconds, or how many there are at all when SINCE is None.
-    A post is a file in +CHANNEL named for CHANNEL, as agent-mail counts a channel's posts, so a misfiled one is not counted. The stamps in the names, the
-    writers' times, are compared, never a ctime or an mtime."""
-    return sum(e.dir == "channel" and e.to == channel and (since is None or stamp_time(e.stamp) > since) for e in entries)
+def posts_after(entries, channel, steward, since, now):
+    """How many of ENTRIES (from list_entries) are new posts to CHANNEL from others than STEWARD: those whose ctime, the time the post arrived here, lies in
+    (SINCE, NOW], epoch seconds, with no lower bound when SINCE is None. A post is a file in +CHANNEL named for CHANNEL, as agent-mail counts a channel's
+    posts, so a misfiled one is not counted, and the steward's own posts are not, since the count tells the steward what others posted. A post is never
+    here before it arrives, so its arrival counts it once: one stamped before SINCE that arrived after it counts by its arrival, and one stamped ahead of
+    hera's clock counts at its arrival and never again. The stamp and the mtime play no part. The count is advisory: a file synced again under a new
+    inode counts once more, as does one whose ctime another change of its metadata moves."""
+    return sum(e.dir == "channel" and e.to == channel and e.sender != steward and (since is None or e.ctime > since) and e.ctime <= now for e in entries)
 
 
-def read_state(path):
-    """(state, since, trouble) from the steward-state.json at PATH, which the steward writes too. STATE is the object to write again with a new signals_last: the
-    file's, so that the steward's own keys are kept, or {} when there is none to keep. SINCE is the time of signals_last in epoch seconds, or None when there is
-    none to use, and TROUBLE then says why (see STATE_WHY): "missing", no file; "unset", an object with no signals_last; "damaged", not a JSON object that can be
-    read and written again (not UTF-8, not JSON, nested too deep to read, JSON of another kind, or holding NaN or an infinity); "not a stamp", a signals_last that
-    stamp_time cannot read. A file that cannot be read, a directory say, raises OSError."""
-    try:
-        with open(path, encoding="utf-8") as f:
-            state = json.load(f)
-        if not isinstance(state, dict):
-            return {}, None, "damaged"
-        json_text(state)  # one that could not be written again is as damaged as one that could not be read
-    except FileNotFoundError:
-        return {}, None, "missing"
-    except (ValueError, RecursionError):  # not UTF-8 (a UnicodeDecodeError is a ValueError), not JSON, nested too deep, or with NaN or 1e999 in it
-        return {}, None, "damaged"
+def read_state(path, now):
+    """(state, since, trouble) from the steward-state.json at PATH, which the steward writes too, for a call at the time NOW. STATE is the object to write again
+    with a new signals_last: the file's, so that the steward's own keys are kept, or {} when there is none to keep. SINCE is the time of signals_last in epoch
+    seconds, or None when there is none to use, and TROUBLE then says why (see STATE_WHY): "missing" or "damaged", as read_json_object says; "unset", an object
+    with no signals_last; "not a stamp", a signals_last that stamp_time cannot read; "in the future", one later than NOW, which no earlier call can have
+    written. A file that cannot be read, a directory say, raises OSError."""
+    state, trouble = read_json_object(path)
+    if trouble is not None:
+        return state, None, trouble
     if "signals_last" not in state:
         return state, None, "unset"
     last = state["signals_last"]
     since = stamp_time(last) if isinstance(last, str) else None
-    return (state, since, None) if since is not None else (state, None, "not a stamp")
+    if since is None:
+        return state, None, "not a stamp"
+    return (state, since, None) if since <= now else (state, None, "in the future")
 
 
-class Refusal(Exception):
-    """A signals call that is refused. The message is the line it prints on stderr."""
+def short_host():
+    """This host's short name, as agent-mail names it in the hosts of its config file: the host name to its first dot, in lower case."""
+    return socket.gethostname().split(".")[0].lower()
 
 
-def conductor_file(directory, name, reader):
-    """READER(path) for the file NAME in the conductor directory DIRECTORY. A failure is raised as a Refusal: the reader's own message for a PolicyError or a
-    RosterError, and otherwise the OS error's reason, or that the file is not UTF-8, with the file's name and not its path, which may hold a question mark."""
+def agent_mail_config():
+    """The JSON object in agent-mail's config file, $AGENT_MAIL_CONFIG when that is set and not empty, else ~/.config/agent-mail/config.json, or {} when there
+    is no such file. As agent-mail refuses a malformed one, a Refusal is raised for a file that cannot be read, that holds no JSON object (see
+    read_json_object), or whose hosts or sessions, or one of their entries, is not an object. A key agent-mail does not know is left to agent-mail to
+    refuse, so that a key a later agent-mail knows does not stop the steward."""
     try:
-        return reader(os.path.join(directory, name))
-    except (PolicyError, RosterError) as e:
-        raise Refusal(str(e)) from None
+        data, trouble = read_json_object(os.environ.get("AGENT_MAIL_CONFIG") or os.path.expanduser(CONFIG_PATH))
     except OSError as e:
-        raise Refusal(f"steward-signals: {name} in --dir: {e.strerror or 'cannot be read'}") from None
-    except UnicodeDecodeError:
-        raise Refusal(f"steward-signals: {name} in --dir: not valid UTF-8") from None
+        raise Refusal(f"steward-signals: signals: the agent-mail config file cannot be read: {e.strerror or 'the system gave no reason'}") from None
+    if trouble == "damaged":
+        raise Refusal("steward-signals: signals: the agent-mail config file is not a JSON object")
+    for group in ("hosts", "sessions"):
+        entries = data.get(group, {})
+        if not isinstance(entries, dict):
+            raise Refusal(f"steward-signals: signals: {group} in the agent-mail config file is not a JSON object")
+        for name, entry in entries.items():
+            if not isinstance(entry, dict):
+                raise Refusal(f"steward-signals: signals: {group}.{clipped(name)} in the agent-mail config file is not a JSON object")
+    return data
 
 
-def mailbox_of(given):
-    """(the mailbox, what names it in a refusal): GIVEN, the --mailbox, when it is given, even empty; else $AGENT_MAIL_DIR when it is set and not empty, as
-    agent-mail has it; else ~/Mailbox. ~ is expanded in the last two, as agent-mail expands it. agent-mail's config.json is not read."""
+def mailbox_of(given, steward):
+    """(the mailbox, what names it in a refusal), in agent-mail's order for its dir setting: GIVEN, the --mailbox, when it is given, even empty; else
+    $AGENT_MAIL_DIR when it is set and not empty; else the dir of sessions.STEWARD, then of hosts.<short host>, then at the top level of agent-mail's
+    config file (see agent_mail_config); else ~/Mailbox. A leading ~ is expanded in each, as agent-mail expands it. A dir in the config file that is not
+    a non-empty string raises Refusal, as agent-mail refuses it; so does a config file agent_mail_config refuses, when it is read."""
     if given is not None:
-        return given, "the mailbox that --mailbox names"
+        return os.path.expanduser(given), "the mailbox that --mailbox names"
     if os.environ.get("AGENT_MAIL_DIR"):
         return os.path.expanduser(os.environ["AGENT_MAIL_DIR"]), "the mailbox that $AGENT_MAIL_DIR names"
+    config = agent_mail_config()
+    for where, layer in ((f"sessions.{steward}.", config.get("sessions", {}).get(steward, {})), (f"hosts.{short_host()}.", config.get("hosts", {}).get(short_host(), {})),
+                         ("", config)):
+        if "dir" in layer:
+            if not (isinstance(layer["dir"], str) and layer["dir"]):
+                raise Refusal(f"steward-signals: signals: {clipped(where)}dir in the agent-mail config file is not a directory path")
+            return os.path.expanduser(layer["dir"]), f"the mailbox that {clipped(where)}dir in the agent-mail config file names"
     return os.path.expanduser("~/Mailbox"), "~/Mailbox"
 
 
@@ -966,7 +1032,7 @@ def signals_report(members, rows, checked, tally, posts, asked, now):
         shown_members[m.name] = {
             "host": m.host, "harness": m.harness, "status": row["status"], "substate": row["substate"], "bg": row["bg"], "last_activity": last,
             "last_activity_age_s": None if last is None else whole_seconds(now - datetime.datetime.fromisoformat(last).timestamp()),
-            "archived": row["archived"], "host_ok": row["host_ok"], "unread": {"count": count, "oldest_age_s": whole_seconds(oldest)},
+            "archived": row["archived"], "listed": row["listed"], "host_ok": row["host_ok"], "unread": {"count": count, "oldest_age_s": whole_seconds(oldest)},
             "checked_age_s": None if checked[m.name] is None else whole_seconds(now - checked[m.name])}
     return {"members": shown_members,
             "exceptions": {"unmatched_own": list(tally.unmatched_own), "nudges_unread": [{"id": ident, "age_s": whole_seconds(age)} for ident, age in tally.nudges_unread]},
@@ -975,31 +1041,38 @@ def signals_report(members, rows, checked, tally, posts, asked, now):
 
 
 def deck_cells(member):
-    """The status, substate, bg and last-activity cells of MEMBER, one of a report's members: unknown in all four when its host could not be listed; not in
-    agent-deck for the status when its row is archived or has no status (a member its host's listing does not hold has none); else agent-deck's words, - for
-    none, and the age of its last activity."""
+    """The status, substate, bg and last-activity cells of MEMBER, one of a report's members: unknown in all four when its host could not be listed. Else the
+    status is not in agent-deck for a member its host's listing does not hold, archived for an archived row, unknown for a listed row with no status it can
+    read, and agent-deck's word otherwise; the others are agent-deck's words, - for none, and the age of its last activity."""
     if not member["host_ok"]:
         return ["unknown"] * 4
-    status = "not in agent-deck" if member["archived"] is True or member["status"] is None else table_cell(member["status"])
+    if member["listed"] is False:
+        status = "not in agent-deck"
+    elif member["archived"] is True:
+        status = "archived"
+    else:
+        status = "unknown" if member["status"] is None else table_cell(member["status"])
     age = member["last_activity_age_s"]
     return [status, table_cell(member["substate"]), table_cell(member["bg"]), "-" if age is None else compact_age(age)]
 
 
 def render_text(report):
     """REPORT (see signals_report) as text: a header of TABLE_COLUMNS and a row for each member, the columns padded with spaces, two at least between them; then
-    exceptions: and a line for each, unmatched-own ID or nudge-unread ID AGE, or exceptions: none; then counts: posts-since-last=N transit-without-note=N; then,
-    when the probe was asked, probe NAME: WORD. An unread(oldest) cell is COUNT(AGE), or 0, and a checked-age is never for a member with no record. No line
-    holds a question mark."""
+    exceptions: and a line for each, unmatched-own ID or nudge-unread ID AGE, at most EXCEPTION_LINES of them and then and N more, or exceptions: none; then
+    counts: posts-since-last=N transit-without-note=N; then, when the probe was asked, probe NAME: WORD. A name and a host are printed whole, since their
+    grammars allow nothing that could break a line; the other cells go through table_cell. An unread(oldest) cell is COUNT(AGE), or 0, and a checked-age is
+    never for a member with no record. No line holds a question mark."""
     rows = [list(TABLE_COLUMNS)]
     for name, m in report["members"].items():
         count, oldest = m["unread"]["count"], m["unread"]["oldest_age_s"]
-        rows.append([table_cell(name), table_cell(m["host"]), table_cell(m["harness"]), *deck_cells(m), f"{count}({compact_age(oldest)})" if count else "0",
+        rows.append([name, m["host"], table_cell(m["harness"]), *deck_cells(m), f"{count}({compact_age(oldest)})" if count else "0",
                      "never" if m["checked_age_s"] is None else compact_age(m["checked_age_s"])])
     widths = [max(len(row[i]) for row in rows) for i in range(len(TABLE_COLUMNS))]
     lines = ["  ".join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip() for row in rows]
     exceptions = [f"  unmatched-own {ident}" for ident in report["exceptions"]["unmatched_own"]]
     exceptions += [f"  nudge-unread {nudge['id']} {compact_age(nudge['age_s'])}" for nudge in report["exceptions"]["nudges_unread"]]
-    lines += ["exceptions:", *exceptions] if exceptions else ["exceptions: none"]
+    more = [f"  and {len(exceptions) - EXCEPTION_LINES} more"] if len(exceptions) > EXCEPTION_LINES else []
+    lines += ["exceptions:", *exceptions[:EXCEPTION_LINES], *more] if exceptions else ["exceptions: none"]
     lines.append(f"counts: posts-since-last={report['counts']['posts_since_last']} transit-without-note={report['counts']['transit_without_note']}")
     if report["probe"] is not None:
         lines.append(f"probe {report['probe']['name']}: {report['probe']['answer']}")
@@ -1015,13 +1088,15 @@ def signals_command(run, channel, directory, mailbox, as_json, probe_name):
     """Print the signals of the topic whose steward keeps its files in the conductor directory DIRECTORY and whose channel is CHANNEL, as text or, when AS_JSON,
     as JSON (see render_text and render_json), with the probe's word for the member PROBE_NAME when it is given, and return 0. RUN is the runner of deck_rows
     and probe. The steward's name is conductor- and the name of DIRECTORY; MAILBOX is the --mailbox (see mailbox_of). The time of the call is written to
-    DIRECTORY/steward-state.json as signals_last after the report is printed (see read_state for a file it cannot use, which is kept as .bad), and posts are
-    counted from the signals_last before it; nothing else is written. One line on stderr says why every post was counted, what was done with a state that
-    could not be used, or that the state could not be written, which leaves the status 0. A refusal is one line on stderr, the status 2, nothing on stdout and
-    nothing written: a CHANNEL that is not an agent-mail name, a DIRECTORY that is not a directory or whose name makes no steward's name, a conductor file that
-    cannot be read or that its reader refuses, a PROBE_NAME that TOPIC.md does not list, and a mailbox, channel or member record that cannot be read. A host
-    that agent-deck does not answer for is no refusal: its members are unknown."""
-    now = time.time()  # taken before the mailbox is listed, so that a post that arrives during the call is counted by the next one
+    DIRECTORY/steward-state.json as signals_last after the whole report is rendered and printed (see read_state for a file it cannot use, which is kept as
+    .bad), and posts are counted from the signals_last before it (see posts_after); nothing else is written. The clock is read once, before the listing, and
+    that time serves every age and the interval. One line on stderr says why every post was counted, what was done with a state that could not be used, or
+    that the state could not be written, which leaves the status 0. A refusal is one line on stderr, the status 2, nothing on stdout and nothing written: a
+    CHANNEL that is not an agent-mail name, a DIRECTORY that is not a directory or whose name makes no steward's name, a conductor file that cannot be read or
+    that its reader refuses, a TOPIC.md that lists the steward itself, a PROBE_NAME that TOPIC.md does not list, an agent-mail config file that agent-mail would
+    refuse, and a mailbox, channel or member record that cannot be read. A host that agent-deck does not answer for is no refusal: its members are unknown."""
+    now = time.time()  # the one reading of the clock, before the listing: a post that arrives during the call has a later ctime, so the next call counts it
+    entries = checked = None  # bound by the listing below, which every call that is not refused reaches
     try:
         if not grammatical(channel):
             raise Refusal("steward-signals: signals: CHANNEL is not an agent-mail name: lower-case letters, digits, dots and single hyphens, at most 64 characters, without the +")
@@ -1031,36 +1106,41 @@ def signals_command(run, channel, directory, mailbox, as_json, probe_name):
         if not grammatical(steward):
             raise Refusal("steward-signals: signals: the steward's name, conductor- and the name of --dir, is not an agent-mail name")
         members = conductor_file(directory, "TOPIC.md", load_roster)
+        if any(m.name == steward for m in members):
+            raise Refusal(str(RosterError(steward, "the steward itself is listed as a member")))
         conductor_file(directory, "POLICY.md", load_policy)  # read at every turn, so that a POLICY.md the steward could not follow is refused before it acts
         sent = conductor_file(directory, "SENT.log", read_sent_log)
         notes = conductor_file(directory, "NOTES.log", read_notes_log)
-        state, since, trouble = conductor_file(directory, STATE_FILE, read_state)
+        state, since, trouble = conductor_file(directory, STATE_FILE, lambda path: read_state(path, now))
         hosts = {m.name: m.host for m in members}
         if probe_name is not None and probe_name not in hosts:
             raise Refusal("steward-signals: signals: --probe names no member of TOPIC.md")
-        box, which = mailbox_of(mailbox)
+        box, which = mailbox_of(mailbox, steward)
         if not os.path.isdir(box):
             raise Refusal(f"steward-signals: signals: {which} is not a directory")
         try:
             mode = os.lstat(os.path.join(box, f"+{channel}")).st_mode
-            if stat.S_ISDIR(mode):  # a symlink is no channel, as agent-mail has it
-                entries = list_entries(box, channel)
-                checked = member_checked(box, list(hosts))
-        except FileNotFoundError:  # from the lstat: list_entries and member_checked pass over a name gone since its listing
+        except FileNotFoundError:
             raise Refusal(f"steward-signals: signals: the mailbox has no channel +{channel}") from None
         except OSError as e:
             raise Refusal(f"steward-signals: signals: the mailbox cannot be read: {e.strerror or 'the system gave no reason'}") from None
-        if not stat.S_ISDIR(mode):
+        if not stat.S_ISDIR(mode):  # a symlink is no channel, as agent-mail has it
             raise Refusal(f"steward-signals: signals: +{channel} in the mailbox is not a directory, so it is no channel")
+        try:
+            entries = list_entries(box, channel)
+            checked = member_checked(box, list(hosts))
+        except OSError as e:  # a mailbox or channel gone since the checks above included
+            raise Refusal(f"steward-signals: signals: the mailbox cannot be read: {e.strerror or 'the system gave no reason'}") from None
     except Refusal as e:
         print(without_question_marks(str(e)), file=sys.stderr)
         return 2
     rows = deck_rows(run, members)
     asked = None if probe_name is None else (probe_name, probe(run, probe_name, hosts[probe_name]))
     tally = census(entries, members, steward, sent, notes, nudge_ids(sent[0]), now)
-    report = signals_report(members, rows, checked, tally, posts_after(entries, channel, since), asked, now)
-    print(render_json(report) if as_json else render_text(report), end="", flush=True)
-    said = [f"posts-since-last counts every post in +{channel}, since {STATE_WHY[trouble]}"] if since is None else []
+    report = signals_report(members, rows, checked, tally, posts_after(entries, channel, steward, since, now), asked, now)
+    text = render_json(report) if as_json else render_text(report)  # rendered whole before anything is printed, and printed before the state moves
+    print(text, end="", flush=True)
+    said = [f"posts-since-last counts every post in +{channel} but the steward's own, since {STATE_WHY[trouble]}"] if since is None else []
     try:
         replace_whole(os.path.join(directory, STATE_FILE), json_text({**state, "signals_last": utc_stamp(now)}), trouble in STATE_KEPT)
     except OSError as e:
@@ -1571,7 +1651,7 @@ ANDORIA_LIST = {"sessions": [{"title": "pipeline", "status": "waiting", "substat
                              {"title": "glm-5.2", "status": "running", "substate": "background-work", "archived": False, "last_activity_at": "2026-10-31T22:41:12Z",
                               "substate_detail": "workflow y-phase-a2 4/5 " + chr(0xB7) + " 2h46m"}],
                 "errors": []}
-NO_FIELDS = {"status": None, "substate": None, "bg": None, "last_activity": None, "archived": None}  # what a Row holds with no row to read
+NO_FIELDS = {"status": None, "substate": None, "bg": None, "last_activity": None, "archived": None, "listed": None}  # a Row of a host that did not answer, but host_ok
 
 
 def fake_run(mapping):
@@ -1696,8 +1776,12 @@ def test_roster_refuses_a_table_whose_header_is_another(d):
         e = raises(RosterError, load_roster, write(d, "TOPIC.md", text))
         ok(e.name == "Members" and str(e) == why, f"roster: a Members table with {what} is refused, not read with its cells in the wrong places")
     ok(no_header != TOPIC_WITH_TABLE, "roster: the check above removed the header row")
-    twice = TOPIC_WITH_TABLE.replace("| glm-5.2 |", "\n| Name | Host | Harness |\n|---|---|---|\n| glm-5.2 |")  # a second table under the heading, with its own header
-    ok([m.name for m in load_roster(write(d, "TOPIC.md", twice))] == ["pipeline", "omlx", "glm-5.2"], "roster: the header row of a second table under the heading is not a member")
+    for what, later in (("the same header", "| Name | Host | Harness |\n|---|---|---|\n| lfm3 | hera | claude |\n"),
+                        ("another header", "| host | name | harness |\n|---|---|---|\n| hera | lfm3 | claude |\n"),
+                        ("no header", "| lfm3 | hera | claude |\n")):
+        text = TOPIC_WITH_TABLE.replace("\n## History", f"\nFormer members:\n\n{later}\n## History")  # a second table under the heading, after the roster's
+        ok(text != TOPIC_WITH_TABLE and [m.name for m in load_roster(write(d, "TOPIC.md", text))] == ["pipeline", "omlx", "glm-5.2"],
+           f"roster: only the first table under the heading is the roster, so no row of a second one, with {what}, is read as a member")
 
 
 def test_fake_run(d):
@@ -1728,12 +1812,12 @@ def test_real_rows(d):
     members = [Member("wiggum", "hera", "claude"), Member("mail-conductor", "hera", "claude"), Member("ares-review", "hera", "claude"), Member("pipeline", "andoria-08", "claude"),
                Member("glm-5.2", "andoria-08", "claude")]
     rows = deck_rows(fake_run({"list": json.dumps(HERA_LIST), "remote andoria-08": json.dumps(ANDORIA_LIST)}), members)
-    ok(rows["glm-5.2"] == {"status": "running", "substate": "background-work", "bg": "tool", "last_activity": "2026-10-31T22:41:12Z", "archived": False, "host_ok": True},
+    ok(rows["glm-5.2"] == {"status": "running", "substate": "background-work", "bg": "tool", "last_activity": "2026-10-31T22:41:12Z", "archived": False, "listed": True, "host_ok": True},
        "deck: a real remote row that runs a workflow reads its substate_detail, and a workflow is tool work")
-    ok(rows["wiggum"] == {"status": "running", "substate": "background-work", "bg": "tool", "last_activity": "2026-10-31T22:39:01Z", "archived": False, "host_ok": True}, "deck: a real hera row with workflow background work")
-    ok(rows["mail-conductor"] == {"status": "waiting", "substate": "idle-at-empty-prompt", "bg": None, "last_activity": "2026-10-31T22:32:31Z", "archived": False, "host_ok": True}, "deck: a real waiting row")
-    ok(rows["ares-review"] == {"status": "waiting", "substate": None, "bg": None, "last_activity": "2026-10-28T19:49:37Z", "archived": False, "host_ok": True}, "deck: a real row with no substate, its offset stamp read as UTC")
-    ok(rows["pipeline"] == {"status": "waiting", "substate": "watching", "bg": "shell", "last_activity": "2026-10-31T22:29:07Z", "archived": False, "host_ok": True}, "deck: a real remote row that is watching counts as shell work")
+    ok(rows["wiggum"] == {"status": "running", "substate": "background-work", "bg": "tool", "last_activity": "2026-10-31T22:39:01Z", "archived": False, "listed": True, "host_ok": True}, "deck: a real hera row with workflow background work")
+    ok(rows["mail-conductor"] == {"status": "waiting", "substate": "idle-at-empty-prompt", "bg": None, "last_activity": "2026-10-31T22:32:31Z", "archived": False, "listed": True, "host_ok": True}, "deck: a real waiting row")
+    ok(rows["ares-review"] == {"status": "waiting", "substate": None, "bg": None, "last_activity": "2026-10-28T19:49:37Z", "archived": False, "listed": True, "host_ok": True}, "deck: a real row with no substate, its offset stamp read as UTC")
+    ok(rows["pipeline"] == {"status": "waiting", "substate": "watching", "bg": "shell", "last_activity": "2026-10-31T22:29:07Z", "archived": False, "listed": True, "host_ok": True}, "deck: a real remote row that is watching counts as shell work")
 
 
 def test_one_call_per_host(d):
@@ -1771,6 +1855,14 @@ def test_unreadable_answers_are_unknown(d):
     ok(rows["omlx"]["host_ok"] is False and rows["pipeline"]["host_ok"] and rows["pipeline"]["status"] == "waiting", "deck: a failed local listing marks hera's members unknown, and only them")
 
 
+def test_listed_says_whether_the_listing_held_the_member(d):
+    members = [Member("omlx", "hera", "pi"), Member("pi", "hera", "claude"), Member("pipeline", "andoria-08", "claude")]
+    rows = deck_rows(fake_run({"list": json.dumps([{"title": "omlx"}, {"title": "pipeline", "status": "idle"}]), "remote andoria-08": ("", 1)}), members)
+    ok(rows["omlx"]["listed"] is True and rows["omlx"]["status"] is None, "deck: a member whose title its host's listing holds is listed, though its row says nothing more")
+    ok(rows["pi"]["listed"] is False and rows["pi"]["host_ok"] is True, "deck: a member its host's listing does not hold is not listed, and pi is not pipeline")
+    ok(rows["pipeline"]["listed"] is None and rows["pipeline"]["host_ok"] is False, "deck: a member of a host that did not answer is neither listed nor unlisted, whatever another host lists")
+
+
 def test_a_runner_that_fails_marks_its_hosts_unknown(d):
     members = [Member("omlx", "hera", "pi"), Member("pipeline", "andoria-08", "claude")]
     for error in (OSError("no such program"), subprocess.TimeoutExpired("agent-deck", 20), RuntimeError("boom"), KeyError("x")):
@@ -1791,8 +1883,8 @@ def test_odd_rows_read_as_far_as_they_go(d):
                {"title": "syncthing", "status": ""}]
     rows = deck_rows(fake_run({"list": json.dumps(listing)}), members)
     ok(rows["pi"]["status"] is None and rows["pi"]["host_ok"] and rows["pipeline"]["status"] == "running", "deck: a title matches exactly, so pi is not pipeline")
-    ok(rows["ares"] == {**NO_FIELDS, "host_ok": True}, "deck: rows with no title, or a title that is not text, are skipped")
-    ok(rows["omlx"] == {**NO_FIELDS, "bg": "unknown", "host_ok": True}, "deck: fields of the wrong type are unknown, not an error")
+    ok(rows["ares"] == {**NO_FIELDS, "listed": False, "host_ok": True}, "deck: rows with no title, or a title that is not text, are skipped")
+    ok(rows["omlx"] == {**NO_FIELDS, "bg": "unknown", "listed": True, "host_ok": True}, "deck: fields of the wrong type are unknown, not an error")
     ok(rows["syncthing"]["status"] is None, "deck: an empty status is unknown")
 
 
@@ -1868,6 +1960,7 @@ def section_deck(d):
     test_real_rows(d)
     test_one_call_per_host(d)
     test_unreadable_answers_are_unknown(d)
+    test_listed_says_whether_the_listing_held_the_member(d)
     test_a_runner_that_fails_marks_its_hosts_unknown(d)
     test_odd_rows_read_as_far_as_they_go(d)
     test_background_work_kinds(d)
@@ -2288,9 +2381,15 @@ def test_posts_since(d):
 
 def test_census_scales(d):
     box = mailbox(d, top=[f"glm-5.2_{stamp(i)}_from-lfm3_{i:08x}.txt" for i in range(500)], channel=("ingest", [f"ingest_{stamp(i)}_from-lfm3_{i:08x}.txt" for i in range(5000)]))
-    t = time.monotonic(); e = list_entries(box, "ingest"); ok(time.monotonic() - t < 1.0 and len(e) == 5500, "census: 5,500 names listed under a second without opening a file")
-    t = time.monotonic(); c = census(e, members_named("glm-5.2"), STEWARD, ([], set()), set(), set(), NOW)
-    ok(time.monotonic() - t < 1.0 and c.unread["glm-5.2"][0] == 500 and c.posts_since(0) == 5000, "census: and counted in under a second")
+    # CPU time, not wall time: the pin is the listing's own work, which another process's load does not change.
+    e = c = listing = counting = None
+    with files_refused() as opened:
+        with contextlib.suppress(OSError):  # an open that is refused raises; the check below reports it
+            t = time.process_time(); e = list_entries(box, "ingest"); listing = time.process_time() - t
+            t = time.process_time(); c = census(e, members_named("glm-5.2"), STEWARD, ([], set()), set(), set(), NOW); counting = time.process_time() - t
+    ok(not opened and c is not None, "census: listing and counting 5,500 names open no file")
+    ok(listing < 1.0 and len(e) == 5500, "census: 5,500 names listed under a second without opening a file")
+    ok(counting < 1.0 and c.unread["glm-5.2"][0] == 500 and c.posts_since(0) == 5000, "census: and counted in under a second")
 
 
 @section("census")
@@ -3299,7 +3398,7 @@ def state_of(cdir):
 
 
 def test_signals_end_to_end(d):
-    cdir, box, DECK_FIXTURE, (s1, s2, s3) = signals_scene(d)
+    cdir, box, DECK_FIXTURE, (_, s2, _) = signals_scene(d)
     out, code, _ = capture(main, ["signals", "ingest", "--dir", cdir, "--mailbox", box, "--run-fixture", DECK_FIXTURE])
     ok(code == 0 and re.search(r"^pipeline +andoria-08 +claude +waiting ", out, re.M), "signals: a member row")
     ok("exceptions:" in out and f"lfm3_{s2}_from-conductor-ingest-steward_11111111" in out, "signals: the unmatched steward file is listed")
@@ -3358,12 +3457,12 @@ def starts(line):
 
 def test_signals_prints_one_row_for_each_member_in_roster_order(d):
     cdir, box, fixture, stray, nudge = table_scene(d)
-    out, status, err = signals(cdir, box, fixture)
+    out, status, _ = signals(cdir, box, fixture)
     lines = out.splitlines()
     ok(status == 0 and [cells(line) for line in lines[:4]] == [
         ["name", "host", "harness", "status", "substate", "bg", "last-activity", "unread(oldest)", "checked-age"],
         ["pipeline", "andoria-08", "claude", "waiting", "watching", "shell", "45m", "1(1h)", "2h"],
-        ["omlx", "hera", "pi", "not in agent-deck", "-", "-", "3d", "0", "never"],
+        ["omlx", "hera", "pi", "archived", "-", "-", "3d", "0", "never"],
         ["glm-5.2", "andoria-08", "claude", "running", "background-work", "tool", "3h", "1(20m)", "never"]],
        f"signals: a header, then one row for each member in roster order, with agent-deck's words, compact ages, unread(oldest) and the age of the member record (got {lines[:4]!r})")
     ok(all(starts(line) == starts(lines[0]) for line in lines[1:4]) and all(line == line.rstrip() for line in lines), "signals: the columns line up under the header, and no line ends in spaces")
@@ -3374,6 +3473,9 @@ def test_signals_prints_one_row_for_each_member_in_roster_order(d):
     rows = {cells(line)[0]: cells(line)[3:7] for line in out.splitlines()[1:4]}
     ok(status == 0 and rows == {"pipeline": ["unknown"] * 4, "glm-5.2": ["unknown"] * 4, "omlx": ["not in agent-deck", "-", "-", "-"]},
        "signals: a host that could not be listed leaves its members unknown in every agent-deck column, and a member absent from a listing is not in agent-deck; the status is still 0")
+    write(d, "no-status.json", json.dumps({"list": json.dumps([{"title": "omlx", "archived": False, "last_activity_at": iso_at(time.time() - 90)}]), "remote andoria-08": ["", 1]}))
+    out, status, _ = signals(cdir, box, os.path.join(d, "no-status.json"))
+    ok(status == 0 and cells(out.splitlines()[2])[3:7] == ["unknown", "-", "-", "1m"], "signals: a member that is listed with no status it can read has an unknown status, not one of not being in agent-deck")
     cdir = conductor_dir(d)
     box = mailbox(d, channel=("ingest", []))
     out, status, _ = signals(cdir, box, fixture)
@@ -3382,20 +3484,20 @@ def test_signals_prints_one_row_for_each_member_in_roster_order(d):
 
 def test_signals_json(d):
     cdir, box, fixture, stray, nudge = table_scene(d)
-    out, status, err = signals(cdir, box, fixture, "--json")
+    out, status, _ = signals(cdir, box, fixture, "--json")
     j = json.loads(out)
     ok(status == 0 and out.count("\n") == 1 and out.endswith("\n") and list(j) == ["members", "exceptions", "counts", "probe"], "signals: --json prints one JSON object on one line")
     ok(list(j["members"]) == ["pipeline", "omlx", "glm-5.2"], "signals: the members are keyed by name, in roster order")
     p = j["members"]["pipeline"]
-    ok(list(p) == ["host", "harness", "status", "substate", "bg", "last_activity", "last_activity_age_s", "archived", "host_ok", "unread", "checked_age_s"],
+    ok(list(p) == ["host", "harness", "status", "substate", "bg", "last_activity", "last_activity_age_s", "archived", "listed", "host_ok", "unread", "checked_age_s"],
        "signals: a member's object holds its host and harness, agent-deck's raw fields, the age of its last activity, its unread mail and the age of its record")
-    ok(p["host"] == "andoria-08" and p["harness"] == "claude" and p["status"] == "waiting" and p["substate"] == "watching" and p["bg"] == "shell" and p["archived"] is False
+    ok(p["host"] == "andoria-08" and p["harness"] == "claude" and p["status"] == "waiting" and p["substate"] == "watching" and p["bg"] == "shell" and p["archived"] is False and p["listed"] is True
        and p["host_ok"] is True and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", p["last_activity"]) is not None, "signals: the raw fields are deck_rows' own")
-    ok(type(p["last_activity_age_s"]) is int and 2700 <= p["last_activity_age_s"] <= 2702 and type(p["checked_age_s"]) is int and 7200 <= p["checked_age_s"] <= 7202
-       and p["unread"]["count"] == 1 and 3600 <= p["unread"]["oldest_age_s"] <= 3602, "signals: ages are whole seconds")
+    ok(type(p["last_activity_age_s"]) is int and 2700 <= p["last_activity_age_s"] <= 2760 and type(p["checked_age_s"]) is int and 7200 <= p["checked_age_s"] <= 7260
+       and p["unread"]["count"] == 1 and 3600 <= p["unread"]["oldest_age_s"] <= 3660, "signals: ages are whole seconds, a minute of slack left for a loaded machine")
     o = j["members"]["omlx"]
-    ok(o["status"] == "idle" and o["archived"] is True and o["checked_age_s"] is None and o["unread"] == {"count": 0, "oldest_age_s": None}, "signals: an archived row keeps its own fields, and no record and no mail are null")
-    ok(j["exceptions"]["unmatched_own"] == [stray] and [n["id"] for n in j["exceptions"]["nudges_unread"]] == [nudge] and 1200 <= j["exceptions"]["nudges_unread"][0]["age_s"] <= 1202,
+    ok(o["status"] == "idle" and o["archived"] is True and o["listed"] is True and o["checked_age_s"] is None and o["unread"] == {"count": 0, "oldest_age_s": None}, "signals: an archived row keeps its own fields, and no record and no mail are null")
+    ok(j["exceptions"]["unmatched_own"] == [stray] and [n["id"] for n in j["exceptions"]["nudges_unread"]] == [nudge] and 1200 <= j["exceptions"]["nudges_unread"][0]["age_s"] <= 1260,
        "signals: the exceptions are the ids SENT.log does not account for and the NUDGEs unread, each with its age")
     ok(j["counts"] == {"posts_since_last": 1, "transit_without_note": 1} and j["probe"] is None and "?" not in out, "signals: the counts, no probe without --probe, and no question mark")
 
@@ -3404,33 +3506,54 @@ def test_signals_probe(d):
     cdir, box, _, _ = signals_scene(d)
     for text, word in (("Should I push to main?\n", "yes"), ("Done.\n", "no"), (["Should I push to main?\n", 1], "unknown")):
         fixture = deck_fixture(d, {"session output omlx --max-tokens 200": text})
-        out, status, err = signals(cdir, box, fixture, "--probe", "omlx")
+        out, status, _ = signals(cdir, box, fixture, "--probe", "omlx")
         ok(status == 0 and out.splitlines()[-1] == f"probe omlx: {word}" and "?" not in out, f"signals: --probe ends the report with the probe's word, {word}")
-        out, status, err = signals(cdir, box, fixture, "--probe", "omlx", "--json")
+        out, status, _ = signals(cdir, box, fixture, "--probe", "omlx", "--json")
         ok(status == 0 and json.loads(out)["probe"] == {"name": "omlx", "answer": word}, f"signals: and the JSON form holds it ({word})")
     fixture = deck_fixture(d, {"session output": "Should I push to main?\n"})  # would answer for any member
     ok(signals(cdir, box, fixture, "--probe", "pipeline")[0].splitlines()[-1] == "probe pipeline: unknown", "signals: a member on another host is unknown, as the probe has it")
 
 
-def test_signals_counts_posts_since_the_last_call_by_their_stamps(d):
+def test_signals_counts_each_post_once_by_its_arrival(d):
     cdir, box, fixture, _ = signals_scene(d)
+    channel = os.path.join(box, "+ingest")
+    write(channel, f"ingest_{utc_stamp(time.time() - 300)}_from-{STEWARD}_00000009.txt", "")  # a post of the steward's own
     before = time.time()
     out, status, err = signals(cdir, box, fixture)
     after = time.time()
     last = state_of(cdir)["signals_last"]
-    ok(status == 0 and "posts-since-last=1" in out and list(state_of(cdir)) == ["signals_last"], "signals: the first call counts every post, and steward-state.json then holds signals_last")
+    ok(status == 0 and "posts-since-last=1" in out and list(state_of(cdir)) == ["signals_last"],
+       "signals: the first call counts every post but the steward's own, and steward-state.json then holds signals_last")
     ok(re.fullmatch(r"[0-9]{8}T[0-9]{6}\.[0-9]{6}Z", last) is not None and before - 0.001 <= stamp_time(last) <= after, "signals: signals_last is the time of the call, stamped as a message id is")
-    ok(err == "steward-signals: signals: posts-since-last counts every post in +ingest, since there is no steward-state.json yet\n", "signals: a first call says so, in one line")
-    mark = "20261101T120000.000000Z"
-    write(cdir, "steward-state.json", json.dumps({"signals_last": mark}))
-    just_after, second_before = "20261101T120000.000001Z", "20261101T115959.000000Z"
-    names = [f"ingest_{mark}_from-pipeline_00000001.txt", f"ingest_{just_after}_from-pipeline_00000002.txt", f"ingest_{second_before}_from-pipeline_00000003.txt",
-             f"other_20261101T130000.000000Z_from-pipeline_00000004.txt"]  # misfiled: named for another channel
-    box = mailbox(d, top=["ingest_20261101T130000.000000Z_from-pipeline_00000005.txt"], channel=("ingest", names))
-    os.utime(os.path.join(box, "+ingest", names[1]), (946684800, 946684800))  # the post after the mark has an old mtime, and every post a ctime of now
+    ok(err == "steward-signals: signals: posts-since-last counts every post in +ingest but the steward's own, since there is no steward-state.json yet\n", "signals: a first call says so, in one line")
+    mark = time.time()  # after every file above was made, so that each of them arrived before it
+    write(cdir, "steward-state.json", json.dumps({"signals_last": utc_stamp(mark)}))
+    late = f"ingest_{utc_stamp(mark - 3600)}_from-pipeline_0000000a.txt"  # stamped an hour before the mark, as by a sync that lags or a clock behind hera's
+    ahead = utc_stamp(mark + 3600)  # the stamp of a post an hour ahead of hera's clock
+    for name in (late, f"ingest_{ahead}_from-omlx_0000000b.txt",
+                 f"ingest_{utc_stamp(mark + 1)}_from-{STEWARD}_0000000c.txt",      # the steward's own
+                 f"other_{utc_stamp(mark + 1)}_from-pipeline_0000000d.txt"):       # misfiled: named for another channel
+        write(channel, name, "")  # each arrives now, after the mark
+    write(box, f"ingest_{utc_stamp(mark + 1)}_from-pipeline_0000000e.txt", "")  # direct mail, though named for the channel
+    os.utime(os.path.join(channel, late), (946684800, 946684800))  # an old mtime, which counts for nothing
     out, status, err = signals(cdir, box, fixture)
-    ok(status == 0 and "posts-since-last=1" in out and err == "", "signals: only a post to the channel stamped after signals_last counts: not one stamped at it or before it, whatever its ctime or mtime, nor a misfiled file or direct mail")
-    ok(stamp_time(state_of(cdir)["signals_last"]) >= before, "signals: and signals_last moves on to this call")
+    ok(status == 0 and "posts-since-last=2" in out and err == "",
+       "signals: a post counts when it arrived after signals_last: one stamped an hour before the mark and synced after it, and one stamped an hour ahead of "
+       "hera's clock; not the steward's own, a misfiled file or direct mail")
+    ok("posts-since-last=0" in signals(cdir, box, fixture)[0], "signals: none of them counts again at the next call")
+    with time_as(lambda: stamp_time(ahead) + 60):  # a later call, once hera's clock has passed the stamp of the post stamped ahead
+        ok("posts-since-last=0" in signals(cdir, box, fixture)[0], "signals: nor at a later call whose time has passed the stamp of the post stamped ahead: its arrival counted it once")
+
+
+def test_posts_count_by_arrival_in_the_half_open_interval(d):
+    arrived = entries_named(f"ingest_{stamp(0)}_from-pipeline_00000001.txt", channel="ingest", ctime=1000.0)  # stamped in 2026, arrived at 1000 s after the epoch
+    for since, now, count, what in ((999.0, 1000.0, 1, "a post that arrived at the end of the interval counts"), (None, 1000.0, 1, "with no start, as at a first call, too"),
+                                    (1000.0, 2000.0, 0, "one that arrived at the start does not, since the call before counted it"),
+                                    (900.0, 999.0, 0, "nor one that arrives after the call's time, which the next call counts"), (None, 999.0, 0, "with no start either")):
+        ok(posts_after(arrived, "ingest", STEWARD, since, now) == count, f"signals: {what}, by its ctime, whatever its stamp")
+    when = stamp_time(stamp(0))
+    ok(posts_after(entries_named(f"ingest_{stamp(0)}_from-pipeline_00000002.txt", channel="ingest", ctime=when - 3600), "ingest", STEWARD, when - 1, when + 1) == 0,
+       "signals: a post whose stamp lies in the interval, but that arrived before it, does not count")
 
 
 def test_signals_keeps_the_stewards_own_keys(d):
@@ -3445,7 +3568,7 @@ def test_signals_keeps_the_stewards_own_keys(d):
     out, status, err = signals(cdir, box, fixture)
     ok(status == 0 and "posts-since-last=1" in out and {k: v for k, v in state_of(cdir).items() if k != "signals_last"} == own and "signals_last" in state_of(cdir),
        "signals: a file of the steward's with no signals_last yet is a first call: every post counts, and its keys are kept")
-    ok(err == "steward-signals: signals: posts-since-last counts every post in +ingest, since steward-state.json has no signals_last yet\n" and not os.path.exists(os.path.join(cdir, "steward-state.json.bad")),
+    ok(err == "steward-signals: signals: posts-since-last counts every post in +ingest but the steward's own, since steward-state.json has no signals_last yet\n" and not os.path.exists(os.path.join(cdir, "steward-state.json.bad")),
        "signals: that is said in one line, and nothing is moved aside")
 
 
@@ -3458,7 +3581,7 @@ def test_signals_moves_a_state_it_cannot_use_aside(d):
         out, status, err = signals(cdir, box, fixture)
         ok(status == 0 and "posts-since-last=1" in out and pathlib.Path(cdir, "steward-state.json.bad").read_bytes() == content and list(state_of(cdir)) == ["signals_last"],
            f"signals: a steward-state.json of {what} is moved aside whole to steward-state.json.bad, a fresh one is written, and every post counts")
-        ok(err == "steward-signals: signals: posts-since-last counts every post in +ingest, since steward-state.json is not a JSON object that can be read and written again; "
+        ok(err == "steward-signals: signals: posts-since-last counts every post in +ingest but the steward's own, since steward-state.json is not a JSON object that can be read and written again; "
                   "it is moved aside to steward-state.json.bad and a fresh one is written\n", f"signals: and that is said in one line ({what})")
     for value in (5, None, "yesterday", "20261340T250000.000000Z", "2026-11-01T12:00:00Z", "20261101T120000.000000Z "):
         cdir, box, fixture, _ = signals_scene(d)
@@ -3468,7 +3591,7 @@ def test_signals_moves_a_state_it_cannot_use_aside(d):
         state = state_of(cdir)
         ok(status == 0 and "posts-since-last=1" in out and read(os.path.join(cdir, "steward-state.json.bad")) == text and state["last_turn"] == "x" and stamp_time(state["signals_last"]) is not None,
            f"signals: a signals_last of {value!r} is no stamp: the file is kept as steward-state.json.bad, written again with its other keys and a stamp, and every post counts")
-        ok(err == "steward-signals: signals: posts-since-last counts every post in +ingest, since signals_last in steward-state.json is not a stamp; "
+        ok(err == "steward-signals: signals: posts-since-last counts every post in +ingest but the steward's own, since signals_last in steward-state.json is not a stamp; "
                   "the file is kept as steward-state.json.bad and written again with its other keys\n", f"signals: and that is said in one line ({value!r})")
 
 
@@ -3490,7 +3613,7 @@ def test_signals_writes_the_state_whole_after_the_report(d):
         out, status, err = signals(cdir, box, fixture)
     ok(status == 0 and "counts: posts-since-last=1" in out and sorted(os.listdir(cdir)) == ["NOTES.log", "POLICY.md", "SENT.log", "TOPIC.md"],
        "signals: a state that cannot be written leaves the printed report and status 0, and no temporary file")
-    ok(err == "steward-signals: signals: posts-since-last counts every post in +ingest, since there is no steward-state.json yet; "
+    ok(err == "steward-signals: signals: posts-since-last counts every post in +ingest but the steward's own, since there is no steward-state.json yet; "
               "steward-state.json cannot be written (No space left on device), so the next call counts these posts again\n", "signals: and that is said in one line, with the system's reason")
 
 
@@ -3539,6 +3662,8 @@ def test_signals_refuses_what_it_cannot_read(d):
         ("no TOPIC.md", lambda c, b, f: (os.remove(os.path.join(c, "TOPIC.md")), (args(c, b, f), None))[1], f"steward-signals: TOPIC.md in --dir: {no_such}"),
         ("a TOPIC.md the roster reader refuses", lambda c, b, f: (write(c, "TOPIC.md", TOPIC_WITH_TABLE.replace("glm-5.2", "Glm?5.2")), (args(c, b, f), None))[1],
          "steward-signals: TOPIC.md: Glm5.2: not a valid name"),
+        ("a roster that lists the steward itself", lambda c, b, f: (write(c, "TOPIC.md", TOPIC_WITH_TABLE.replace("| omlx | hera | pi |", f"| {STEWARD} | hera | claude |")),
+                                                                 (args(c, b, f), None))[1], f"steward-signals: TOPIC.md: {STEWARD}: the steward itself is listed as a member"),
         ("a TOPIC.md that is not UTF-8", lambda c, b, f: (pathlib.Path(c, "TOPIC.md").write_bytes(b"## Members\n\xff\n"), (args(c, b, f), None))[1], "steward-signals: TOPIC.md in --dir: not valid UTF-8"),
         ("no POLICY.md", lambda c, b, f: (os.remove(os.path.join(c, "POLICY.md")), (args(c, b, f), None))[1], f"steward-signals: POLICY.md in --dir: {no_such}"),
         ("a POLICY.md the policy reader refuses", lambda c, b, f: (write(c, "POLICY.md", read(os.path.join(c, "POLICY.md")).replace("| stale_min | 45 |", "| stale_min | 4?5 |")),
@@ -3566,33 +3691,64 @@ def test_signals_refuses_what_it_cannot_read(d):
 
 
 def test_signals_finds_the_mailbox_as_agent_mail_does(d):
-    cdir, fixture = conductor_dir(d), deck_fixture(d)
+    cdir, fixture, host = conductor_dir(d), deck_fixture(d), short_host()
     if os.path.lexists(os.path.join(d, "mailbox")):
         shutil.rmtree(os.path.join(d, "mailbox"))  # on a filesystem that folds case, the mailbox of other checks is ~/Mailbox
-    home, other = os.path.join(d, "Mailbox"), os.path.join(d, "other-box")  # HOME is D in a section
-    for box, posts in ((home, 1), (other, 2)):
-        os.makedirs(os.path.join(box, "+ingest"))
+    for name, posts in (("Mailbox", 1), ("other-box", 2), ("top-box", 3), ("host-box", 4), ("session-box", 5)):  # in HOME, which is D, each told by its posts
+        os.makedirs(os.path.join(d, name, "+ingest"))
         for i in range(posts):
-            write(os.path.join(box, "+ingest"), f"ingest_{stamp(i)}_from-pipeline_0000000{i}.txt", "")
+            write(os.path.join(d, name, "+ingest"), f"ingest_{stamp(i)}_from-pipeline_0000000{i}.txt", "")
+    config = os.path.join(d, "agent-mail.json")
 
-    def posts_seen():
+    def seen(*more):  # how many posts the call counts, which tells the mailbox it read, or its refusal
         with contextlib.suppress(FileNotFoundError):
             os.remove(os.path.join(cdir, "steward-state.json"))  # so that every call counts every post
-        out, status, err = capture(main, ["signals", "ingest", "--dir", cdir, "--run-fixture", fixture])
-        return status, re.search(r"posts-since-last=([0-9]+)", out)[1] if status == 0 else err
+        out, status, err = capture(main, ["signals", "ingest", "--dir", cdir, "--run-fixture", fixture, *more])
+        return int(re.search(r"posts-since-last=([0-9]+)", out)[1]) if status == 0 else err
 
+    def configured(value):
+        write(d, "agent-mail.json", value if isinstance(value, str) else json.dumps(value))
+
+    layers = {"dir": "~/top-box", "hosts": {host: {"dir": "~/host-box"}, "elsewhere": {"dir": "~/other-box"}},
+              "sessions": {STEWARD: {"dir": "~/session-box"}, "pipeline": {"dir": "~/other-box"}}}
     try:
-        ok(posts_seen() == (0, "1"), "signals: with no --mailbox and no $AGENT_MAIL_DIR the mailbox is ~/Mailbox")
-        os.environ["AGENT_MAIL_DIR"] = other
-        ok(posts_seen() == (0, "2"), "signals: $AGENT_MAIL_DIR names the mailbox when it is set")
+        ok(seen() == 1, "signals: with no --mailbox, no $AGENT_MAIL_DIR and no config file, the mailbox is ~/Mailbox")
+        ok(seen("--mailbox", "~/other-box") == 2, "signals: a ~ that starts --mailbox is HOME, as agent-mail expands its --dir")
+        os.environ["AGENT_MAIL_CONFIG"] = config
+        for what, value, posts in (("the top-level dir", {"dir": "~/top-box"}, 3), ("hosts.<this host>.dir, before the top-level dir", {k: layers[k] for k in ("dir", "hosts")}, 4),
+                                   ("sessions.<the steward>.dir, before both", layers, 5),
+                                   ("the top-level dir when only another session has one, and with keys agent-mail knows and a key it does not",
+                                    {"dir": "~/top-box", "sessions": {"pipeline": {"dir": "~/other-box"}}, "poll_interval": 7, "a_later_key": 1}, 3)):
+            configured(value)
+            ok(seen() == posts, f"signals: the config file names the mailbox by {what}, its ~ expanded")
+        os.environ["AGENT_MAIL_DIR"] = "~/other-box"
+        ok(seen() == 2, "signals: $AGENT_MAIL_DIR comes before the config file, its ~ expanded")
         os.environ["AGENT_MAIL_DIR"] = ""
-        ok(posts_seen() == (0, "1"), "signals: an empty $AGENT_MAIL_DIR counts as unset, as agent-mail has it")
+        ok(seen() == 3 and seen("--mailbox", os.path.join(d, "Mailbox")) == 1, "signals: an empty $AGENT_MAIL_DIR counts as unset, as agent-mail has it, and --mailbox comes before them all")
+        not_object = "the agent-mail config file is not a JSON object"
+        for value, why in (("{not json", not_object), ("[1]", not_object), ({"hosts": []}, "hosts in the agent-mail config file is not a JSON object"),
+                           ({"sessions": {"x?": 5}}, "sessions.x in the agent-mail config file is not a JSON object"),
+                           ({"dir": ""}, "dir in the agent-mail config file is not a directory path"), ({"dir": 5}, "dir in the agent-mail config file is not a directory path"),
+                           ({"dir": "~/top-box", "hosts": {host: {"dir": None}}}, f"hosts.{host}.dir in the agent-mail config file is not a directory path"),
+                           ({"dir": "~/nowhere"}, "the mailbox that dir in the agent-mail config file names is not a directory")):
+            configured(value)
+            ok(seen() == f"steward-signals: signals: {why}\n", f"signals: a config file of {value!r} is refused in one line, as agent-mail refuses it")
+        os.remove(config)
+        os.mkdir(config)
+        ok(seen() == f"steward-signals: signals: the agent-mail config file cannot be read: {os.strerror(errno.EISDIR)}\n", "signals: so is a config file that cannot be read")
+        os.rmdir(config)
+        del os.environ["AGENT_MAIL_CONFIG"]
+        os.makedirs(os.path.join(d, ".config", "agent-mail"))
+        write(os.path.join(d, ".config", "agent-mail"), "config.json", json.dumps({"dir": "~/top-box"}))
+        ok(seen() == 3, "signals: with no $AGENT_MAIL_CONFIG the config file is ~/.config/agent-mail/config.json")
+        shutil.rmtree(os.path.join(d, ".config"))
         os.environ["AGENT_MAIL_DIR"] = os.path.join(d, "nowhere")
-        ok(posts_seen() == (2, "steward-signals: signals: the mailbox that $AGENT_MAIL_DIR names is not a directory\n"), "signals: a $AGENT_MAIL_DIR that is no directory is refused, not passed over")
+        ok(seen() == "steward-signals: signals: the mailbox that $AGENT_MAIL_DIR names is not a directory\n", "signals: a $AGENT_MAIL_DIR that is no directory is refused, not passed over")
     finally:
-        os.environ.pop("AGENT_MAIL_DIR", None)
-    shutil.rmtree(home)
-    ok(posts_seen() == (2, "steward-signals: signals: ~/Mailbox is not a directory\n"), "signals: and so is a missing ~/Mailbox")
+        for name in ("AGENT_MAIL_DIR", "AGENT_MAIL_CONFIG"):
+            os.environ.pop(name, None)
+    shutil.rmtree(os.path.join(d, "Mailbox"))
+    ok(seen() == "steward-signals: signals: ~/Mailbox is not a directory\n", "signals: and so is a missing ~/Mailbox")
 
 
 @contextlib.contextmanager
@@ -3619,7 +3775,7 @@ def files_watched():
 def test_signals_opens_no_message_file(d):
     cdir, box, fixture, _ = signals_scene(d)
     with files_watched() as opened:
-        out, status, _ = signals(cdir, box, fixture)
+        _, status, _ = signals(cdir, box, fixture)
     names = [os.path.realpath(p) for p in opened if isinstance(p, str)]
     inside = [p for p in names if os.path.commonpath([p, os.path.realpath(box)]) == os.path.realpath(box)]
     ok(status == 0 and inside == [], f"signals: no file in the mailbox is opened, a message or a member record (opened {inside!r})")
@@ -3674,7 +3830,7 @@ def test_signals_options(d):
 
 def test_compact_ages(d):
     for seconds, text in ((0, "0m"), (59.9, "0m"), (60, "1m"), (2700, "45m"), (3599, "59m"), (3600, "1h"), (7199, "1h"), (86399, "23h"), (86400, "1d"),
-                          (3 * 86400 + 5, "3d"), (-59, "0m"), (-120, "-2m"), (-7200, "-2h")):
+                          (3 * 86400 + 5, "3d"), (-59, "0m"), (-60, "-1m"), (-120, "-2m"), (-7200, "-2h")):
         ok(compact_age(seconds) == text, f"signals: an age of {seconds} seconds is {text}: rounded down to whole minutes, hours or days, the future with a minus sign")
 
 
@@ -3697,6 +3853,159 @@ def test_member_records_are_read_as_agent_mail_reads_them(d):
     ok(member_checked(os.path.join(d, "mailbox"), ["pipeline"]) == {"pipeline": None}, "signals: and a .agent-mail that is a file holds none")
 
 
+def test_signals_prints_names_whole(d):
+    long = "p" * 64
+    cdir = conductor_dir(d, topic=TOPIC_WITH_TABLE.replace("| omlx | hera | pi |", f"| {long} | hera | pi |"))
+    out, status, _ = signals(cdir, mailbox(d, channel=("ingest", [])), deck_fixture(d))
+    lines = out.splitlines()
+    ok(status == 0 and cells(lines[2])[:2] == [long, "hera"] and all(starts(line) == starts(lines[0]) for line in lines[1:4]),
+       "signals: a member's name is printed whole, all 64 characters of it, and the columns are padded to it")
+
+
+def test_signals_caps_the_exception_lines(d):
+    cdir, now = conductor_dir(d), time.time()
+    for count, more in ((45, ["  and 5 more"]), (40, [])):
+        strays = [f"lfm3_{utc_stamp(now - 100 - i)}_from-{STEWARD}_{i:08x}" for i in range(count)]
+        box = mailbox(d, top=[f"{s}.txt" for s in strays], channel=("ingest", []))
+        lines = signals(cdir, box, deck_fixture(d))[0].splitlines()
+        listed = lines[lines.index("exceptions:") + 1:-1]
+        ok(len(listed) == 40 + len(more) and all(line.startswith("  unmatched-own ") for line in listed[:40]) and listed[40:] == more,
+           f"signals: of {count} exceptions, 40 lines are printed, then one line says how many more when there are more")
+        ok(len(json.loads(signals(cdir, box, deck_fixture(d), "--json")[0])["exceptions"]["unmatched_own"]) == count, f"signals: the JSON form lists all {count}")
+
+
+def test_signals_reads_a_roster_with_no_members(d):
+    cdir = conductor_dir(d, topic="## Members\n| name | host | harness |\n|---|---|---|\n")
+    out, status, _ = signals(cdir, mailbox(d, channel=("ingest", [])), deck_fixture(d))
+    ok(status == 0 and out.splitlines() == ["  ".join(TABLE_COLUMNS), "exceptions: none", "counts: posts-since-last=0 transit-without-note=0"],
+       "signals: a roster with no members prints the header, no rows, and the exceptions and counts")
+
+
+def test_signals_reads_signals_last_as_a_time(d):
+    cdir, box, fixture, _ = signals_scene(d)
+    bad = os.path.join(cdir, "steward-state.json.bad")
+    write(cdir, "steward-state.json", json.dumps({"last_turn": "x", "signals_last": utc_stamp(time.time() - 300)[:15] + "Z"}))
+    out, status, err = signals(cdir, box, fixture)
+    ok(status == 0 and err == "" and not os.path.exists(bad) and re.fullmatch(r"[0-9]{8}T[0-9]{6}\.[0-9]{6}Z", state_of(cdir)["signals_last"]) is not None,
+       "signals: a signals_last with no fraction is a time, read as it is, with no notice and nothing moved aside")
+    text = json.dumps({"last_turn": "x", "signals_last": utc_stamp(time.time() + 3600)})
+    write(cdir, "steward-state.json", text)
+    out, status, err = signals(cdir, box, fixture)
+    ok(status == 0 and "posts-since-last=1" in out and read(bad) == text and state_of(cdir)["last_turn"] == "x" and stamp_time(state_of(cdir)["signals_last"]) <= time.time(),
+       "signals: a signals_last in the future is kept as .bad, the file is written again with its other keys, and every post counts, as for a damaged one")
+    ok(err == "steward-signals: signals: posts-since-last counts every post in +ingest but the steward's own, since signals_last in steward-state.json is in the future; "
+              "the file is kept as steward-state.json.bad and written again with its other keys\n", "signals: and that is said in one line")
+
+
+def test_signals_reads_notes_and_open_intents(d):
+    cdir, box, fixture, (s1, s2, _) = signals_scene(d)
+    transit, stray = f"pipeline_{s1}_from-glm-5.2_aaaaaaaa", f"lfm3_{s2}_from-{STEWARD}_11111111"
+    out = signals(cdir, box, fixture)[0]
+    ok("transit-without-note=1" in out and f"  unmatched-own {stray}" in out, "signals: with no NOTE and no intent, the mail between members and the steward's stray file are reported")
+    write(cdir, "NOTES.log", SIGNALS_NOTES + f"{s1[:15]}Z {transit}\n")
+    ok("transit-without-note=0" in signals(cdir, box, fixture)[0], "signals: a line of NOTES.log that names the mail between two members accounts for it")
+    write(cdir, "SENT.log", SIGNALS_SENT + f"intent 2 {s2[:15]}Z lfm3 NUDGE_lfm3-idle cd34\n")
+    out = signals(cdir, box, fixture)[0]
+    ok("unmatched-own" not in out and "exceptions: none" in out, "signals: an intent in SENT.log that no sent line completes yet, to the same recipient within 10 seconds, accounts for the steward's file")
+
+
+def test_signals_moves_signals_last_only_when_the_report_is_printed(d):
+    cdir, box, fixture, _ = signals_scene(d)
+    write(cdir, "steward-state.json", json.dumps({"signals_last": "20261101T000000.000000Z"}))
+    before = tree(d)
+    real = render_text
+
+    def broken(report):
+        raise RuntimeError("the report could not be rendered")
+
+    globals()["render_text"] = broken
+    try:
+        raises(RuntimeError, signals, cdir, box, fixture)
+    finally:
+        globals()["render_text"] = real
+    ok(tree(d) - before == set(), "signals: a report that fails before it is printed leaves steward-state.json as it was, and writes nothing")
+
+    class Closed(io.StringIO):
+        def write(self, text):
+            raise BrokenPipeError(errno.EPIPE, "Broken pipe")
+
+    with contextlib.redirect_stdout(Closed()):
+        raises(BrokenPipeError, main, ["signals", "ingest", "--dir", cdir, "--mailbox", box, "--run-fixture", fixture])
+    ok(tree(d) - before == set(), "signals: and so does a report that stdout cannot take")
+
+
+@contextlib.contextmanager
+def time_as(clock):
+    """Within the block, time.time is CLOCK."""
+    real = time.time
+    time.time = clock
+    try:
+        yield
+    finally:
+        time.time = real
+
+
+def test_signals_takes_the_time_once_before_the_listing(d):
+    cdir, box, fixture, (s1, _, _) = signals_scene(d)
+    signals(cdir, box, fixture)  # a first call, so that signals_last is set
+    late = f"ingest_{utc_stamp(time.time() - 3600)}_from-omlx_0000000f.txt"  # stamped an hour ago, as by a clock or a sync that lags
+
+    def arrive(path, found):
+        if path.endswith("+ingest") and not os.path.exists(os.path.join(path, late)):
+            write(path, late, "")  # it arrives after the listing, and after the time the call took
+        return found
+
+    with listing_as(arrive):
+        ok("posts-since-last=0" in signals(cdir, box, fixture)[0], "signals: a post that arrives after the listing is not counted by that call")
+    ok("posts-since-last=1" in signals(cdir, box, fixture)[0], "signals: the next call counts it by its arrival, since the time was taken before the listing")
+    fake, readings = time.time() + 86400, []
+
+    def clock():  # a day ahead, and an hour later at each reading after the first
+        readings.append(fake)
+        return fake + 3600 * (len(readings) - 1)
+
+    with time_as(clock):
+        out = signals(cdir, box, fixture, "--json")[0]
+    pipeline = json.loads(out)["members"]["pipeline"]
+    record = os.stat(os.path.join(box, ".agent-mail", "members", "pipeline.json")).st_mtime
+    deck = datetime.datetime(2026, 10, 31, 22, 29, 7, tzinfo=datetime.timezone.utc).timestamp()  # pipeline's last activity in ANDORIA_LIST
+    ok(pipeline["checked_age_s"] == int((fake - record) // 1) and pipeline["last_activity_age_s"] == int((fake - deck) // 1)
+       and pipeline["unread"]["oldest_age_s"] == int((fake - stamp_time(s1)) // 1) and state_of(cdir)["signals_last"] == utc_stamp(fake),
+       "signals: every age and signals_last come from the one time the call took")
+
+
+def test_signals_prints_other_scripts_as_ascii(d):
+    esc, accent = chr(0x1B), chr(0xE9)
+    cdir = conductor_dir(d, topic=TOPIC_WITH_TABLE.replace("| omlx | hera | pi |", f"| omlx | hera | pi{accent} |"))
+    box = mailbox(d, channel=("ingest", []))
+    fixture = write(d, "script.json", json.dumps({"list": json.dumps([{"title": "omlx", "status": f"caf{accent}", "substate": f"{esc}[31mred{esc}[0m", "archived": False}]),
+                                                   "remote andoria-08": json.dumps(ANDORIA_LIST)}))
+    out, status, _ = signals(cdir, box, fixture)
+    ok(status == 0 and out.isascii() and cells(out.splitlines()[2])[2:5] == ["pi_", "caf_", "_[31mred_[0m"],
+       "signals: a character of another script or a control character in a cell is printed as an underscore, so the text form is ASCII")
+    out, status, _ = signals(cdir, box, fixture, "--json")
+    omlx = json.loads(out)["members"]["omlx"]
+    ok(status == 0 and out.isascii() and omlx["status"] == f"caf{accent}" and omlx["harness"] == f"pi{accent}", "signals: the JSON form escapes them as ASCII and keeps them")
+
+
+def test_signals_names_the_steward_by_the_path_given(d):
+    real = conductor_dir(d, name="real-steward")
+    link = os.path.join(tempfile.mkdtemp(dir=d), "ingest-steward")
+    os.symlink(real, link)
+    box = mailbox(d, top=[f"lfm3_{utc_stamp(time.time() - 60)}_from-{STEWARD}_00000001.txt"], channel=("ingest", []))
+    out, status, _ = signals(link, box, deck_fixture(d))
+    ok(status == 0 and "  unmatched-own lfm3_" in out, "signals: the steward's name comes from the name --dir gives, a symlink's and not its target's")
+
+
+def test_a_fixture_that_cannot_be_used_is_refused(d):
+    cdir, box, _, _ = signals_scene(d)
+    for what, path, reason in (("missing", os.path.join(d, "no-such.json"), os.strerror(errno.ENOENT)), ("not JSON", write(d, "bad.json", "{"), "not valid JSON"),
+                               ("not a JSON object", write(d, "list.json", "[]"), "not a JSON object")):
+        for argv in (["signals", "ingest", "--dir", cdir, "--mailbox", box, "--run-fixture", path], ["probe", "omlx", "--dir", cdir, "--run-fixture", path]):
+            ok(capture(main, argv) == ("", 2, f"steward-signals: --run-fixture: {reason}\n"), f"{argv[0]}: a --run-fixture file that is {what} is refused in one line, with status 2")
+    ok(not os.path.exists(os.path.join(cdir, "steward-state.json")), "signals: and nothing is written")
+
+
 @section("signals")
 def section_signals(d):
     with agent_deck_refused() as started:  # no check may run the real agent-deck: one that would is refused here, and fails
@@ -3705,7 +4014,8 @@ def section_signals(d):
         test_signals_prints_one_row_for_each_member_in_roster_order(d)
         test_signals_json(d)
         test_signals_probe(d)
-        test_signals_counts_posts_since_the_last_call_by_their_stamps(d)
+        test_signals_counts_each_post_once_by_its_arrival(d)
+        test_posts_count_by_arrival_in_the_half_open_interval(d)
         test_signals_keeps_the_stewards_own_keys(d)
         test_signals_moves_a_state_it_cannot_use_aside(d)
         test_signals_writes_the_state_whole_after_the_report(d)
@@ -3717,6 +4027,16 @@ def section_signals(d):
         test_signals_options(d)
         test_compact_ages(d)
         test_member_records_are_read_as_agent_mail_reads_them(d)
+        test_signals_prints_names_whole(d)
+        test_signals_caps_the_exception_lines(d)
+        test_signals_reads_a_roster_with_no_members(d)
+        test_signals_reads_signals_last_as_a_time(d)
+        test_signals_reads_notes_and_open_intents(d)
+        test_signals_moves_signals_last_only_when_the_report_is_printed(d)
+        test_signals_takes_the_time_once_before_the_listing(d)
+        test_signals_prints_other_scripts_as_ascii(d)
+        test_signals_names_the_steward_by_the_path_given(d)
+        test_a_fixture_that_cannot_be_used_is_refused(d)
     ok(started == [], "signals: no check started the real agent-deck")
 
 
@@ -3734,16 +4054,17 @@ def build_parser():
                                     "roster order (host, harness, agent-deck's status, substate and background work, the age of its last activity, its unread "
                                     "direct mail with the age of the oldest, and the age of its member record), then the exceptions (each file in the steward's "
                                     "name that SENT.log does not account for, and each NUDGE of the steward's still unread), then the counts (the posts to "
-                                    "+CHANNEL since the last call, and the mail between members that no NOTE names) and, with --probe, the probe's word for "
-                                    "one member. A member whose host agent-deck could not list is unknown; one it lists as archived, or does not list, is not "
-                                    "in agent-deck. The steward's name is conductor- and the name of CONDUCTOR_DIR. The time of the call is kept in "
+                                    "+CHANNEL by others than the steward that arrived since the last call, and the mail between members that no NOTE names) and, "
+                                    "with --probe, the probe's word for "
+                                    "one member. A member whose host agent-deck could not list is unknown; one it does not list is not in agent-deck, and an "
+                                    "archived one is archived. The steward's name is conductor- and the name of CONDUCTOR_DIR. The time of the call is kept in "
                                     "CONDUCTOR_DIR/steward-state.json as signals_last, with the file's other keys left as they are, and nothing else is written; "
                                     "a file that is not a JSON object, or a signals_last that is not a stamp, is kept as steward-state.json.bad and every post "
                                     "is counted. A conductor file, mailbox, channel or member record that cannot be read, a CHANNEL that is not a name, and a "
                                     "--probe that names no member are refused: status 2, a reason on stderr, nothing on stdout, nothing written.")
     sg.add_argument("channel", metavar="CHANNEL", help="the topic's channel, its name without the +")
     sg.add_argument("--dir", required=True, metavar="CONDUCTOR_DIR", help="the conductor directory, which holds TOPIC.md, POLICY.md, SENT.log, NOTES.log and steward-state.json")
-    sg.add_argument("--mailbox", metavar="DIR", help="the mailbox; $AGENT_MAIL_DIR when that is set and not empty, else ~/Mailbox")
+    sg.add_argument("--mailbox", metavar="DIR", help="the mailbox; else $AGENT_MAIL_DIR, then the dir in agent-mail's config file, then ~/Mailbox, as agent-mail finds it")
     sg.add_argument("--json", action="store_true", help="print the report as one JSON object instead of the table")
     sg.add_argument("--probe", metavar="NAME", help="also say whether the member NAME, whom TOPIC.md lists, is waiting on John, as the probe command does")
     sg.add_argument("--run-fixture", metavar="FILE", help=argparse.SUPPRESS)  # for the self-test: a JSON object of the answers that fake_run gives
@@ -3776,10 +4097,15 @@ def main(argv):
     a = build_parser().parse_args(argv)
     if a.cmd == "self-test":
         return self_test(a.sections)
-    if a.cmd == "signals":
-        return signals_command(runner_for(a.run_fixture), a.channel, a.dir, a.mailbox, a.json, a.probe)
-    if a.cmd == "probe":
-        return probe_command(runner_for(a.run_fixture), a.name, a.dir)
+    if a.cmd in ("signals", "probe"):
+        try:
+            run = runner_for(a.run_fixture)
+        except ValueError as e:
+            print(without_question_marks(f"steward-signals: --run-fixture: {e}"), file=sys.stderr)
+            return 2
+        if a.cmd == "signals":
+            return signals_command(run, a.channel, a.dir, a.mailbox, a.json, a.probe)
+        return probe_command(run, a.name, a.dir)
     if a.cmd == "metrics":
         return metrics_command(a.dir, a.date, a.settings)
 
