@@ -12,9 +12,10 @@ summary_local_time a time of day, HH:MM; for summary_tz a tz database name), is 
 nothing falls back to a default.
 
 TOPIC.md lists the topic's members as a Markdown table, | name | host | harness |, under a "## Members" heading. A
-name that is not an agent-mail name or is listed twice, or a member with no host, is refused with the name shown, and
-so is a file with no such heading. Each member's agent-deck row comes from one read-only listing for each host; a host
-that does not answer leaves its members unknown, never stopped.
+name that is not an agent-mail name or is listed twice, or a member with no host or with a host that is not lower-case
+letters, digits, dots and hyphens starting with a letter or a digit, is refused with the name shown; so is a table whose
+header is not name | host | harness, and a file with no such heading. Each member's agent-deck row comes from one
+read-only listing for each host; a host that does not answer leaves its members unknown, never stopped.
 
 The census lists names and ctimes only: the message files named in the mailbox's top level and in +CHANNEL/, never a message's text.
 A file counts only as agent-mail's reader counts it: a regular file, not a symlink or a directory, whose whole name is a message's,
@@ -80,6 +81,9 @@ import time
 import zoneinfo
 
 REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))  # the directory that holds steward/
+# The oldest Python main runs on, as the plan has it. An older one is refused, not trusted: before 3.11, datetime.fromisoformat cannot read the Z of
+# agent-deck's stamps, so every last activity would silently be unknown. The file still compiles on 3.9, so that the refusal can be printed.
+MIN_PYTHON = (3, 12)
 POLICY_KEYS = (
     "stale_min", "idle_min", "question_min", "nudge_gap_min", "nudges_per_item_day", "busy_stuck_h", "deaf_min",
     "offer_items", "offer_every_h", "sends_per_turn", "sends_per_hour", "ledger_kb", "log_days", "back_after_min",
@@ -89,12 +93,13 @@ NUMBER_RE = re.compile(r"[0-9]+(?:\.[0-9]+)?")
 MAX_DIGITS = 12  # the most digits of a number in POLICY.md and of a whole number in a metrics --set: more is no policy and no counter, and 400 would read as inf where 4301 would make int() raise
 WHOLE_RE = re.compile(r"[0-9]+")
 COUNT_KEYS = ("nudges_per_item_day", "offer_items", "sends_per_turn", "sends_per_hour", "log_days", "ledger_kb")  # the keys whose value counts things, so a whole number
-SHOWN_CHARS = 40  # how much of a value from POLICY.md a message quotes: the steward reads the message, and a value of thousands of characters would flood it
+SHOWN_CHARS = 40  # how much of a value or key from POLICY.md, or a name from TOPIC.md, a message quotes: the steward reads the message, and thousands of characters would flood it
 TIME_RE = re.compile(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]")
 NAME_RE = re.compile(r"[a-z0-9](?:[a-z0-9.]|-(?!-))*")  # agent-mail's NAME_PAT; see grammatical
+HOST_RE = re.compile(r"[a-z0-9][a-z0-9.-]*")  # a host in TOPIC.md: its first character is never a hyphen, so agent-deck never takes it for a flag
 HERA = "hera"  # the host that agent-deck answers for when it is run without a remote: its list and its session output
 BACKGROUND_SUBSTATES = ("background-work", "watching")  # the substates agent-deck gives a session whose pane shows background work
-SHELL_WORDS = ("sleep", "watch", "sh -c", "bash -c", "tail")  # in a background task's text they mark a shell command
+SHELL_WORDS = ("sleep", "watch", "sh -c", "bash -c", "tail", "shell")  # in a background task's text they mark a shell command
 # A message file's name: agent-mail's MSG_RE, with groups for the recipient, the stamp and the sender, and none for the hex tail. The
 # first character of a name is a letter or a digit, so no hidden name (a claimed file, a marker) matches.
 MSG_RE = re.compile(rf"(?P<to>{NAME_RE.pattern})_(?P<stamp>[0-9]{{8}}T[0-9]{{6}}\.[0-9]{{6}}Z)_from-(?P<sender>{NAME_RE.pattern})_[0-9a-f]{{8}}\.txt")
@@ -112,16 +117,22 @@ def without_question_marks(text):
     return text.replace("?", "")
 
 
+def clipped(text):
+    """TEXT as a message names a key or a name from a file: its first SHOWN_CHARS characters, as they are, and three dots after them when it is longer,
+    so that a cell of thousands of characters does not flood the message the steward reads."""
+    return text[:SHOWN_CHARS] + ("..." if len(text) > SHOWN_CHARS else "")
+
+
 # ---- policy ----
 
 class PolicyError(Exception):
     """A POLICY.md the helper refuses. .key is the key of the row that is wrong, as the file has it, and .reason says how, quoting the first SHOWN_CHARS
     characters of the value as the file has it where the value is part of the reason (a number of too many digits is counted, not quoted). Both keep any
-    question mark the file holds. The message, str(e), is the file, the key and the reason with every question mark taken out, because nothing the steward
-    prints may carry one."""
+    question mark the file holds. The message, str(e), is the file, the key (cut as clipped cuts it) and the reason with every question mark taken out,
+    because nothing the steward prints may carry one."""
 
     def __init__(self, key, reason):
-        super().__init__(without_question_marks(f"steward-signals: POLICY.md: {key}: {reason}"))
+        super().__init__(without_question_marks(f"steward-signals: POLICY.md: {clipped(key)}: {reason}"))
         self.key = key
         self.reason = reason
 
@@ -205,12 +216,12 @@ Member = collections.namedtuple("Member", "name host harness")
 
 
 class RosterError(Exception):
-    """A TOPIC.md the helper refuses. .name is the text that is wrong, as the file has it (a member's name, or the
-    heading that is missing) and .reason says how. The message leaves out any question mark they hold, because
-    nothing the steward prints may carry one."""
+    """A TOPIC.md the helper refuses. .name is the text that is wrong, as the file has it (a member's name, the
+    heading that is missing, or Members for a table that is not the roster's) and .reason says how. The message
+    names it as clipped cuts it and leaves out any question mark, because nothing the steward prints may carry one."""
 
     def __init__(self, name, reason="not a valid name"):
-        super().__init__(without_question_marks(f"steward-signals: TOPIC.md: {name}: {reason}"))
+        super().__init__(without_question_marks(f"steward-signals: TOPIC.md: {clipped(name)}: {reason}"))
         self.name = name
         self.reason = reason
 
@@ -236,22 +247,31 @@ def section_lines(text, heading):
 
 def load_roster(path):
     """The members in the "## Members" table of the TOPIC.md at PATH, in table order, as Member(name, host, harness).
-    A name that is not an agent-mail name or is listed twice, a member with no host, or a file with no such heading
-    raises RosterError, so the steward never watches a name it cannot mail or a member it cannot look up, nor takes a
-    typo in the heading for a topic with no members."""
+    The table's first row is its header, name | host | harness in any case, so that no cell is read in the wrong
+    place; the header row of a second table under the heading is skipped. A name that is not an agent-mail name or is
+    listed twice, a member with no host or with a host that HOST_RE does not match, a table whose header is another
+    (or no table at all), and a file with no such heading raise RosterError, so the steward never watches a name it
+    cannot mail or a member it cannot look up, agent-deck never takes a host for a flag, and a typo in the heading is
+    never taken for a topic with no members."""
     with open(path, encoding="utf-8") as f:
         text = f.read()
     section = section_lines(text, "## Members")
     if section is None:
         raise RosterError("## Members", "no such heading")
+    rows = [tuple(row) for row in table_rows(section, 3)]
+    header = ("name", "host", "harness")
+    if not rows or tuple(cell.casefold() for cell in rows[0]) != header:
+        raise RosterError("Members", "the table's header must be name | host | harness")
     members = []
-    for name, host, harness in table_rows(section, 3):
-        if (name.casefold(), host.casefold(), harness.casefold()) == ("name", "host", "harness"):
+    for name, host, harness in rows[1:]:
+        if (name.casefold(), host.casefold(), harness.casefold()) == header:
             continue
         if not grammatical(name):
             raise RosterError(name)
         if not host:
             raise RosterError(name, "empty host")
+        if HOST_RE.fullmatch(host) is None:
+            raise RosterError(name, "the host is not a host name: lower-case letters, digits, dots and hyphens, starting with a letter or a digit")
         if any(m.name == name for m in members):
             raise RosterError(name, "listed twice")
         members.append(Member(name, host, harness))
@@ -285,9 +305,11 @@ def utc_of(value):
 
 def background_kind(row):
     """What background work the agent-deck session ROW shows: "shell" (which agent-deck 1.16.29 misreports, so the
-    steward does not rely on it), "tool" (any other), None (none) or "unknown" (some, but nothing says what). A shell
-    word anywhere in the text counts, so a task named for one reads as shell work too, which errs on the safe side:
-    the steward treats shell work as unknown."""
+    steward does not rely on it), "tool" (any other), None (none) or "unknown" (some, but nothing says what). It is
+    shell when the kind says shell or the text holds one of SHELL_WORDS, the word shell among them. A shell word
+    anywhere in the text counts, so a task named for one reads as shell work too, which errs on the safe side: the
+    steward treats shell work as unknown. A watching substate is always shell, since agent-deck's detail for it
+    starts "1 watching", which holds watch."""
     work = row.get("background_work")  # hera's rows: background_work.kind and .task
     if isinstance(work, dict) and work:
         kind, text = work.get("kind"), work.get("task")
@@ -305,14 +327,17 @@ def background_kind(row):
 
 def deck_sessions(run, argv):
     """The session rows (dicts) in the listing that RUN(ARGV) printed, or None when the host did not answer: the
-    command failed, what it printed is not a listing (a bare array, or an object with a sessions array), or the
-    errors list that --with-errors adds holds anything."""
-    out, code = run(argv)
+    command failed, what it printed is not a listing (a bare array, or an object with a sessions array), the errors
+    list that --with-errors adds holds anything, or RUN raised or returned what is not (stdout, returncode)."""
+    try:
+        out, code = run(argv)
+    except Exception:  # a run does not raise, but a listing that cannot be had leaves its host unknown, never an error
+        return None
     if code != 0:
         return None
     try:
         data = json.loads(out)
-    except (ValueError, RecursionError):
+    except (TypeError, ValueError, RecursionError):  # stdout that is not text, not JSON, or nested too deep to read
         return None
     sessions = data.get("sessions") if isinstance(data, dict) else data
     if (isinstance(data, dict) and data.get("errors")) or not isinstance(sessions, list):
@@ -329,7 +354,8 @@ def row_rank(session):
 
 def deck_rows(run, members, hera_host=HERA):
     """The agent-deck row of each member, by name: dict(status, substate, bg, last_activity, archived, host_ok).
-    RUN(argv) returns (stdout, returncode) and does not raise. Members on HERA_HOST are read from `agent-deck list
+    RUN(argv) returns (stdout, returncode) and should not raise; a host whose RUN raises is one that does not answer.
+    The rows are keyed host by host, not in roster order. Members on HERA_HOST are read from `agent-deck list
     --json`, the others from `agent-deck remote sessions HOST --json --with-errors`, one call for each host, and
     matched to rows by title, exactly; of several rows with one title the best by row_rank is read. A member its
     host's listing does not hold has host_ok true and every other field None; a host that does not answer (see
@@ -739,7 +765,8 @@ def parse_settings(settings):
             raise ValueError(f"--set number {number}: expected KEY=VALUE")
         words = key.count(".") + 1
         if len(key) > MAX_KEY_CHARS or words > MAX_KEY_WORDS:
-            raise ValueError(f"--set number {number}: a key has at most {MAX_KEY_WORDS} words and {MAX_KEY_CHARS} characters; this one has {words} words and {len(key)} characters")
+            raise ValueError(f"--set number {number}: a key has at most {MAX_KEY_WORDS} words and {MAX_KEY_CHARS} characters; "
+                             f"this one has {words} {'word' if words == 1 else 'words'} and {len(key)} characters")  # it has 11 characters at least
         if KEY_RE.fullmatch(key) is None:
             raise ValueError(f"--set number {number}: {key_problem(key) or 'that is not a key'}")
         if not value:
@@ -1140,9 +1167,37 @@ def test_policy_message_has_no_question_mark(d):
 
 
 def test_the_policy_file_says_what_the_reader_checks(d):
-    intro = " ".join(read(os.path.join(REPO, "steward", "POLICY.md")).split())
-    ok(f"at most {MAX_DIGITS} digits" in intro and "must be whole numbers" in intro and all(key in intro for key in COUNT_KEYS),
-       "policy: POLICY.md says that a number has at most 12 digits and that each of the six counts must be a whole number, as the reader checks")
+    paragraphs = [" ".join(p.split()) for p in read(os.path.join(REPO, "steward", "POLICY.md")).split("\n\n")]
+    rules = [p for p in paragraphs if "refuses a file" in p]  # the paragraph that says what the reader refuses, not the table, where every key has a row
+    ok(len(rules) == 1 and not rules[0].startswith("|"), "policy: POLICY.md has one paragraph that says what the reader refuses, before its table")
+    counts = ("nudges_per_item_day", "offer_items", "sends_per_turn", "sends_per_hour", "log_days", "ledger_kb")
+    ok(counts == COUNT_KEYS, "policy: the six counts named here are the reader's")
+    ok(f"at most {MAX_DIGITS} digits" in rules[0] and "must be whole numbers" in rules[0], "policy: that paragraph says that a number has at most 12 digits and that the counts must be whole numbers, as the reader checks")
+    for key in counts:
+        ok(key in rules[0], f"policy: that paragraph names {key} among the counts that must be whole numbers")
+
+
+def test_policy_message_quotes_at_most_40_characters_of_a_key(d):
+    TABLE = read(os.path.join(REPO, "steward", "POLICY.md"))
+    for what, key in (("letters", "k" * 5000), ("letters and question marks", "k?" * 2500)):
+        e = raises(PolicyError, load_policy, write(d, "POLICY.md", TABLE + f"| {key} | 20 | typo |\n"))
+        ok(e.key == key and str(e) == f"steward-signals: POLICY.md: {key[:40].replace('?', '')}...: unknown key",
+           f"policy: a key of 5000 characters ({what}) is kept whole in .key and cut to its first 40 characters, three dots after them, in the message")
+    e = raises(PolicyError, load_policy, write(d, "POLICY.md", TABLE + f"| {'k' * 40} | 20 | typo |\n"))
+    ok(str(e) == f"steward-signals: POLICY.md: {'k' * 40}: unknown key", "policy: a key of 40 characters is quoted whole, with no dots")
+
+
+def test_main_refuses_an_older_python(d):
+    real = sys.version_info
+    try:
+        sys.version_info = (3, 11, 15, "final", 0)  # what an older interpreter would report
+        older = capture(main, ["self-test", "nosuch"])
+        sys.version_info = (3, 12, 0, "final", 0)
+        supported = capture(main, ["self-test", "nosuch"])
+    finally:
+        sys.version_info = real
+    ok(older == ("", 2, "steward-signals: Python 3.12 or later is needed, and this is 3.11\n"), "main: an older Python is refused in one line on stderr with status 2, before any command runs")
+    ok(supported[1] == 2 and "no self-test section 'nosuch'" in supported[2] and "Python" not in supported[2], "main: Python 3.12 is not refused")
 
 
 def test_policy_messages_quote_at_most_40_characters_of_a_value(d):
@@ -1209,6 +1264,8 @@ def section_policy(d):
     test_policy_checks_values(d)
     test_the_policy_file_says_what_the_reader_checks(d)
     test_policy_messages_quote_at_most_40_characters_of_a_value(d)
+    test_policy_message_quotes_at_most_40_characters_of_a_key(d)
+    test_main_refuses_an_older_python(d)
     test_policy_reads_ascii_digits_only(d)
     test_policy_numbers_have_at_most_12_digits(d)
     test_policy_counts_are_whole_numbers(d)
@@ -1243,7 +1300,11 @@ HERA_LIST = [
     {"title": "ares-review", "status": "waiting", "archived": False, "last_activity_at": "2026-10-28T12:49:37-07:00"},
 ]
 ANDORIA_LIST = {"sessions": [{"title": "pipeline", "status": "waiting", "substate": "watching", "archived": False, "last_activity_at": "2026-10-31T22:29:07Z",
-                              "substate_detail": "1 watching \u00b7 board headings and reviews on the eleven stacked PRs"}],
+                              "substate_detail": "1 watching \u00b7 board headings and reviews on the eleven stacked PRs"},
+                             # A row of agent-deck's on andoria-08 that runs a workflow, as an audit printed it on 2026-10-31 (its last activity is made up):
+                             # running, the work in substate_detail alone, with no background_work table.
+                             {"title": "glm-5.2", "status": "running", "substate": "background-work", "archived": False, "last_activity_at": "2026-10-31T22:41:12Z",
+                              "substate_detail": "workflow y-phase-a2 4/5 " + chr(0xB7) + " 2h46m"}],
                 "errors": []}
 NO_FIELDS = {"status": None, "substate": None, "bg": None, "last_activity": None, "archived": None}  # what a Row holds with no row to read
 
@@ -1334,6 +1395,46 @@ def test_roster_message_has_no_question_mark(d):
     ok(e.name == "glm?5.2" and str(e) == "steward-signals: TOPIC.md: glm5.2: not a valid name", "roster: a question mark in a name does not reach the message")
 
 
+def test_roster_message_quotes_at_most_40_characters_of_a_name(d):
+    for what, name in (("letters", "g" * 5000), ("letters and question marks", "g?" * 2500)):
+        e = raises(RosterError, load_roster, write(d, "TOPIC.md", TOPIC_WITH_TABLE.replace("glm-5.2", name)))
+        ok(e.name == name and str(e) == f"steward-signals: TOPIC.md: {name[:40].replace('?', '')}...: not a valid name",
+           f"roster: a name of 5000 characters ({what}) is kept whole in .name and cut to its first 40 characters, three dots after them, in the message")
+    e = raises(RosterError, load_roster, write(d, "TOPIC.md", TOPIC_WITH_TABLE.replace("glm-5.2", "g" * 65)))
+    ok(str(e) == f"steward-signals: TOPIC.md: {'g' * 40}...: not a valid name", "roster: a name just over 64 characters is cut at 40 too")
+    e = raises(RosterError, load_roster, write(d, "TOPIC.md", TOPIC_WITH_TABLE.replace("glm-5.2", "G" * 40)))
+    ok(str(e) == f"steward-signals: TOPIC.md: {'G' * 40}: not a valid name", "roster: a name of 40 characters is quoted whole, with no dots")
+
+
+def test_roster_refuses_a_host_agent_deck_could_misread(d):
+    def hosted(host):
+        return write(d, "TOPIC.md", TOPIC_WITH_TABLE.replace("| omlx | hera | pi |", f"| omlx | {host} | pi |"))
+
+    reason = "the host is not a host name: lower-case letters, digits, dots and hyphens, starting with a letter or a digit"
+    for bad in ("-x", "--help", "-", "Hera", "andoria 08", "hera?", ".hera", "_hera", "hera_2", "hera/x", "hera;ls", "h" + chr(0xE9) + "ra", "hera" + chr(0xFF10)):
+        e = raises(RosterError, load_roster, hosted(bad))
+        ok(e.name == "omlx" and str(e) == f"steward-signals: TOPIC.md: omlx: {reason}", f"roster: the host {bad!r} is refused, naming its member, so that agent-deck never takes it for a flag")
+    for good in ("hera", "andoria-08", "delphi-3bd4", "host.local", "10.0.0.1", "x", "0"):
+        ok(load_roster(hosted(good))[1].host == good, f"roster: {good!r} is a host")
+
+
+def test_roster_refuses_a_table_whose_header_is_another(d):
+    header = "| name | host | harness |"
+    why = "steward-signals: TOPIC.md: Members: the table's header must be name | host | harness"
+    no_header = TOPIC_WITH_TABLE.replace(header + "\n|------|------|---------|\n", "")
+    for what, text in (("other words", TOPIC_WITH_TABLE.replace(header, "| member | host | harness |")),
+                       ("its columns in another order", TOPIC_WITH_TABLE.replace(header, "| host | name | harness |")),
+                       ("a column missing", TOPIC_WITH_TABLE.replace(header, "| name | host |")),
+                       ("no header row, so that the first member's row is read as the header", no_header),
+                       ("no table at all", "## Members\nThe members are pipeline, omlx and glm-5.2.\n"),
+                       ("nothing under the heading", "## Members\n")):
+        e = raises(RosterError, load_roster, write(d, "TOPIC.md", text))
+        ok(e.name == "Members" and str(e) == why, f"roster: a Members table with {what} is refused, not read with its cells in the wrong places")
+    ok(no_header != TOPIC_WITH_TABLE, "roster: the check above removed the header row")
+    twice = TOPIC_WITH_TABLE.replace("| glm-5.2 |", "\n| Name | Host | Harness |\n|---|---|---|\n| glm-5.2 |")  # a second table under the heading, with its own header
+    ok([m.name for m in load_roster(write(d, "TOPIC.md", twice))] == ["pipeline", "omlx", "glm-5.2"], "roster: the header row of a second table under the heading is not a member")
+
+
 def test_fake_run(d):
     run = fake_run({"session": "short", "session output lfm3": ["long", 0], "list": ("", 3)})
     ok(run(["agent-deck", "session", "output", "lfm3", "--max-tokens", "200"]) == ("long", 0), "deck: the longest key that fits answers, and a list value works as a pair")
@@ -1359,8 +1460,11 @@ def test_failed_host_marks_unknown(d):
 
 
 def test_real_rows(d):
-    members = [Member("wiggum", "hera", "claude"), Member("mail-conductor", "hera", "claude"), Member("ares-review", "hera", "claude"), Member("pipeline", "andoria-08", "claude")]
+    members = [Member("wiggum", "hera", "claude"), Member("mail-conductor", "hera", "claude"), Member("ares-review", "hera", "claude"), Member("pipeline", "andoria-08", "claude"),
+               Member("glm-5.2", "andoria-08", "claude")]
     rows = deck_rows(fake_run({"list": json.dumps(HERA_LIST), "remote andoria-08": json.dumps(ANDORIA_LIST)}), members)
+    ok(rows["glm-5.2"] == {"status": "running", "substate": "background-work", "bg": "tool", "last_activity": "2026-10-31T22:41:12Z", "archived": False, "host_ok": True},
+       "deck: a real remote row that runs a workflow reads its substate_detail, and a workflow is tool work")
     ok(rows["wiggum"] == {"status": "running", "substate": "background-work", "bg": "tool", "last_activity": "2026-10-31T22:39:01Z", "archived": False, "host_ok": True}, "deck: a real hera row with workflow background work")
     ok(rows["mail-conductor"] == {"status": "waiting", "substate": "idle-at-empty-prompt", "bg": None, "last_activity": "2026-10-31T22:32:31Z", "archived": False, "host_ok": True}, "deck: a real waiting row")
     ok(rows["ares-review"] == {"status": "waiting", "substate": None, "bg": None, "last_activity": "2026-10-28T19:49:37Z", "archived": False, "host_ok": True}, "deck: a real row with no substate, its offset stamp read as UTC")
@@ -1402,6 +1506,19 @@ def test_unreadable_answers_are_unknown(d):
     ok(rows["omlx"]["host_ok"] is False and rows["pipeline"]["host_ok"] and rows["pipeline"]["status"] == "waiting", "deck: a failed local listing marks hera's members unknown, and only them")
 
 
+def test_a_runner_that_fails_marks_its_hosts_unknown(d):
+    members = [Member("omlx", "hera", "pi"), Member("pipeline", "andoria-08", "claude")]
+    for error in (OSError("no such program"), subprocess.TimeoutExpired("agent-deck", 20), RuntimeError("boom"), KeyError("x")):
+        rows = deck_rows(raising(error), members)
+        ok(rows == {"omlx": {**NO_FIELDS, "host_ok": False}, "pipeline": {**NO_FIELDS, "host_ok": False}}, f"deck: a run that raises {type(error).__name__} marks every host unknown, not an error")
+
+    def answers(value):
+        return lambda argv: value
+
+    for what, value in (("no pair", None), ("a pair with no text", (None, 0)), ("a pair with a number for text", (42, 0)), ("three values", ("[]", 0, 0)), ("a string", "abc")):
+        ok(all(not row["host_ok"] for row in deck_rows(answers(value), members).values()), f"deck: a run that returns {what} marks every host unknown, not an error")
+
+
 def test_odd_rows_read_as_far_as_they_go(d):
     members = [Member(name, "hera", "claude") for name in ("pi", "pipeline", "omlx", "syncthing", "ares")]
     listing = [{"title": "pipeline", "status": "running"}, "a stray string", None, {"status": "idle"}, {"title": 7, "status": "idle"}, {"title": ["ares"], "status": "idle"},
@@ -1421,6 +1538,10 @@ def test_background_work_kinds(d):
     for task in ("sleep 600", "Sleep 5", "tail -f x", "watch -n 5 ls", "sh -c 'make'", "bash -c 'make'"):
         ok(bg_of(background_work={"task": task}) == "shell", f"deck: background work {task!r} is shell work")
     ok(bg_of(background_work={"kind": "shell", "task": "build"}) == "shell", "deck: a kind that says shell is shell work")
+    dot = chr(0xB7)  # the middle dot agent-deck puts in substate_detail
+    for what, fields in (("a task", {"background_work": {"task": "Shell: npm test"}}), ("a substate_detail", {"substate": "background-work", "substate_detail": f"1 shell {dot} npm test"}),
+                         ("the detail of a watching substate", {"substate": "watching", "substate_detail": f"2 shells {dot} make"})):
+        ok(bg_of(**fields) == "shell", f"deck: the word shell in {what} marks shell work")
     ok(bg_of(background_work={"kind": "workflow", "task": "landing"}) == "tool" and bg_of(background_work={"kind": "workflow"}) == "tool"
        and bg_of(background_work={"task": "landing"}) == "tool", "deck: any other background work is tool work")
     ok(bg_of() is None and bg_of(background_work=None) is None and bg_of(background_work={}) is None and bg_of(substate="idle-at-empty-prompt") is None, "deck: a row with no background work has bg None")
@@ -1473,12 +1594,16 @@ def section_deck(d):
     test_roster_name_grammar(d)
     test_roster_refuses_what_it_cannot_read(d)
     test_roster_message_has_no_question_mark(d)
+    test_roster_message_quotes_at_most_40_characters_of_a_name(d)
+    test_roster_refuses_a_host_agent_deck_could_misread(d)
+    test_roster_refuses_a_table_whose_header_is_another(d)
     test_fake_run(d)
     test_list_shapes(d)
     test_failed_host_marks_unknown(d)
     test_real_rows(d)
     test_one_call_per_host(d)
     test_unreadable_answers_are_unknown(d)
+    test_a_runner_that_fails_marks_its_hosts_unknown(d)
     test_odd_rows_read_as_far_as_they_go(d)
     test_background_work_kinds(d)
     test_last_activity_is_utc(d)
@@ -2167,8 +2292,8 @@ def test_probe_options(d):
     ok(out == "" and status == 2 and "required: --dir" in err, "probe: --dir is required, so TOPIC.md is never looked for in a default place")
     top = " ".join(capture(main, ["--help"])[0].split())
     entry = top.split("probe NAME --dir CONDUCTOR_DIR", 1)[-1].split("metrics --dir CONDUCTOR_DIR", 1)[0]  # the text of the probe's entry, which the next command's entry follows
-    ok("probe NAME --dir CONDUCTOR_DIR" in top and "status 2" in entry,
-       "probe: the command is listed in the top-level help, its entry saying that a TOPIC.md it cannot read is refused")
+    ok("probe NAME --dir CONDUCTOR_DIR" in top and "status 2" in entry and "metrics" not in entry,
+       "probe: the command is listed in the top-level help, its entry, which ends where the metrics entry starts, saying that a TOPIC.md it cannot read is refused")
 
 
 def test_the_guard_refuses_every_way_to_start_agent_deck(d):
@@ -2497,7 +2622,7 @@ def test_a_key_has_at_most_5_words_and_100_characters(d):
     for words, length in ((6, 11), (6, 100), (5, 101), (1, 101), (1, 5000), (5000, 9999)):
         key, c = key_of(words, length), conductor_in(d)
         out, status, err = capture(main, set_args(c, f"{key}=1"))
-        want = f"steward-signals: metrics: --set number 1: a key has at most 5 words and 100 characters; this one has {words} words and {length} characters\n"
+        want = f"steward-signals: metrics: --set number 1: a key has at most 5 words and 100 characters; this one has {words} {'word' if words == 1 else 'words'} and {length} characters\n"
         ok(len(key) == length and (out, status, err) == ("", 2, want) and nothing_made(c),
            f"metrics: a key of {words} words and {length} characters is refused, in one line that quotes none of it, and nothing is written")
 
@@ -2868,6 +2993,9 @@ def build_parser():
 
 
 def main(argv):
+    if sys.version_info < MIN_PYTHON:
+        print(f"steward-signals: Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]} or later is needed, and this is {sys.version_info[0]}.{sys.version_info[1]}", file=sys.stderr)
+        return 2
     a = build_parser().parse_args(argv)
     if a.cmd == "self-test":
         return self_test(a.sections)
