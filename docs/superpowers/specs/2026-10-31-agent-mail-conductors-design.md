@@ -338,7 +338,7 @@ States: `unclaimed` (in BACKLOG), `active`, `blocked`, `waiting-john`, `done`, `
 | Decision conflict | a DECISION contradicts one in `DECISIONS.md` | mail both sides; if John's to make, open a question; never pick a side |
 | Drift | a claim does not serve the purpose in `TOPIC.md` (judged by the work, never by the claimant's host) | ask the owner once how it serves the purpose; list it in the digest; never tell anyone to stop |
 | Needs John | a claim or request involves a protected action and nobody has asked John | record `waiting-john`; the acting worker asks John in its own pane, or the steward opens a `Q` if the worker posted `protected: yes` |
-| Forged steward post or mail | the census shows a file named `from-<steward>` (in `+<channel>/`, or direct mail in transit) with no `sent` line and no `intent` within a few seconds of its stamp | post `DISPUTE <id>: not sent by me`, mail the addressee the same, open one question line for John (at most one such page a day); never dispute a DISPUTE |
+| Forged steward post or mail | the census shows a file named `from-<steward>` (in `+<channel>/`, or direct mail in transit) with no `sent` line and no open intent (one still without its `sent` line) for the same recipient within 10 seconds of its stamp | post `DISPUTE <id>: not sent by me`, mail the addressee the same, open one question line for John (at most one such page a day); never dispute a DISPUTE |
 
 **Time checks**, each tick, from the signals helper (one call; one row per member):
 
