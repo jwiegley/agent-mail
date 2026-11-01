@@ -15,7 +15,8 @@ Messages: one file each, TO_UTC_from-FROM_UNIQUE.txt, for example
 nix_20261030T050102.123456Z_from-pi_3f9a1c2e.txt, holding From, To, UTC, Subject,
 optional In-Reply-To and X-Agent-Mail: 2 header lines, a blank line, then the body.
 - Direct mail sits at the top level; its one reader claims it, prints it, and keeps a
-  copy in .NAME-read/ for 7 days.
+  copy in .NAME-read/ for 7 days. Direct mail that no reader claims is pruned 14 days
+  after its stamp by the other readers (retention.direct_days in config.json, 1 to 365).
 - A post sits in a channel, the directory +CHANNEL; a broadcast is all_... at the top
   level. Neither is ever claimed: each reader keeps a seen set on its own host and its own
   copy, and readers prune posts and broadcasts after 30 days.
@@ -93,6 +94,12 @@ LIMIT = 1 << 20
 MAX_BYTES = 12000
 EXCERPT = 8000
 KEEP_DAYS = 7
+# Direct mail that no reader claims is pruned this many days after its stamp, unless
+# retention.direct_days in config.json says otherwise. The 30 days of posts and the 7 of
+# archive copies are fixed by the standard. Decision 45 made this window a setting: it is
+# how long a session may be away before mail addressed to it alone is deleted, which the
+# fleet chooses in the config.json that nix writes, without a new release.
+DIRECT_DAYS = 14
 NAME_MAX = 255
 REMIND_AFTER = 120.0
 REMIND_EVERY = 300.0
@@ -250,9 +257,14 @@ CONFIG_PATH = "~/.config/agent-mail/config.json"  # or $AGENT_MAIL_CONFIG
 PAUSE_PATH = "~/.config/agent-mail/paused"
 POLL_RANGE = (1, 300)
 MAX_BYTES_RANGE = (1000, 24000)
+DIRECT_DAYS_RANGE = (1, 365)
 NOTIFY_MODES = ("auto", "on", "off")
 FILE_KEYS = frozenset({"dir", "poll_interval", "notify", "max_bytes"})
-TOP_KEYS = FILE_KEYS | {"hosts", "sessions"}
+# The keys of the "retention" object, which only the file's top level may hold: any reader
+# prunes every other name's direct mail, so a window set for one host or session would not
+# hold for the mail it names.
+RETENTION_KEYS = frozenset({"direct_days"})
+TOP_KEYS = FILE_KEYS | {"hosts", "sessions", "retention"}
 SESSION_KEYS = FILE_KEYS | {"channels", "allow_broadcast"}
 # Each setting: its config key, its flag, its environment variable and its default.
 SETTINGS = {
@@ -262,6 +274,7 @@ SETTINGS = {
     "channels": ("channels", "channels", "AGENT_MAIL_CHANNELS", ()),
     "max_bytes": ("max_bytes", "max_bytes", "AGENT_MAIL_MAX_BYTES", MAX_BYTES),
     "allow_broadcast": ("allow_broadcast", None, None, True),
+    "direct_days": ("direct_days", None, None, DIRECT_DAYS),
 }
 
 
@@ -273,6 +286,7 @@ class Settings:
     channels: dict
     max_bytes: int
     allow_broadcast: bool
+    direct_days: int
     paused: bool
     source: dict
 
@@ -302,6 +316,7 @@ def read_config(path):
             raise MailError("bad_config", f"{path}: {group} is not a JSON object")
         for key, value in entries.items():
             check(value, allowed, f"{group}.{key}")
+    check(data.get("retention", {}), RETENTION_KEYS, "retention")
     return data
 
 
@@ -314,6 +329,14 @@ def setting_value(key, value, label):
         if not isinstance(value, str) or not value:
             raise bad("it must be a directory path")
         return os.path.expanduser(value)
+    if key == "direct_days":
+        # Only config.json sets direct_days, never a flag or an environment variable, so it
+        # takes a JSON integer and nothing else: not "14", not 14.0. poll and max_bytes also
+        # take text, as their flags and variables carry them, and max_bytes a whole float.
+        lo, hi = DIRECT_DAYS_RANGE
+        if isinstance(value, bool) or not isinstance(value, int) or not lo <= value <= hi:
+            raise bad(f"it must be an integer from {lo} to {hi}, such as {DIRECT_DAYS}")
+        return value
     if key in ("poll", "max_bytes"):
         lo, hi = POLL_RANGE if key == "poll" else MAX_BYTES_RANGE
         what = f"it must be a number from {lo} to {hi}" if key == "poll" else f"it must be a whole number from {lo} to {hi}"
@@ -323,7 +346,9 @@ def setting_value(key, value, label):
                 number = int(value) if key == "max_bytes" else float(value)
             except ValueError:
                 raise bad(what) from None
-        if isinstance(number, bool) or not isinstance(number, (int, float)) or (key == "max_bytes" and not float(number).is_integer()):
+        # An int is whole already, and float() would overflow on a huge one.
+        if (isinstance(number, bool) or not isinstance(number, (int, float))
+                or (key == "max_bytes" and isinstance(number, float) and not number.is_integer())):
             raise bad(what)
         if not lo <= number <= hi:
             raise bad(what)
@@ -358,12 +383,14 @@ def setting_value(key, value, label):
 
 def load_settings(flags, env, name, host=HOST):
     """Settings by precedence: flag, environment, sessions.<name>, hosts.<host>, the
-    config file's top level, the default. flags holds only the flags given."""
+    config file's top level, the default. flags holds only the flags given. direct_days
+    comes from retention.direct_days at the file's top level, or the default."""
     path = env.get("AGENT_MAIL_CONFIG") or os.path.expanduser(CONFIG_PATH)
     data = read_config(path)
     layers = [("session", f"sessions.{name}.", data.get("sessions", {}).get(name, {}) if name else {}),
               ("host", f"hosts.{host}.", data.get("hosts", {}).get(host, {})),
-              ("file", "", {k: v for k, v in data.items() if k in FILE_KEYS})]
+              ("file", "", {k: v for k, v in data.items() if k in FILE_KEYS}),
+              ("file", "retention.", data.get("retention", {}))]
     values, source = {}, {}
     for key, (cfg, flag, var, default) in SETTINGS.items():
         if flag and flags.get(flag) is not None:
@@ -1420,6 +1447,18 @@ def open_owned_dir(path):
     return fd
 
 
+def expired(m, st, now, window):
+    """True when the message M, whose lstat is ST, is more than WINDOW seconds old: by its name
+    stamp, or, when stamped more than 24 hours ahead, by its ctime, which no sender can
+    backdate. Posts, broadcasts and direct mail all expire so."""
+    return now - m.stamp > window or (m.stamp - now > FUTURE and now - st.st_ctime > window)
+
+
+def prunable(st):
+    """True when lstat ST is a regular file of ours: the only direct mail ever pruned."""
+    return stat.S_ISREG(st.st_mode) and st.st_uid == os.getuid()
+
+
 def prune_archive(d, name, now):
     """Remove NAME's archive copies whose ctime is more than 7 days old; return how many.
     Archive copies never leave their host, and only their owner prunes them."""
@@ -1464,7 +1503,7 @@ def prune_posts(d, name, state, subs, now):
                     continue
                 with contextlib.suppress(OSError):
                     st = os.stat(entry, dir_fd=fd, follow_symlinks=False)
-                    if stat.S_ISREG(st.st_mode) and (now - m.stamp > RETENTION or (m.stamp - now > FUTURE and now - st.st_ctime > RETENTION)):
+                    if stat.S_ISREG(st.st_mode) and expired(m, st, now, RETENTION):
                         os.unlink(entry, dir_fd=fd)
                         removed += 1
         finally:
@@ -1472,12 +1511,47 @@ def prune_posts(d, name, state, subs, now):
     return removed
 
 
+def prune_direct(d, name, days, now):
+    """Delete direct mail that no reader has claimed DAYS days after its stamp, or, when
+    stamped more than 24 hours ahead, DAYS days after its ctime; return how many, logging
+    each. Only a standard-named regular file of ours at the top level, addressed to a name
+    other than all and NAME, is a candidate: NAME's own mail is left to the claim that follows
+    in this pass, and symlinks, other users' files, directories, claims, archive copies,
+    rejected and temporary files, broadcasts and channels are never touched. Every unlink
+    goes through a descriptor for the mailbox opened O_NOFOLLOW, so a mailbox swapped for a
+    symlink meanwhile loses nothing outside, and one that fails is skipped. Deletions reach
+    other hosts through Syncthing."""
+    fd = open_owned_dir(os.path.realpath(d))
+    if fd is None:
+        return 0
+    window, removed = days * 86400.0, 0
+    try:
+        for entry in os.listdir(fd):
+            m = parse_msg(entry)
+            if m is None or m.to in ("all", name):
+                continue
+            with contextlib.suppress(OSError):
+                st = os.stat(entry, dir_fd=fd, follow_symlinks=False)
+                if not prunable(st) or not expired(m, st, now, window):
+                    continue
+                os.unlink(entry, dir_fd=fd)
+                removed += 1
+                why = (f"direct mail still unclaimed {days} days after its stamp" if now - m.stamp > window else
+                       f"direct mail stamped more than 24 hours ahead, still unclaimed {days} days after it arrived")
+                log(f"reader {name}: pruned {entry}: {why}")
+    finally:
+        os.close(fd)
+    return removed
+
+
 def prune_due(d, name, settings, state, now):
-    """Prune NAME's posts and archive copies at most once an hour, on this host; True when it ran."""
+    """Prune NAME's posts and archive copies, and every other name's unclaimed direct mail,
+    at most once an hour, on this host; True when it ran."""
     if 0 <= now - (state.get("last_prune") or 0) < PRUNE_EVERY:
         return False
     prune_archive(d, name, now)
     prune_posts(d, name, state, effective_subs(state, settings, now), now)
+    prune_direct(d, name, settings.direct_days, now)
     state["last_prune"] = now
     return True
 
@@ -3361,9 +3435,12 @@ def section_core(t):
     mine = ["pi_20261030T000000.000001Z_from-nix_aaaaaaaa.txt"]
     legacy = ["pi--20261030T000002Z--from-catalog.md", "pi-20261030T000003Z-from-x.md", "pi.md", "PI_20261030T000004.000000Z_from-nyx-ai_bbbbbbbb.txt"]
     order = ["pi_20261030T000002.000000Z_from-catalog_00000002.txt", "pi_20261030T000003.000000Z_from-x_00000003.txt"]
-    others = ["clio-pi_20261030T000000.000000Z_from-nix_cccccccc.txt", "pi-2_20261030T000000.000000Z_from-x_dddddddd.txt",
-              "pi.v2_20261030T000000.000000Z_from-x_eeeeeeee.txt", "pi-foo--20261030T000000Z--from-x.md",
-              "pipeline.md", ".pi_hidden.txt", "nyx-ai_20261030T000000.000000Z_from-pi_ffffffff.txt", "secret.txt"]
+    # Other names' mail is stamped now, so the readers' prune of unclaimed direct mail,
+    # which leaves only a reader's own mail alone, never takes it whatever the date.
+    stamp = utc(micro=True)
+    others = [f"clio-pi_{stamp}_from-nix_cccccccc.txt", f"pi-2_{stamp}_from-x_dddddddd.txt",
+              f"pi.v2_{stamp}_from-x_eeeeeeee.txt", "pi-foo--20261030T000000Z--from-x.md",
+              "pipeline.md", ".pi_hidden.txt", f"nyx-ai_{stamp}_from-pi_ffffffff.txt", "secret.txt"]
     for n in mine + legacy + order:
         mk(n, f"body of {n}\n")
     for n in others:
@@ -3581,6 +3658,38 @@ def section_settings(t):
     blank = {"AGENT_MAIL_DIR": "", "AGENT_MAIL_POLL": "", "AGENT_MAIL_NOTIFY": "", "AGENT_MAIL_CHANNELS": "", "AGENT_MAIL_MAX_BYTES": ""}
     t.ok(t.raises(load_settings, {}, blank, "pi") is None and load_settings({}, blank, "pi").source == load_settings({}, {}, "pi").source,
          "an empty environment variable counts as unset")
+    config({"retention": {"direct_days": 30}})
+    t.ok(t.raises(load_settings, {}, {}, "pi") is None and load_settings({}, {}, "pi").direct_days == 30
+         and load_settings({}, {}, "pi").source["direct_days"] == "file", "retention.direct_days in config.json sets how long unclaimed direct mail is kept")
+    config({})
+    t.ok(load_settings({}, {}, "pi").direct_days == 14 and load_settings({}, {}, "pi").source["direct_days"] == "default",
+         "unclaimed direct mail is kept 14 days by default")
+    for good in (1, 365):
+        config({"retention": {"direct_days": good}})
+        t.ok(t.raises(load_settings, {}, {}, "pi") is None and load_settings({}, {}, "pi").direct_days == good, f"accepts retention.direct_days {good}")
+    # Each value as JSON text. Only config.json sets direct_days, so it takes a JSON integer and nothing else.
+    for bad in ("0", "366", "7.5", "14.0", "1e1", '"14"', '" 14 "', '"1_4"', '"\\u0661\\u0664"', '"x"', "true", "null", "[14]", "1" + "0" * 400):
+        config(f'{{"retention": {{"direct_days": {bad}}}}}')
+        e = t.raises(load_settings, {}, {}, "pi")
+        t.ok(getattr(e, "code", None) == "bad_setting" and e.message.startswith(f"retention.direct_days in {cfg} is ")
+             and e.message.endswith("; it must be an integer from 1 to 365, such as 14"), f"refuses retention.direct_days {echo(bad)}")
+    config({"max_bytes": 10 ** 400})
+    e = t.raises(load_settings, {}, {}, "pi")
+    t.ok(getattr(e, "code", None) == "bad_setting" and e.message.startswith(f"max_bytes in {cfg} is ")
+         and e.message.endswith("; it must be a whole number from 1000 to 24000"), "refuses a 401-digit max_bytes, which once overflowed float()")
+    for data, why in (({"retention": 14}, "retention is not a JSON object"),
+                      ({"retention": {"direct_day": 14}}, "unknown key 'direct_day' in retention"),
+                      ({"direct_days": 14}, "unknown key 'direct_days' in the top level"),
+                      ({"hosts": {HOST: {"retention": {"direct_days": 3}}}}, f"unknown key 'retention' in hosts.{HOST}"),
+                      ({"sessions": {"pi": {"retention": {"direct_days": 3}}}}, "unknown key 'retention' in sessions.pi")):
+        config(data)
+        e = t.raises(load_settings, {}, {}, "pi")
+        t.ok(getattr(e, "code", None) == "bad_config" and why in e.message, f"refuses {json.dumps(data)}: {why}")
+    config({"retention": {"direct_days": 0}})
+    _, code, err = t.run(["--dir", t.box("retention"), "read", "pi"])
+    t.ok(code == 1 and "retention.direct_days in " in err and "it must be an integer from 1 to 365" in err,
+         "a reader refuses to run with a bad retention.direct_days")
+    config({})
 
 
 def section_state(t):
@@ -4072,6 +4181,134 @@ def section_retention(t):
     finally:
         os.listdir = real_listdir
     t.ok(os.path.exists(outside_file), "a channel swapped for a symlink between listing and unlink loses nothing outside")
+
+    # Direct mail that no reader claims goes retention.direct_days (14 by default) after its
+    # stamp. Every reader prunes it at the top level, for every name but its own.
+    def logged():
+        try:
+            with open(os.path.join(os.path.expanduser(STATE_DIR), "log"), encoding="utf-8") as f:
+                return f.read()
+        except FileNotFoundError:
+            return ""
+
+    now = time.time()
+    t.at(now)
+    db = t.box("direct")
+    short = t.direct(db, "gone", "nix", "AN-HOUR-SHORT", stamp=now - 14 * 86400 + 3600)
+    past = t.direct(db, "gone", "nix", "AN-HOUR-PAST", stamp=now - 14 * 86400 - 3600)
+    receive(db, "c", s, sink)
+    t.ok(os.path.exists(short) and not os.path.exists(past),
+         "a reader prunes another name's direct mail an hour past 14 days after its stamp, and keeps it an hour short")
+    t.ok(f"reader c: pruned {os.path.basename(past)}: direct mail still unclaimed 14 days after its stamp" in logged()
+         and os.path.basename(short) not in logged(), "each removal is logged to the reader's log")
+    three = t.mk(os.path.join(t.root, "three-days.json"), json.dumps({"retention": {"direct_days": 3}}))
+    s3 = load_settings({}, {"AGENT_MAIL_CONFIG": three}, "c")
+    d3 = t.box("direct-3")
+    short3 = t.direct(d3, "gone", "nix", "THREE-DAYS-SHORT", stamp=now - 3 * 86400 + 3600)
+    past3 = t.direct(d3, "gone", "nix", "THREE-DAYS-PAST", stamp=now - 3 * 86400 - 3600)
+    receive(d3, "c", s3, sink)
+    t.ok(s3.direct_days == 3 and os.path.exists(short3) and not os.path.exists(past3),
+         "a retention.direct_days of 3 prunes direct mail an hour past 3 days and keeps it an hour short")
+
+    u = t.box("untouched")
+    create_channel(u, "fleet", "fleet-wide notices")
+    old = now - 20 * 86400  # past the 14 days of direct mail, within the 30 of posts and broadcasts
+    stamp = utc(old, micro=True)
+    control = t.direct(u, "gone", "nix", "CONTROL", stamp=old)
+    target = t.mk(os.path.join(t.root, "link-target.txt"), "kept\n")
+    link = os.path.join(u, f"gone_{stamp}_from-nix_0000000a.txt")
+    os.symlink(target, link)
+    foreign = t.direct(u, "gone", "nix", "FOREIGN", stamp=old)
+    hidden = [t.mk(os.path.join(u, f".gone-claimed-1-{HOSTTAG}-gone_{stamp}_from-nix_0000000b.txt"), "claimed\n"),
+              t.mk(os.path.join(u, f".gone-rejected-gone_{stamp}_from-nix_0000000c.txt"), "rejected\n"),
+              t.mk(os.path.join(u, f".gone_{stamp}_from-nix_0000000d.txt.tmp"), "half-written\n")]
+    folder = os.path.join(u, f"gone_{stamp}_from-nix_0000000e.txt")
+    os.mkdir(folder)
+    post = t.post(u, "fleet", "nix", "TWENTY-DAY-POST", stamp=old)
+    broadcast = t.direct(u, "all", "nix", "TWENTY-DAY-BROADCAST", stamp=old)
+    os.mkdir(archive_dir(u, "gone"), 0o700)
+    copy = t.mk(os.path.join(archive_dir(u, "gone"), f"gone_{stamp}_from-nix_0000000f.txt"), "an archive copy\n")
+    own = t.direct(u, "c", "nix", "OWN-TWENTY-DAY-MAIL", stamp=old)
+    real_stat = os.stat
+
+    def foreign_stat(path, *a, **k):
+        """os.stat, except that FOREIGN looks owned by another user."""
+        st = real_stat(path, *a, **k)
+        if path != os.path.basename(foreign):
+            return st
+        fields = list(st)
+        fields[stat.ST_UID] = st.st_uid + 1
+        return os.stat_result(fields)
+
+    os.stat = foreign_stat
+    try:
+        out = receive(u, "c", s, sink)
+    finally:
+        os.stat = real_stat
+    t.ok(not os.path.exists(control), "the pass prunes a regular file of ours past the window beside the others")
+    t.ok(os.path.islink(link) and os.path.exists(target), "a symlink with a mail name is untouched, and so is its target")
+    t.ok(os.path.exists(foreign), "direct mail owned by another user is untouched")
+    t.ok(all(map(os.path.exists, hidden)), "a claim, a rejected file and a temporary file are untouched")
+    t.ok(os.path.isdir(folder), "a directory with a mail name is untouched")
+    t.ok(os.path.exists(post) and os.path.exists(broadcast), "a post and a broadcast past 14 days are untouched by the rule")
+    t.ok(os.path.exists(copy), "an archive copy is untouched")
+    t.ok("OWN-TWENTY-DAY-MAIL" in out and not os.path.exists(own), "a reader leaves its own direct mail to its claim, which delivers it")
+
+    fut = t.direct(u, "gone", "nix", "STAMPED-A-MONTH-AHEAD", stamp=now + 30 * 86400)
+    arrived = os.stat(fut).st_ctime
+    prune_direct(u, "c", 14, arrived + 14 * 86400 - 3600)
+    kept = os.path.exists(fut)
+    prune_direct(u, "c", 14, arrived + 14 * 86400 + 3600)
+    t.ok(kept and not os.path.exists(fut), "direct mail stamped more than 24 hours ahead goes 14 days after it arrived, and not before")
+    stuck = t.direct(u, "gone", "nix", "CANNOT-BE-REMOVED", stamp=old)
+    os.chmod(u, 0o500)
+    try:
+        removed = prune_direct(u, "c", 14, now)
+    except OSError as e:
+        removed = e
+    finally:
+        os.chmod(u, 0o700)
+    t.ok(removed == 0 and os.path.exists(stuck) and os.path.basename(stuck) not in logged(),
+         "a removal that fails with an OSError is skipped quietly, with no log line")
+    ahead = t.box("ahead")
+    aged = t.direct(ahead, "gone", "nix", "AHEAD-WITH-AN-OLD-MTIME", stamp=now + 30 * 86400)
+    os.utime(aged, (now - 30 * 86400, now - 30 * 86400))
+    prune_direct(ahead, "c", 14, now)
+    t.ok(os.path.exists(aged), "a stamp over 24 hours ahead is judged by the file's ctime, which no sender can backdate, not by its mtime")
+    real = t.box("real-box")
+    linked = os.path.join(t.root, "linked-box")  # ~/Mailbox is such a symlink on the Positron hosts
+    os.symlink(real, linked)
+    create_channel(linked, "fleet", "fleet-wide notices")
+    st_linked = load_state(linked, "c")
+    subscribe(linked, "c", st_linked, s, "fleet", now=now)
+    save_state(linked, "c", st_linked)
+    through = [t.direct(linked, "gone", "nix", "DIRECT-THROUGH-A-LINK", stamp=old),
+               t.direct(linked, "all", "nix", "BROADCAST-THROUGH-A-LINK", stamp=now - 40 * 86400),
+               t.post(linked, "fleet", "nix", "POST-THROUGH-A-LINK", stamp=now - 40 * 86400)]
+    receive(linked, "c", s, sink)
+    t.ok(not any(map(os.path.exists, through)), "a reader prunes direct mail, broadcasts and posts through a mailbox that is a symlink")
+
+    swap = t.box("swap")
+    lapsed = t.direct(swap, "gone", "nix", "EXPIRED-DIRECT", stamp=old)
+    elsewhere = os.path.join(t.root, "elsewhere")
+    os.mkdir(elsewhere, 0o700)
+    survivor = t.mk(os.path.join(elsewhere, os.path.basename(lapsed)), "must survive\n")
+    moved = os.path.join(t.root, "swap-moved")
+
+    def swapping_box(target):
+        entries = real_listdir(target)
+        if os.path.basename(lapsed) in entries and not os.path.islink(swap):
+            os.rename(swap, moved)
+            os.symlink(elsewhere, swap)
+        return entries
+
+    os.listdir = swapping_box
+    try:
+        prune_direct(swap, "c", 14, now)
+    finally:
+        os.listdir = real_listdir
+    t.ok(os.path.exists(survivor) and not os.path.exists(os.path.join(moved, os.path.basename(lapsed))),
+         "a mailbox swapped for a symlink between listing and unlink loses nothing outside")
 
 
 class FakeBackend:
@@ -5275,6 +5512,15 @@ def section_sync(t):
         receive(r0, "a", s, sink)
     sync()
     t.ok(was_on_1 and not os.path.exists(os.path.join(fs.replica(1), "+fleet", old)), "a prune on one host propagates")
+    with fs.on(0) as r0:
+        unclaimed = os.path.basename(t.direct(r0, "gone", "nix", "NEVER-CLAIMED", stamp=clock() - 15 * 86400))
+    sync()
+    was_on_2 = os.path.exists(os.path.join(fs.replica(2), unclaimed))
+    with fs.on(1) as r1:
+        receive(r1, "c", s, sink)
+    sync()
+    t.ok(was_on_2 and not any(os.path.lexists(os.path.join(fs.replica(i), unclaimed)) for i in range(3)),
+         "a reader on one host prunes unclaimed direct mail, and the deletion reaches every host")
 
     fs.offline(1, True)
     with fs.on(1) as r1:

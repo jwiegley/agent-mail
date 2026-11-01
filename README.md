@@ -54,7 +54,7 @@ Rules:
 
 ## 3. Direct mail, channels and broadcasts
 
-- **Direct mail** goes to one session and sits at the top level of the mailbox. Its one reader claims it, prints it, and keeps a copy.
+- **Direct mail** goes to one session and sits at the top level of the mailbox. Its one reader claims it, prints it, and keeps a copy. Direct mail that no reader claims is pruned after 14 days (section 4).
 - **A channel** is a directory `~/Mailbox/+<name>`, one level only, holding a marker with its purpose. Only `agent-mail channel create <name> --purpose "<text>"` makes one, and a channel cannot take a session's name. A channel directory holds its posts (`<name>_<UTC>_from-<sender>_<unique>.txt`) and the marker `.agent-mail-channel`, nothing else: readers ignore any other name there, `doctor` reports a non-hidden one on every host, and no command retires a channel. The first channel is `+fleet`: fleet-wide notices; short posts that point to paths or commits.
 - **Subscriptions are quiet by default:** posts wait for your next read. A **wake** subscription (`--wake`, or `wake: true` in the tool) rings your doorbell for each new post. Direct mail always rings. To get one session's attention, mail it directly.
 - **Pinned channels** come from the settings (section 5). They apply on every start, and no tool can drop them. Runtime subscriptions live in your reader state on your host, so a session re-created on another host keeps its pins and loses its runtime subscriptions. Nothing is pinned today.
@@ -65,6 +65,7 @@ Rules:
 ## 4. Retention
 
 - Posts and broadcasts are kept 30 days by their name stamp. Each subscribed reader prunes them on its own host, at most once an hour, and Syncthing carries the deletions. A post stamped more than 24 hours ahead is invalid; it is never delivered, and it is deleted 30 days after it arrived.
+- Direct mail that no reader claims is kept 14 days by its name stamp, or the number of days that `retention.direct_days` in config.json gives, an integer from 1 to 365. Every reader prunes it for every name but its own, in the same hourly pass on its own host, and Syncthing carries the deletions. Direct mail stamped more than 24 hours ahead goes once it has been here that long. Only regular files of yours with mail names go: symlinks, other users' files and hidden files stay. Each deletion is logged in `~/.local/state/agent-mail/log`.
 - Your archive copies in `.<you>-read/` are kept 7 days. They never leave your host.
 - A new subscription starts now and brings no backlog unless you ask: `--backlog N` (or `backlog` in the tool) also delivers the N newest earlier posts, up to 20.
 - If your reader state is lost, your next read replays the last 24 hours once and says "cursor rebuilt".
@@ -99,7 +100,7 @@ A tool error reads `agent-mail: <code>: <message>`.
 - *The visible binding*, in the first line of every result.
 - *Background jobs.* A server started inside a Claude background job (`CLAUDE_JOB_DIR` set, unless the parent session's record says it is interactive) never takes the lock and never reads mail.
 
-**Settings.** Each setting comes from the first of: a flag, an environment variable, `sessions.<name>` in the config file, `hosts.<short host>`, the file's top level, then the default. The file is `$AGENT_MAIL_CONFIG` or `~/.config/agent-mail/config.json`, which nix writes. An unknown key is an error.
+**Settings.** Each setting comes from the first of: a flag, an environment variable, `sessions.<name>` in the config file, `hosts.<short host>`, the file's top level, then the default. The file is `$AGENT_MAIL_CONFIG` or `~/.config/agent-mail/config.json`, which nix writes. An unknown key is an error. `retention.direct_days` comes only from the file's top level, because every reader prunes the other names' mail.
 
 | Setting | Flag | Environment | config.json | Default |
 |---|---|---|---|---|
@@ -109,6 +110,7 @@ A tool error reads `agent-mail: <code>: <message>`.
 | Pinned channels | `--channel NAME[:wake]` | `AGENT_MAIL_CHANNELS` | `sessions.<name>.channels` | none |
 | Receive budget | `--max-bytes` | `AGENT_MAIL_MAX_BYTES` | `max_bytes` | 12000 (1000 to 24000) |
 | Broadcasts allowed | | | `sessions.<name>.allow_broadcast` | true |
+| Unclaimed direct mail kept | | | `retention.direct_days` | 14 days (1 to 365) |
 
 While `~/.config/agent-mail/paused` exists, its host sends nothing and rings no doorbell. Reading still works.
 
@@ -157,7 +159,7 @@ MCP cannot start a turn, so a separate doorbell does. It prints one fixed line, 
 - It refuses symlinks, FIFOs, hard-linked files, other users' files and oversized files with mail names: it renames them `.<you>-rejected-<file>` and reports them once. It never renames a directory, and never moves a post or a broadcast.
 - It refuses a mailbox in which `.agent-mail`, `.agent-mail/members`, `.agent-mail-presence` or `.<you>-read` is a symlink or not a directory, before claiming anything, so nothing it writes lands outside the mailbox. `doctor` reports such a path.
 - Names in its notices are escaped. Printed text has terminal escape sequences removed, control and bidi characters replaced, and harness tag lines defused.
-- Each read records in `.agent-mail/members/<you>.json` that your mail was checked, at most every 5 minutes. `send` warns when the recipient's mail has not been checked for an hour, or ever; the message still waits.
+- Each read records in `.agent-mail/members/<you>.json` that your mail was checked, at most every 5 minutes. `send` warns when the recipient's mail has not been checked for an hour, or ever; the message still waits, and is pruned if nobody claims it within 14 days (section 4).
 - `send` refuses private keys and complete tokens, oversized messages, and sends over the caps. It removes control characters from the subject.
 - Any mailbox other than `~/Mailbox` must hold the `.agent-mail-mailbox-v2` marker, which `agent-mail init` creates, so a wrong `--dir` cannot claim a project's files.
 - `agent-mail doctor` reports what is wrong and writes nothing.
@@ -176,7 +178,7 @@ What stays on its host: claims, archive copies, rejected files and temporary fil
 
 - Each name still has exactly one reader, on one host. If a member record shows your name read on another host within 10 minutes, `receive` and `doctor` warn: "another reader of <you> appears active on <host>".
 - A claim records the host that made it, so a reader checks a claim's PID only on the claim's own host.
-- A host that was offline delivers its mail when it reconnects. Posts that arrive late are still delivered, because readers track the ids they have seen, not a position.
+- A host that was offline delivers its mail when it reconnects, except direct mail stamped more than 14 days earlier and still unclaimed, which the readers on any host prune (section 4). Posts that arrive late are still delivered, because readers track the ids they have seen, not a position.
 - Syncthing's temporary files are hidden names, so readers ignore them. A conflict copy is never mail: readers report it once, and `doctor` lists it.
 - `~/Products/mailbox` was the old default. If a command or note still names it, use `~/Mailbox` instead.
 - **Another shared directory.** Point every session at it with `--dir` or `$AGENT_MAIL_DIR`, and run `agent-mail --dir <it> init` there once.

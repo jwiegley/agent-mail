@@ -202,6 +202,7 @@ Readers route only on a file's location and name, never on its headers. The From
 **Delivery semantics.**
 
 - **Direct mail.** Claimed by rename, rendered, written, then archived. A dead claim on this host is redelivered at once, and a claim from another host after 10 minutes. Delivery is at least once.
+  - *Note, 2026-11-01:* since agent-mail 2.1 (decision 45), direct mail that no reader claims expires `retention.direct_days` after its stamp, 14 days by default.
 - **Posts and broadcasts.** Delivered at least once to each subscriber, and deduplicated by id against that reader's seen set. A post counts as seen only after the result has been written. At commit, each delivered post is copied into the reader's own `.<name>-read/`. The printed path then points at a copy that no peer can change or delete.
 
 **Order within one receive.** Direct mail comes first, then posts by channel, then broadcasts. Within each group the oldest comes first by stamp. A batch is capped at `max_bytes`, 12,000 by default. Fairness caps limit each receive to 10 posts per sender per channel and 3 broadcasts per sender. The rest wait for the next receive and are never lost.
