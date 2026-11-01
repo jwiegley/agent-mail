@@ -4,7 +4,7 @@ Frozen plan: `docs/superpowers/plans/2026-10-31-agent-mail-stewards.md` (approve
 
 ## Refocus checkpoint
 
-- Last check: 2026-11-01 09:40 PST (the previous check, 08:42 PST, followed a session gap: no turn ran between 01:26 PDT and 08:37 PST). Goal unchanged. Tasks 1 to 7 complete and audited (Task 7's re-review clean at 09:3x PST: all 18 findings addressed, four Minor follow-ups carried into Task 8); main at f115692, restacked next; Tasks 8 to 12 pending. No scope creep (the re-review's minors go into Task 8, not a new round). Next deadline: 2026-11-01 10:40 PST. Next step: commit this file, restack onto f115692 with both self-tests rerun, dispatch Task 8 (sonnet) with the carries, then its review and fess audit in parallel.
+- Last check: 2026-11-01 10:37 PST. Goal unchanged. Tasks 1 to 8 complete and audited (Task 8 Approved with five minors and audited clean with three actionable minors; all eight carried into Task 9, which edits the same docs section); the branch is current on main fbe7949 (restacked 09:42 PST, both self-tests green); Tasks 9 to 12 pending. No scope creep (every carry is a review or audit finding folded into the next task). Next deadline: 2026-11-01 11:40 PST. Next step: commit this file, dispatch Task 9 (sonnet) with the carries, then its review and fess audit in parallel; restack again before Task 10 if main moves.
 
 ## Definition of Done (frozen)
 
@@ -25,7 +25,7 @@ Frozen plan: `docs/superpowers/plans/2026-10-31-agent-mail-stewards.md` (approve
 | 5 usage and metrics | complete | 0f6f5f3, 693fd25, 75abab2 | Needs fixes (UTC day, empty value), then round 1 all addressed; 4 minors carried to Task 6 | clean; the fix commit is covered by the re-review |
 | 6 signals command | complete | 9449e8f, 18ca927, 4ac58b7 | Approved (7 minors, 3 warnings), then round 1 all addressed; 7 minors carried to Task 7 | clean; its six test-gap pins landed in the round |
 | 7 CLAUDE.md and docs check | complete | 982281c, 4d0f4c6, 23c0165, fdeb564, ac4ccc1 | Needs fixes (2 Important, 10 Minor), then round 1 all 18 addressed; 4 minors and 1 unpinned-command observation carried to Task 8 | claims verified on f21c3e1..4d0f4c6; its Important (the SENT.log exemption) closed by 23c0165; its blind-spot pins landed in the round, which the re-review covers |
-| 8 SHARED.md, HEARTBEAT_RULES.md | | | | |
+| 8 SHARED.md, HEARTBEAT_RULES.md | complete | 26a00c7 (Task 7's carries), a89e677 | Approved (5 minors carried to Task 9) | no blocker; 4 Minor (3 carried to Task 9, 1 accepted), 5 nits noted for the final review |
 | 9 WORKER.md | | | | |
 | 10 scanner patch | | | | |
 | 11 bridge patch | | | | |
@@ -63,6 +63,6 @@ Frozen plan: `docs/superpowers/plans/2026-10-31-agent-mail-stewards.md` (approve
 
 ## How to resume
 
-1. Re-read the wiggum and refocus skills, the frozen plan, the spec's section 11, this file and the SDD ledger; refocus; check the watcher and the live tree's HEAD. The live agent-mail checkout was last verified at f115692, agent-mail 2.1.0 (2026-11-01 08:40 PST, 456 checks); rerun its self-test whenever its HEAD moves. Mailbox after a restart: hera now has agent-mail 2.0.0 and its MCP server (mail-dev's note of 23:27 PDT), so join with `/wiggum join the mailbox as mail-conductor` (the `channels` tool for the binding, `receive` with `me`, the doorbell watch) instead of the old /setup-mailbox procedure; until then the CLI watcher stays.
+1. Re-read the wiggum and refocus skills, the frozen plan, the spec's section 11, this file and the SDD ledger; refocus; check the watcher and the live tree's HEAD. The live agent-mail checkout was last verified at fbe7949, agent-mail 2.1.0 (2026-11-01 09:42 PST, 456 checks); rerun its self-test whenever its HEAD moves. Mailbox after a restart: hera now has agent-mail 2.0.0 and its MCP server (mail-dev's note of 23:27 PDT), so join with `/wiggum join the mailbox as mail-conductor` (the `channels` tool for the binding, `receive` with `me`, the doorbell watch) instead of the old /setup-mailbox procedure; until then the CLI watcher stays.
 2. Baseline: `python3 -I ./agent-mail self-test` and, once Task 1 exists, `python3 -I steward/steward-signals self-test`; `git log --oneline main..HEAD`.
 3. Resume the SDD loop at the first task without a `complete` line in the ledger (a task whose last line is a fix round resumes at the next round). Dispatch the fess audit for any completed task whose row above has no fess entry.
