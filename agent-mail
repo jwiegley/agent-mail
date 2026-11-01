@@ -53,7 +53,8 @@ Commands:
   unsubscribe NAME CHANNEL
       Drop one of NAME's subscriptions; a pinned channel stays.
   doctor [NAME]
-      Report what is wrong with the mailbox, writing nothing; exits 1 if anything is.
+      Report what is wrong with the mailbox, and the direct mail waiting for each name,
+      writing nothing; exits 1 if anything is wrong.
   mcp [--name NAME] [--dir DIR] [--max-bytes N]
       Serve one session's seven MCP tools over stdio.
   init
@@ -2826,7 +2827,9 @@ STIGNORE = (".*-claimed-*", ".*-read", ".*-rejected-*", ".*.tmp", "(?d).nfs*", "
 
 def doctor(d, name, settings):
     """A read-only report on the mailbox D, one line per fact, and the number of findings
-    (problems worth acting on). It writes nothing: no state, no member record, no log."""
+    (problems worth acting on). It writes nothing: no state, no member record, no log.
+    Its roster of the direct mail waiting for each name comes from names and lstat alone,
+    opening no file, and counts as the prune does."""
     now = clock()
     lines, findings = [], []
 
@@ -2872,6 +2875,32 @@ def doctor(d, name, settings):
         elif not e.startswith((".", "+")) and parse_msg(e) is None:
             what = " (a directory)" if stat.S_ISDIR(os.lstat(os.path.join(d, e)).st_mode) else ""
             finding(f"legacy or nonstandard name at the top level, never mail: {escape(e)}{what}")
+    # The roster of waiting direct mail, from names and lstat alone: no file is opened. It
+    # counts as the prune judges (prunable, expired), so the two agree, and sets apart the
+    # entries with mail names that the prune never removes. The oldest stamp is shown as
+    # its name gives it: a float can round past the year 9999 that utc() can show.
+    waiting, never = collections.defaultdict(list), collections.Counter()
+    for e in entries:
+        m = parse_msg(e)
+        if m is None or m.to == "all":
+            continue
+        try:
+            st = os.lstat(os.path.join(d, e))
+        except OSError:
+            continue
+        if prunable(st):
+            waiting[m.to].append((m, st))
+        else:
+            never[m.to] += 1
+    for to in sorted(waiting.keys() | never.keys()):
+        found = waiting.get(to, [])
+        text = f"direct mail for {to}: {len(found)} waiting"
+        if found:
+            past = sum(1 for m, st in found if expired(m, st, now, settings.direct_days * 86400))
+            text += f", oldest {min(m.utc for m, _ in found)}, {past} past the {settings.direct_days}-day window"
+        if never[to]:
+            text += f", and {never[to]} the prune never removes (not regular files of yours)"
+        lines.append(text)
     for e in entries:
         if not e.startswith("+"):
             continue
@@ -3156,8 +3185,10 @@ def build_parser():
     us.add_argument("channel", metavar="CHANNEL")
     command(sub, "doctor", "report problems with the mailbox, writing nothing",
             "Report the mailbox path, the file system, the watch backend, missing .stignore lines, conflict copies, legacy and "
-            "misfiled files, another host reading NAME, the pause state and the config file. Writes nothing; exits 1 when it finds "
-            "anything.").add_argument("name", nargs="?", metavar="NAME")
+            "misfiled files, the direct mail waiting for each name (how many, the oldest stamp, how many are past the "
+            "retention.direct_days window, and how many entries with its mail names the prune never removes, from names and lstat "
+            "alone), another host reading NAME, the pause state and the config file. Writes nothing; exits 1 when it finds anything "
+            "wrong.").add_argument("name", nargs="?", metavar="NAME")
     m = command(sub, "mcp", "serve one session's MCP tools over stdio",
                 "Serve the seven agent-mail tools (send, receive, pending, subscribe, unsubscribe, channels, reread) to one harness "
                 "over stdio. The name comes from --name, AGENT_MAIL_NAME, AGENTDECK_TITLE, AGENTDECK_IDENTITY_FILE, or agent-deck's "
@@ -5012,6 +5043,76 @@ def section_doctor(t):
     five = [".*-claimed-*", ".*-read", ".*-rejected-*", ".*.tmp", "(?d).nfs*"]
     t.ok(missing_on("darwin") == five + ["(?d).DS_Store"] and missing_on("linux") == five,
          "doctor requires nix's ignore lines in ~/Mailbox's .stignore, and (?d).DS_Store on macOS only")
+
+    roster = t.box("roster")
+    made = {to: [t.direct(roster, to, "nix", f"{to}, {age} days old", stamp=T0 - age * 86400) for age in ages]
+            for to, ages in (("gone", (20, 10, 1)), ("pi", (0,)), ("pi-2", (5,)), ("pi.v2", (25,)), ("zed", (-30,)), ("odd", (20, 20)), ("all", (20,)))}
+    stamp = {age: utc(T0 - age * 86400, micro=True) for age in (20, 0, 5, 25, -30)}
+    t.mk(os.path.join(roster, "late_99991231T235959.999999Z_from-nix_0000000b.txt"), "stamped as late as a stamp can be\n")
+    t.mk(os.path.join(roster, f".gone-claimed-1-{HOSTTAG}-gone_{utc(T0 - 30 * 86400, micro=True)}_from-nix_0000000a.txt"), "being read\n")
+    target = t.mk(os.path.join(t.root, "roster-target.txt"), "outside the mailbox\n")
+    os.symlink(target, os.path.join(roster, f"odd_{stamp[20]}_from-nix_0000000c.txt"))
+    os.symlink(target, os.path.join(roster, f"sym_{stamp[20]}_from-nix_0000000d.txt"))
+    os.mkdir(os.path.join(roster, f"odd_{stamp[20]}_from-nix_0000000e.txt"))
+    os.mkfifo(os.path.join(roster, f"odd_{stamp[20]}_from-nix_0000000f.txt"))
+    foreign = made["odd"][1]
+    real_lstat, real_stat = os.lstat, os.stat
+
+    def owned_by_another(st):
+        fields = list(st)
+        fields[stat.ST_UID] = st.st_uid + 1
+        return os.stat_result(fields)
+
+    def foreign_lstat(path, *a, **k):
+        """os.lstat, except that FOREIGN looks owned by another user, as doctor sees it."""
+        return owned_by_another(real_lstat(path, *a, **k)) if path == foreign else real_lstat(path, *a, **k)
+
+    def foreign_stat(path, *a, **k):
+        """os.stat, except that FOREIGN looks owned by another user, as the prune sees it."""
+        return owned_by_another(real_stat(path, *a, **k)) if path == os.path.basename(foreign) else real_stat(path, *a, **k)
+
+    for entry in os.listdir(roster):
+        if parse_msg(entry) is not None and stat.S_ISREG(os.lstat(os.path.join(roster, entry)).st_mode):
+            os.chmod(os.path.join(roster, entry), 0)  # the roster reads names and lstat, never bodies
+    want = [f"direct mail for gone: 3 waiting, oldest {stamp[20]}, 1 past the 14-day window",
+            "direct mail for late: 1 waiting, oldest 99991231T235959.999999Z, 0 past the 14-day window",
+            f"direct mail for odd: 1 waiting, oldest {stamp[20]}, 1 past the 14-day window, and 4 the prune never removes (not regular files of yours)",
+            f"direct mail for pi: 1 waiting, oldest {stamp[0]}, 0 past the 14-day window",
+            f"direct mail for pi-2: 1 waiting, oldest {stamp[5]}, 0 past the 14-day window",
+            f"direct mail for pi.v2: 1 waiting, oldest {stamp[25]}, 1 past the 14-day window",
+            "direct mail for sym: 0 waiting, and 1 the prune never removes (not regular files of yours)",
+            f"direct mail for zed: 1 waiting, oldest {stamp[-30]}, 0 past the 14-day window"]
+    os.lstat, os.stat = foreign_lstat, foreign_stat
+    try:
+        try:
+            report = doctor(roster, None, s)[0].splitlines()
+        except ValueError as e:
+            report = [f"doctor raised ValueError: {e}"]
+        got = [line for line in report if line.startswith("direct mail for ")]
+        t.ok(want[1] in got, "a stamp in year 9999 neither crashes doctor nor counts as past; the oldest is shown as its name gives it")
+        t.ok(want[7] in got, "a stamp more than 24 hours ahead is not past the window")
+        t.ok(want[2] in got and want[6] in got,
+             "the roster counts only what the prune can remove, and sets apart a symlink, a directory, a FIFO and another user's file")
+        t.ok(got == want, "doctor lists each name's waiting direct mail in name order, pi before pi-2 before pi.v2, and nothing for broadcasts or claims")
+        t.ok(want[3] in doctor(roster, "pi", s)[0].splitlines(), "doctor NAME lists NAME's own waiting mail too")
+        t.at(os.lstat(made["zed"][0]).st_ctime + 14 * 86400 + 3600)
+        t.ok(f"direct mail for zed: 1 waiting, oldest {stamp[-30]}, 1 past the 14-day window" in doctor(roster, None, s)[0].splitlines(),
+             "a stamp more than 24 hours ahead counts as past 14 days after the file arrived, as the prune judges it")
+        t.at(T0)
+        three = t.mk(os.path.join(t.root, "three-days.json"), json.dumps({"retention": {"direct_days": 3}}))
+        t.ok(f"direct mail for gone: 3 waiting, oldest {stamp[20]}, 2 past the 3-day window"
+             in doctor(roster, None, load_settings({}, {"AGENT_MAIL_CONFIG": three}, None))[0].splitlines(),
+             "the roster counts against the configured retention.direct_days")
+        tree_before = tree()
+        doctor(roster, "pi", s)
+        code = t.run(["--dir", roster, "doctor", "pi"])[1]
+        t.ok(code == 0 and tree() == tree_before, "waiting direct mail is not a finding, and the roster writes and prunes nothing")
+        pruned = prune_direct(roster, "x", 14, T0)
+    finally:
+        os.lstat, os.stat = real_lstat, real_stat
+    gone = (made["gone"][0], made["odd"][0], made["pi.v2"][0])
+    t.ok(pruned == 3 and not any(map(os.path.lexists, gone)) and len([e for e in os.listdir(roster) if parse_msg(e) is not None]) == 12,
+         "the prune removes exactly the three files the roster counts as past, and nothing else")
 
 
 def subcommands(parser, prefix=""):

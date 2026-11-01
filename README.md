@@ -65,7 +65,7 @@ Rules:
 ## 4. Retention
 
 - Posts and broadcasts are kept 30 days by their name stamp. Each subscribed reader prunes them on its own host, at most once an hour, and Syncthing carries the deletions. A post stamped more than 24 hours ahead is invalid; it is never delivered, and it is deleted 30 days after it arrived.
-- Direct mail that no reader claims is kept 14 days by its name stamp, or the number of days that `retention.direct_days` in config.json gives, an integer from 1 to 365. Every reader prunes it for every name but its own, in the same hourly pass on its own host, and Syncthing carries the deletions. Direct mail stamped more than 24 hours ahead goes once it has been here that long. Only regular files of yours with mail names go: symlinks, other users' files and hidden files stay. Each deletion is logged in `~/.local/state/agent-mail/log`.
+- Direct mail that no reader claims is kept 14 days by its name stamp, or the number of days that `retention.direct_days` in config.json gives, an integer from 1 to 365. Every reader prunes it for every name but its own, in the same hourly pass on its own host, and Syncthing carries the deletions. Direct mail stamped more than 24 hours ahead goes once it has been here that long. Only regular files of yours with mail names go: symlinks, other users' files and hidden files stay. Each deletion is logged in `~/.local/state/agent-mail/log`. `agent-mail doctor` lists the direct mail waiting for each name: how many, the oldest stamp, how many are past the window, and how many entries with mail names are not regular files of yours, which the prune never removes.
 - Your archive copies in `.<you>-read/` are kept 7 days. They never leave your host.
 - A new subscription starts now and brings no backlog unless you ask: `--backlog N` (or `backlog` in the tool) also delivers the N newest earlier posts, up to 20.
 - If your reader state is lost, your next read replays the last 24 hours once and says "cursor rebuilt".
@@ -198,7 +198,7 @@ What stays on its host: claims, archive copies, rejected files and temporary fil
 | `channel create CHANNEL --purpose TEXT` | Create `+CHANNEL`. |
 | `subscribe NAME CHANNEL [--wake] [--backlog N]` | Subscribe NAME to a channel. |
 | `unsubscribe NAME CHANNEL` | Drop one of NAME's subscriptions. |
-| `doctor [NAME]` | Report what is wrong with the mailbox, writing nothing. |
+| `doctor [NAME]` | Report what is wrong with the mailbox, and the direct mail waiting for each name, writing nothing. |
 | `mcp [--name NAME] [--dir DIR] [--max-bytes N]` | Serve one session's MCP tools over stdio. |
 | `init` | Make a directory other than `~/Mailbox` a mailbox. |
 | `self-test [SECTION ...]` | Run the built-in checks. |
