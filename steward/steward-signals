@@ -33,9 +33,11 @@ import builtins
 import collections
 import contextlib
 import datetime
+import errno
 import io
 import json
 import os
+import pathlib
 import re
 import shutil
 import sys
@@ -331,7 +333,7 @@ def scan_entries(where, path):
                 if not item.is_file(follow_symlinks=False):  # agent-mail's reader counts regular files only
                     continue
                 ctime = item.stat(follow_symlinks=False).st_ctime
-            except OSError:  # the member's reader claimed the file since the listing
+            except FileNotFoundError:  # the member's reader claimed the file since the listing; any other error is raised
                 continue
             found.append(Entry(where, item.name, *parsed, ctime))
     return sorted(found, key=lambda e: (e.stamp, e.name))
@@ -345,7 +347,8 @@ def list_entries(mailbox, channel):
     regular file, not a symlink or a directory. Only names and metadata are read: no file is opened and no symlink is followed (a
     ctime is the entry's own, from lstat; MAILBOX itself is taken as given, since it may be a link, but a +CHANNEL that is a symlink
     is no channel, as agent-mail has it), and a file gone by the time it is asked about, claimed by its reader, is left out. A
-    channel that is not a directory has no posts; a directory that cannot be listed otherwise raises OSError."""
+    channel that is not a directory has no posts. Any other failure raises OSError, so that a directory or an entry that cannot be
+    read is never taken for one with nothing in it."""
     entries = scan_entries("top", mailbox)
     where = os.path.join(mailbox, f"+{channel}")
     if not os.path.islink(where):
@@ -1082,6 +1085,17 @@ def test_names_are_exact(d):
     ok([(x.to, x.sender) for x in e] == [("pipeline", "glm-5.2"), ("pi", "nix"), ("ingest", "glm-5.3-flash")], "census: names with dots, digits and hyphens are read whole")
     c = census(e, members_named("pipeline", "glm-5.2", "glm-5.3-flash"), "conductor-ingest-steward", ([], set()), set(), set(), NOW)
     ok(c.unread["pipeline"][0] == 1 and "pi" not in c.unread, "census: pi's mail is not pipeline's")
+    # A name that only extends another, or is the start of it, is another name, whichever way a prefix would be taken.
+    e = entries_named(f"pipeline_{stamp(1)}_from-nix_00000001.txt",                      # to pipeline
+                      f"pipelines_{stamp(2)}_from-nix_00000002.txt",                     # to pipelines, which is not pipeline
+                      f"pipeline_{stamp(3)}_from-lfm3x_00000003.txt",                    # from lfm3x, which is not lfm3
+                      f"pipeline_{stamp(4)}_from-lfm_00000004.txt",                      # nor is lfm
+                      f"lfm3_{stamp(5)}_from-{STEWARD}-2_00000005.txt",                  # a sender that starts with the steward's name is not the steward
+                      f"lfm3_{stamp(6)}_from-conductor-ingest_00000006.txt")             # nor is one that the steward's name starts with
+    c = census(e, members_named("pipeline", "lfm3"), STEWARD, ([], set()), set(), set(), NOW)
+    ok(c.unread == {"pipeline": (3, 7199.0), "lfm3": (2, 7195.0)}, "census: mail to pipelines is not pipeline's, and a name that only extends a member's is no member")
+    ok(c.transit_without_note == 0, "census: a sender that extends a member's name (lfm3x), or is the start of it (lfm), is not that member")
+    ok(c.unmatched_own == [], "census: a sender that extends the steward's name, or is the start of it, is not the steward")
 
 
 def test_sent_log_two_phase(d):
@@ -1226,6 +1240,44 @@ def listing_as(change):
         os.scandir = scandir
 
 
+class Unreadable:
+    """A stand-in for a DirEntry whose file can be seen but whose metadata cannot be read: it answers is_file as ITEM, the real
+    entry, does, and its stat raises ERROR."""
+
+    def __init__(self, item, error):
+        self.name, self.item, self.error = item.name, item, error
+
+    def is_file(self, follow_symlinks=True):
+        return self.item.is_file(follow_symlinks=follow_symlinks)
+
+    def stat(self, follow_symlinks=True):
+        raise self.error
+
+
+@contextlib.contextmanager
+def files_refused():
+    """Within the block, each way the standard library opens a file by name (open, io.open, os.open, Path.open, Path.read_text and
+    Path.read_bytes) records its arguments in the list the block gets, and raises OSError."""
+    opened = []
+
+    def refuse(*args, **kwargs):
+        opened.append(args)
+        raise OSError("a file was opened")
+
+    ways = [(builtins, "open"), (io, "open"), (os, "open"), (pathlib.Path, "open"), (pathlib.Path, "read_text"), (pathlib.Path, "read_bytes")]
+    own = {(owner, name): vars(owner)[name] for owner, name in ways if name in vars(owner)}  # what each owner holds itself, not by inheritance
+    for owner, name in ways:
+        setattr(owner, name, refuse)
+    try:
+        yield opened
+    finally:
+        for owner, name in ways:
+            if (owner, name) in own:
+                setattr(owner, name, own[owner, name])
+            else:
+                delattr(owner, name)
+
+
 def test_listing_order_is_the_stamps_not_the_filesystems(d):
     names = [f"pipeline_{stamp(5)}_from-nix_00000002.txt", f"lfm3_{stamp(5)}_from-nix_00000001.txt", f"glm-5.2_{stamp(3)}_from-nix_00000003.txt",
              f"omlx_{stamp(9)}_from-nix_00000004.txt"]
@@ -1254,21 +1306,59 @@ def test_list_entries_in_a_changing_mailbox(d):
     ok(names == [kept], "census: a file that is claimed after the listing is left out, not an error")
 
 
+def test_the_guard_refuses_every_way_to_open_a_file(d):
+    path = write(d, "any.txt", "")
+    ways = {"open": lambda: open(path), "io.open": lambda: io.open(path), "os.open": lambda: os.open(path, os.O_RDONLY),
+            "Path.open": lambda: pathlib.Path(path).open(), "Path.read_text": lambda: pathlib.Path(path).read_text(),
+            "Path.read_bytes": lambda: pathlib.Path(path).read_bytes()}
+    with files_refused() as opened:
+        for name, way in ways.items():
+            try:
+                way()
+            except OSError:
+                continue
+            ok(False, f"census: the guard let {name} open a file")
+    ok(len(opened) == len(ways), "census: the guard refuses open, io.open, os.open, Path.open, Path.read_text and Path.read_bytes")
+    ok(read(path) == "" and pathlib.Path(path).read_text() == "", "census: the guard puts every way to open a file back")
+
+
 def test_listing_opens_no_file(d):
     box = mailbox(d, top=[f"pipeline_{stamp(i)}_from-lfm3_{i:08x}.txt" for i in range(20)], channel=("ingest", [f"ingest_{stamp(i)}_from-lfm3_{i:08x}.txt" for i in range(20)]))
-    opened = []
+    c = None
+    with files_refused() as opened:
+        with contextlib.suppress(OSError):  # an open that is refused raises; the check below reports it
+            c = census(list_entries(box, "ingest"), CENSUS_MEMBERS, STEWARD, ([], set()), set(), set(), NOW)
+    ok(c is not None and opened == [] and c.unread["pipeline"][0] == 20 and c.posts_since(0) == 20, "census: listing and counting open no file")
 
-    def refuse(*args, **kwargs):
-        opened.append(args)
-        raise OSError("a file was opened")
 
-    real_open, real_os_open = builtins.open, os.open
-    builtins.open, os.open = refuse, refuse
+def test_an_entry_that_cannot_be_read_is_an_error_not_a_gap(d):
+    names = [f"ingest_{stamp(i)}_from-nix_0000000{i}.txt" for i in (1, 2, 3)]
+    box = mailbox(d, top=[f"pipeline_{stamp(9)}_from-nix_00000009.txt"], channel=("ingest", names))
+    channel = os.path.join(box, "+ingest")
+    for where, what in ((box, "the top level"), (channel, "a channel")):
+        for error in (PermissionError(errno.EACCES, "Permission denied"), OSError(errno.EIO, "Input/output error"), OSError(errno.ESTALE, "Stale file handle")):
+            with listing_as(lambda path, found: [Unreadable(item, error) if path == where else item for item in found]):
+                ok(raises(OSError, list_entries, box, "ingest") is error, f"census: errno {error.errno} on an entry's metadata in {what} is raised, not taken for a file its reader claimed")
+    error = PermissionError(errno.EACCES, "Permission denied")
+    for where, what in ((box, "the mailbox"), (channel, "a channel directory")):
+        def cannot_list(path, found):
+            if path == where:
+                raise error
+            return found
+
+        with listing_as(cannot_list):
+            ok(raises(OSError, list_entries, box, "ingest") is error, f"census: {what} that cannot be listed raises its error, not an empty listing")
+    os.chmod(channel, 0o444)  # the three names can be listed but not looked up
     try:
-        c = census(list_entries(box, "ingest"), CENSUS_MEMBERS, STEWARD, ([], set()), set(), set(), NOW)
+        try:
+            os.lstat(os.path.join(channel, names[0]))
+            enforced = False  # the user is root, or the filesystem ignores the mode
+        except PermissionError:
+            enforced = True
+        ok(not enforced or isinstance(raises(PermissionError, list_entries, box, "ingest"), PermissionError),
+           "census: a channel directory whose posts cannot be looked up raises PermissionError instead of having no posts (where the filesystem enforces the mode)")
     finally:
-        builtins.open, os.open = real_open, real_os_open
-    ok(opened == [] and c.unread["pipeline"][0] == 20 and c.posts_since(0) == 20, "census: listing and counting open no file")
+        os.chmod(channel, 0o755)
 
 
 def test_unmatched_own_files(d):
@@ -1393,7 +1483,9 @@ def section_census(d):
     test_only_regular_files_are_listed(d)
     test_listing_order_is_the_stamps_not_the_filesystems(d)
     test_list_entries_in_a_changing_mailbox(d)
+    test_the_guard_refuses_every_way_to_open_a_file(d)
     test_listing_opens_no_file(d)
+    test_an_entry_that_cannot_be_read_is_an_error_not_a_gap(d)
     test_unmatched_own_files(d)
     test_own_files_match_intents_by_recipient_and_time(d)
     test_a_completed_intent_accounts_for_its_own_file_only(d)
