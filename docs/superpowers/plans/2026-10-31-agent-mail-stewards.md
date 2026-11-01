@@ -223,7 +223,7 @@ git commit -m "Take a names-only census of a topic: unread mail, unread nudges, 
 
 **Interfaces:**
 - Consumes: `deck_rows` (Task 2), `run`.
-- Produces: `probe(run, name: str, host: str | None) -> bool | None`: for a hera member, runs `agent-deck session output <name> --max-tokens 200` (text form, never `-q`), returns `True` when the last non-empty line ends with `?`, `False` otherwise; returns `None` (unknown) for a remote member or when the command fails. The `probe` subcommand prints `yes`, `no` or `unknown` and nothing else, so no peer text ever reaches the steward's context.
+- Produces: `probe(run, name: str, host: str | None) -> bool | None`: for a hera member, runs `agent-deck session output <name> --max-tokens 200` (text form, never `-q`), returns `True` when the last non-empty line ends with `?`, `False` otherwise, after dropping agent-deck's cut footer (`... output truncated to 200 tokens; full output at <path>`, the normal last line of any response over about 800 bytes); returns `None` (unknown) for a remote member, a name that is not an agent-mail name (an empty name would read the steward's own session), a cut response whose footer is not the known one, or when the command fails (a non-zero or negative status, an exception, the 20 s timeout). The `probe` subcommand prints `yes`, `no` or `unknown` and nothing else, so no peer text ever reaches the steward's context; a TOPIC.md it cannot read is refused with status 2 and a reason on stderr. The rule is literal: a question followed by options, or wrapped in emphasis or quotes, reads `no`, so the steward treats `no` and `unknown` as no evidence of a question, never as "not waiting on John".
 
 - [ ] **Step 1: Write the failing tests**, section `probe`:
 
