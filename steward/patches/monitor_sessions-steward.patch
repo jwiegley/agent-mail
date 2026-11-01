@@ -1,0 +1,175 @@
+--- monitor_sessions.py
++++ monitor_sessions.py
+@@ -98,6 +98,10 @@
+ SCHEDULED_ERR = CWD / "scheduled_continue.err"
+ DEAD_LETTER_DIR = CWD.parents[1] / "inboxes" / "dead-letter"
+ TERMINAL_DEAD_LETTER_REASONS = {"parent_removed", "unresolvable"}
++# agent-mail topic stewards are conductors beside this one, each in a
++# <name>-steward directory; their channels' posts sync into this mailbox.
++CONDUCTOR_ROOT = CWD.parent
++MAILBOX_DIR = Path.home() / "Mailbox"
+ 
+ 
+ def run(args: list[str], timeout: int = 20) -> subprocess.CompletedProcess[str]:
+@@ -742,6 +746,19 @@
+     result["questions"].append(item)
+ 
+ 
++def is_tool_call_bullet(line: str) -> bool:
++    """Whether a cleaned pane line is Claude's bullet for a tool call.
++
++    A built-in tool call reads ``⏺ Name(...``; an MCP tool call reads
++    ``⏺ <server> - <tool> (MCP)(...``, such as ``⏺ agent-mail - receive
++    (MCP)(...``, or ends at ``(MCP)`` when the call has no arguments.  Claude
++    Code shows a tool's title, which may be words, in place of its name when
++    the server gives one.  What the call returns is tool payload, not a
++    question.
++    """
++    return bool(re.match(r"^[⏺●]\s+(?:\S+\(|.+? - .+? \(MCP\)(?:\(|$))", line))
++
++
+ def visible_prompt_or_question(text: str) -> str | None:
+     lines = [clean(line) for line in text.splitlines() if clean(line)]
+     # Native question forms remain actionable even when '?' is mid-wrap or
+@@ -801,7 +818,7 @@
+         if lines[index].startswith(("⏺", "●")):
+             if "User answered Claude's questions" in lines[index]:
+                 return None
+-            if re.match(r"^[⏺●]\s+\S+\(", lines[index]):
++            if is_tool_call_bullet(lines[index]):
+                 return None
+             lines = lines[index:]
+             break
+@@ -1122,6 +1139,102 @@
+     state["attention_indicator"] = {**result["indicator"], "checked_at": result["timestamp"]}
+ 
+ 
++STEWARD_STAMP = re.compile(r"[0-9]{8}T[0-9]{6}(?:\.[0-9]{6})?Z")
++# agent-mail's name grammar; a name is also at most 64 characters and does not end in "-".
++MAIL_NAME = r"[a-z0-9](?:[a-z0-9.]|-(?!-))*"
++
++
++def steward_status_alerts(now: float, conductor_root: str, mailbox: str | None = None) -> list[dict]:
++    """Attention items for agent-mail topic stewards whose STATUS went stale.
++
++    Each ``<conductor_root>/*-steward/STATUS`` holds one line that its steward
++    rewrites every turn: ``<UTC> tick=<min> open=<n> active=<n>
++    waiting-john=<n> last-post=<UTC> doorbell=<ok|missing>``.  The file is
++    stale once its mtime is more than two ticks old, and a stale file needs
++    attention while ``open`` is above zero or while the steward's channel
++    holds a post stamped after ``last-post``.  The detail carries only the
++    line's own stamp, tick and open count, so it stays the same all through a
++    stale episode and deliver_attention pages it once; the steward's next
++    write starts a new text.  Only a regular file named exactly STATUS counts,
++    so a closed topic, which renames it STATUS-final-<date>, pages nothing; a
++    directory with no STATUS line in this form is skipped as well.
++    """
++    mailbox_dir = MAILBOX_DIR if mailbox is None else Path(mailbox)
++    alerts = []
++    for directory in sorted(Path(conductor_root).glob("*-steward")):
++        status = directory / "STATUS"
++        try:
++            if not status.is_file():  # never open a FIFO, which would hold up the pass
++                continue
++            with status.open(encoding="utf-8", errors="replace") as handle:
++                words = handle.readline(4096).split()
++            # Stat after reading: a STATUS written in between then looks
++            # fresh, never stale under the new line's stamp.
++            mtime = status.stat().st_mtime
++        except OSError:
++            continue
++        fields = dict(word.split("=", 1) for word in words[1:] if "=" in word)
++        tick, count = fields.get("tick", ""), fields.get("open", "")
++        if not (words and STEWARD_STAMP.fullmatch(words[0])
++                and re.fullmatch(r"[0-9]{1,6}", tick) and re.fullmatch(r"[0-9]{1,6}", count)
++                and int(tick) > 0):
++            continue
++        if now - mtime <= 2 * int(tick) * 60:
++            continue
++        if int(count) == 0 and not steward_channel_has_post_after(
++                directory, fields.get("last-post", ""), mailbox_dir):
++            continue
++        alerts.append({
++            "where": "steward",
++            "kind": "steward",
++            "detail": f"conductor-{directory.name} STATUS unchanged since {words[0]} "
++                      f"(tick {int(tick)}m, {int(count)} open)",
++        })
++    return alerts
++
++
++def steward_channel_has_post_after(directory: Path, last_post: str, mailbox: Path) -> bool:
++    """Whether the channel a steward's TOPIC.md names holds a post stamped after LAST_POST.
++
++    The channel is named by TOPIC.md's first line that is not blank,
++    ``# +<channel>``.  Its posts are the files that agent-mail names
++    ``<channel>_<UTC>_from-<sender>_<hex8>.txt``, the channel without its
++    plus sign, in ``<mailbox>/+<channel>/``.  They are known by name alone,
++    as agent-mail's reader would count them: no message file is opened.
++    Stamps compare to the second, the form STATUS writes, so the post that
++    ``last-post`` names never counts as newer than itself.
++    """
++    if not STEWARD_STAMP.fullmatch(last_post):
++        return False
++    topic = directory / "TOPIC.md"
++    try:
++        if not topic.is_file():  # never open a FIFO, which would hold up the pass
++            return False
++        with topic.open(encoding="utf-8", errors="replace") as handle:
++            heading = next((line.strip() for line in handle if line.strip()), "")
++        named = re.fullmatch(rf"# \+({MAIL_NAME})", heading)
++        if not named:
++            return False
++        channel = named.group(1)
++        names = [path.name for path in (mailbox / f"+{channel}").iterdir()]
++    except OSError:
++        return False
++    post = re.compile(rf"{re.escape(channel)}_(?P<stamp>[0-9]{{8}}T[0-9]{{6}})\.[0-9]{{6}}Z"
++                      rf"_from-(?P<sender>{MAIL_NAME})_[0-9a-f]{{8}}\.txt")
++    for name in names:
++        found = post.fullmatch(name)
++        # agent-mail's reader skips a sender outside its grammar and a stamp that is no time.
++        if (not found or found["stamp"] <= last_post[:15]
++                or len(found["sender"]) > 64 or found["sender"].endswith("-")):
++            continue
++        try:
++            datetime.strptime(found["stamp"], "%Y%m%dT%H%M%S")
++        except ValueError:
++            continue
++        return True
++    return False
++
++
+ def deliver_attention(state: dict, result: dict) -> None:
+     """Send actionable alerts; retain deduplication only after confirmed delivery."""
+     try:
+@@ -1141,6 +1254,8 @@
+         {"where": item["where"], "kind": "stall", "detail": "No meaningful pane progress for the policy threshold."}
+         for item in result["stalled_sessions"]
+     )
++    # A stale steward STATUS comes ready-made from steward_status_alerts.
++    items.extend(result.get("steward_alerts", []))
+     recovered = {
+         item["where"] for item in result["actions"]
+         if item["action"] == "Continue" and item.get("reason") == "errored-session recovery"
+@@ -1200,6 +1315,7 @@
+         "actions": [],
+         "questions": [],
+         "stalled_sessions": [],
++        "steward_alerts": [],
+         "errors": [],
+         "session_ids": {},
+     }
+@@ -1603,6 +1719,12 @@
+             finally:
+                 run(["tmux", "kill-session", "-t", scan], timeout=10)
+ 
++    # Topic stewards guard their liveness with STATUS files, not pane text.
++    try:
++        result["steward_alerts"] = steward_status_alerts(time.time(), str(CONDUCTOR_ROOT))
++    except Exception as exc:
++        result["errors"].append({"where": "steward_status", "error": str(exc)})
++
+     try:
+         inbox_final = listify(load_json_cmd(["agent-deck", "inbox", "drain", "--json", "e78b9a6d-1784130784"], timeout=20))
+         result["inbox_final_items"] = inbox_final
