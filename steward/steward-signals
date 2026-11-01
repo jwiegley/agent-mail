@@ -4121,24 +4121,43 @@ SHARED_PARTS = ("auto-respond", "/send", "session control", "NEED", "state.json"
 FENCE_RE = re.compile(r"\s*(`{3,}|~{3,})")  # a line that opens a fenced code block: three backticks or tildes or more, after any indentation
 
 
-def strip_code_and_template(text):
-    """TEXT less its fenced code blocks and less each copy of QUESTION_TEMPLATE: the prose of an instruction file, where no question mark may stand, since
-    the question line is the one line holding one that the steward prints. A block opens with a line of three backticks or tildes or more, after any
-    indentation and before any info string (a backtick fence with a backtick after it on the line opens an inline span instead), and runs to the first line
-    of the same character, at least as many of it and nothing else; both lines go with it. A fence that is never closed strips nothing, so that what follows
-    it is still read as prose."""
-    lines, kept, i = text.splitlines(keepends=True), [], 0
+def fenced_parts(text):
+    """TEXT cut into its parts, in order and none empty, as (fenced, part) pairs: each fenced code block whole, its fence lines included, as (True, block),
+    and the prose between as (False, prose). A block opens with a line of three backticks or tildes or more, after any indentation and before any info
+    string (a backtick fence with a backtick after it on the line opens an inline span instead), and runs to the first line of the same character, at least
+    as many of it and nothing else. A fence that is never closed opens no block, so that what follows it stays prose."""
+    lines, parts, prose, i = text.splitlines(keepends=True), [], [], 0
     while i < len(lines):
         opening = FENCE_RE.match(lines[i])
         if opening and not (opening[1][0] == "`" and "`" in lines[i][opening.end():]):
             closing = re.compile(rf"\s*{re.escape(opening[1][0])}{{{len(opening[1])},}}\s*")
             end = next((j for j in range(i + 1, len(lines)) if closing.fullmatch(lines[j])), None)
             if end is not None:
-                i = end + 1
+                parts += [(False, "".join(prose)), (True, "".join(lines[i:end + 1]))]
+                prose, i = [], end + 1
                 continue
-        kept.append(lines[i])
+        prose.append(lines[i])
         i += 1
-    return "".join(kept).replace(QUESTION_TEMPLATE, "")
+    return [part for part in parts + [(False, "".join(prose))] if part[1]]
+
+
+def strip_code_and_template(text):
+    """TEXT less its fenced code blocks (see fenced_parts) and less each copy of QUESTION_TEMPLATE: the prose of an instruction file, where no question mark
+    may stand, since the question line is the one line holding one that the steward prints."""
+    return "".join(part for fenced, part in fenced_parts(text) if not fenced).replace(QUESTION_TEMPLATE, "")
+
+
+def sentences(text):
+    """The sentences of TEXT's prose (see strip_code_and_template), each stripped: cut after a full stop or a semicolon and the spaces that follow it, and at
+    each line end, so that a table row or a list item ends a sentence too."""
+    return [s.strip() for s in re.split(r"(?<=[.;]) +|\n+", strip_code_and_template(text)) if s.strip()]
+
+
+def claude_section(text, number):
+    """Section NUMBER of the CLAUDE.md in TEXT: from its heading, the line that starts "## NUMBER. ", to the next numbered heading of that level or the
+    end, so that a heading inside a template block does not end it; "" when there is no such heading."""
+    found = re.search(rf"^## {number}\. .*?(?=^## [0-9]+\. |\Z)", text, re.M | re.S)
+    return found[0] if found else ""
 
 
 def docs_checks(repo_dir):
@@ -4207,6 +4226,11 @@ def test_claude_md_names_the_forbidden_commands_only_in_never_sentences(d):
         said = re.search(rf"never[^.\n]*{re.escape(command)}", t, re.I)
         stray = re.search(rf"^(?!.*never).*{re.escape(command)}", t, re.M | re.I)
         ok(said and not stray, f"docs: CLAUDE.md names {command} in a sentence that says never, and on no line that does not say it")
+        # A never that belongs to another clause of the line ("When a member never answers, run ...") forbids nothing, so each naming of the command must end a
+        # list of commands that a never run or never use opens.
+        governed = re.findall(rf"\bnever (?:run|use) (?:`[^`\n]*`(?:, or |, and |, | or | and ))*`{re.escape(command)}(?: [^`\n]*)?`", t, re.I)
+        ok(len(governed) == len(re.findall(re.escape(command), t, re.I)),
+           f"docs: each time CLAUDE.md names {command}, a never run or never use governs it, not a never in another clause of the sentence")
 
 
 def test_claude_md_cites_every_policy_key(d):
@@ -4221,9 +4245,100 @@ def test_claude_md_precedence_names_the_shared_parts(d):
         ok(part in precedence, f"docs: CLAUDE.md's precedence section names {part} among the parts of the shared conductor text that do not apply")
 
 
-# The check functions that read the instruction files in a checkout, which section docs runs on this one and docs_checks runs on any.
+def test_claude_md_keeps_every_file_under_the_forged_check(d):
+    t = claude_md()
+    exempting = [s for s in sentences(t) if "SENT.log" in s and re.search(r"\bfirst (?:line|send|entry)\b|\b(?:begin|began|begins|start|starts|started)\b", s, re.I)
+                 and re.search(r"disput|exempt", s, re.I)]
+    ok("first line of `SENT.log`" not in t and "`SENT.log`'s first line" not in t and exempting == [],
+       f"docs: CLAUDE.md exempts no file in the steward's name from the forged check for a stamp before SENT.log began, which its writer chooses (got {without_question_marks(repr(exempting))})")
+
+
+def test_claude_md_counts_a_reset_only_for_a_fresh_context(d):
+    t = claude_md()
+    defined = [s for s in sentences(t) if "fresh context when" in s]
+    ok(len(defined) == 1 and "earlier turn" in defined[0] and "two ticks old" in defined[0] and not re.search(r"doorbell|missing", defined[0]),
+       "docs: a fresh context is spec 6.4's, no earlier turn remembered or last_turn two ticks old, never a doorbell or tick gone because its exit opened the turn")
+    restarts = [line for line in t.splitlines() if line.startswith("|") and "`restarts.doorbell`" in line]
+    ok(len(restarts) == 1 and "without having fired" in restarts[0] and "never a context reset" in restarts[0],
+       "docs: restarts.doorbell and restarts.tick count a task missing without having fired, never the re-arm of the one that opened the turn, and never a context reset")
+
+
+def test_claude_md_keeps_its_state_unambiguous(d):
+    t = claude_md()
+    reconcile = [s for s in sentences(claude_section(t, 13)) if "RECEIVED.log" in s]
+    ok(reconcile != [] and all("`last_turn`" in s and "own UTC date" in s for s in reconcile),
+       "docs: a fresh context reconciles only the ids appended to RECEIVED.log since last_turn, each against the log of its own UTC date")
+    closing = [s for s in sentences(claude_section(t, 4)) if "one Bash call" in s]
+    ok(len(closing) == 1 and "`last_turn`" in closing[0] and "after the ledger edits" in closing[0],
+       "docs: last_turn is set in the closing Bash call, after the ledger edits, so that John's edits between turns are told from the steward's own")
+    trigger = [s for s in sentences(claude_section(t, 4)) if "`summary_local_time`" in s]
+    state = [s for s in sentences(t) if s.startswith("`steward-state.json` holds")]
+    ok(len(trigger) == 1 and "`last_summary_date`" in trigger[0] and len(state) == 1 and "`last_summary_date`" in state[0],
+       "docs: the summary's trigger compares the local date of the last summary, which steward-state.json keeps beside its id, whose stamp is UTC")
+    decisions = [line for line in t.splitlines() if line.startswith("D-<n> ")]
+    ok(len(decisions) == 1 and decisions[0].count("|") == 3, "docs: the DECISIONS.md line has three bars, between its four fields, and its by: alternatives are in prose")
+
+
+def test_claude_md_names_its_system_tools_by_path(d):
+    t = claude_md()
+    ok(re.search(r"(?<!/usr/bin/)\bpgrep\b", t) is None and "/usr/bin/pgrep -f" in t,
+       "docs: CLAUDE.md calls pgrep as /usr/bin/pgrep, whose macOS form leaves out its own ancestors, never as a pgrep found on PATH")
+    ok(re.search(r"(?<!/usr/bin/)\bstat -f", t) is None and "/usr/bin/stat -f" in t, "docs: and stat as /usr/bin/stat, since nix's GNU stat comes first on PATH and reads -f otherwise")
+
+
+def test_claude_md_keeps_the_never_rules_of_spec_7_1(d):
+    t = claude_md()
+    digest = [s for s in sentences(t) if "never print a digest in your final message" in s.lower()]
+    ok(len(digest) == 1 and "`digest`" in digest[0] and "`close`" in digest[0],
+       "docs: CLAUDE.md never prints a digest in its final message, except when John typed digest and at close (spec 7.1)")
+    ok("never mail conductor-director a question or a record of one" in t, "docs: CLAUDE.md mails conductor-director no question record (spec 7.1)")
+    ok("without an agent-deck completion line" in t, "docs: CLAUDE.md ends a topic without an agent-deck completion line (spec 7.1)")
+
+
+def test_claude_md_prints_no_question_mark_in_its_templates(d):
+    blocks = [part for fenced, part in fenced_parts(claude_md()) if fenced]
+    printed = [[block for block in blocks if marker in block] for marker in ("DIGEST +<channel>", "SUMMARY +", STATUS_LINE)]
+    ok([len(found) for found in printed] == [1, 1, 1] and not any("?" in block for found in printed for block in found),
+       "docs: the blocks that hold the DIGEST template, the SUMMARY example and the STATUS line, which the steward prints or posts, hold no question mark")
+
+
+def test_claude_md_routes_requests_and_marks_joins(d):
+    t = claude_md()
+    rows = claude_section(t, 5).splitlines()
+    joins = [row for row in rows if row.startswith("| `JOIN")]
+    ok(len(joins) == 1 and "John did not name it" in joins[0], "docs: the digest's first mention of a member that only its JOIN added says John did not name it")
+    requests = [row for row in rows if row.startswith("| `REQUEST")]
+    routes = [s for s in sentences(claude_section(t, 9)) if "ROUTE <slug>" in s]
+    ok(len(requests) == 1 and routes != [] and all("REQUEST" in s for s in routes), "docs: an unaddressed REQUEST is filed and routed as a QUESTION is (spec 6.3)")
+
+
+def test_claude_md_reminds_of_notes_once(d):
+    t = claude_md()
+    reminder = [s for s in sentences(claude_section(t, 12)) if "`note_reminder_post`" in s]
+    state = [s for s in sentences(t) if s.startswith("`steward-state.json` holds")]
+    ok(len(reminder) == 1 and "once" in reminder[0] and len(state) == 1 and "`note_reminder_post`" in state[0] and "reminder of the day" not in t,
+       "docs: the first summary that counts member mail without a NOTE reminds the topic once, its id kept, and later summaries give the count alone (spec 6.12)")
+
+
+def test_claude_md_follows_the_worked_example_and_its_keys(d):
+    t = claude_md()
+    ok("`DECISION <q-id>: <letter>, <option text> (relayed; asked by <worker>)`" in claude_section(t, 10),
+       "docs: the relayed DECISION post's subject is spec 6.3's worked example: 6.6's template and (relayed; asked by <worker>)")
+    ok(len([s for s in sentences(t) if "`question_min`" in s and "wait cycle" in s and "no key" in s]) == 1,
+       "docs: CLAUDE.md says once that question_min also bounds a wait cycle, since POLICY.md has no key for one")
+    ok(f"at most {MAX_KEY_WORDS} words and {MAX_KEY_CHARS} characters" in t and "starting with a lower-case letter" in t,
+       f"docs: a metrics key is described as the helper refuses it: words starting with a lower-case letter, at most {MAX_KEY_WORDS} of them and {MAX_KEY_CHARS} characters")
+
+
+# The check functions that read the instruction files in a checkout, which section docs runs on this one and docs_checks runs on any. Under docs_checks a
+# function runs with ok and REPO rebound, and one that a later task adds here keeps to what that means: ok lists a failure instead of raising it, so the
+# function goes on after a check that fails, and raises, which reports through ok, returns None after a call that raised nothing; REPO is the checkout
+# given, so conductor_dir copies that checkout's POLICY.md; and each function receives None for its directory, so it must never write.
 DOCS_CHECKS = (test_claude_md, test_claude_md_headings_are_in_order, test_claude_md_quotes_the_exact_copy, test_claude_md_names_the_forbidden_commands_only_in_never_sentences,
-               test_claude_md_cites_every_policy_key, test_claude_md_precedence_names_the_shared_parts)
+               test_claude_md_cites_every_policy_key, test_claude_md_precedence_names_the_shared_parts, test_claude_md_keeps_every_file_under_the_forged_check,
+               test_claude_md_counts_a_reset_only_for_a_fresh_context, test_claude_md_keeps_its_state_unambiguous, test_claude_md_names_its_system_tools_by_path,
+               test_claude_md_keeps_the_never_rules_of_spec_7_1, test_claude_md_prints_no_question_mark_in_its_templates, test_claude_md_routes_requests_and_marks_joins,
+               test_claude_md_reminds_of_notes_once, test_claude_md_follows_the_worked_example_and_its_keys)
 
 
 def test_strip_code_and_template(d):
@@ -4240,6 +4355,75 @@ def test_strip_code_and_template(d):
     ok(strip_code_and_template("```x``` and y?\nmore prose\n```\ncode?\n```\n") == "```x``` and y?\nmore prose\n",
        "docs: three backticks with another after them on the line open an inline span, not a block that a later fence would close")
     ok(strip_code_and_template("Q <prefix>-<n> still open 4h: <text>: A <x>, B <y>?\n").count("?") == 1, "docs: only the template itself is taken out, never a line that looks like it")
+
+
+def test_the_docs_readers(d):
+    text = "Intro.\n```sh\nrun it?\n```\nMiddle.\n  ~~~\n  more\n  ~~~\n"
+    ok(fenced_parts(text) == [(False, "Intro.\n"), (True, "```sh\nrun it?\n```\n"), (False, "Middle.\n"), (True, "  ~~~\n  more\n  ~~~\n")]
+       and fenced_parts("```\nnever closed\n") == [(False, "```\nnever closed\n")] and fenced_parts("") == [],
+       "docs: fenced_parts gives the prose and each block whole, fences included, in order and none empty; a fence never closed opens no block")
+    prose = "One. Two; three\n| four | five. |\n```\nsix. seven\n```\n- eight.  Nine.\n"
+    ok(sentences(prose) == ["One.", "Two;", "three", "| four | five.", "|", "- eight.", "Nine."],
+       "docs: sentences cuts the prose after a full stop or a semicolon and at each line end, leaving the code blocks out")
+    doc = "# Title\n## 1. One\nfirst\n```markdown\n## Items\nin a block\n```\nstill one\n## 10. Ten\nten\n## 11. Eleven\neleven\n"
+    ok(claude_section(doc, 1) == "## 1. One\nfirst\n```markdown\n## Items\nin a block\n```\nstill one\n" and claude_section(doc, 10) == "## 10. Ten\nten\n"
+       and claude_section(doc, 11) == "## 11. Eleven\neleven\n" and claude_section(doc, 2) == "" and claude_section("## 10. Ten\nten\n", 1) == "",
+       "docs: claude_section runs from a numbered heading to the next one, past a heading in a block; 1 is not 10, and a missing section is empty")
+
+
+def test_docs_checks_catch_each_pinned_regression(d):
+    good = claude_md()
+    regressions = (  # (what, the text it changes, its replacement, how the failure that docs_checks must list starts)
+        ("a forbidden command under a never of another clause", "\n## 14. ", "\nWhen a member never answers, run `agent-deck session stop <member>`.\n\n## 14. ",
+         "docs: each time CLAUDE.md names agent-deck session stop, a never run or never use governs it"),
+        ("the exemption from the forged check put back", "\n## 7. ", "\nNever dispute a file stamped before the first line of `SENT.log`.\n\n## 7. ",
+         "docs: CLAUDE.md exempts no file in the steward's name from the forged check"),
+        ("the exemption in other words", "\n## 7. ", "\nA file in your name stamped before SENT.log began is never disputed.\n\n## 7. ",
+         "docs: CLAUDE.md exempts no file in the steward's name from the forged check"),
+        ("a missing doorbell made a fresh context", "remember no earlier turn, or when", "remember no earlier turn, when the doorbell is missing, or when",
+         "docs: a fresh context is spec 6.4's"),
+        ("a restart counted as a context reset", ", and never a context reset", "", "docs: restarts.doorbell and restarts.tick count a task missing without having fired"),
+        ("the summary's local date dropped from the state", "`last_summary_post`, `last_summary_date`, ", "`last_summary_post`, ", "docs: the summary's trigger compares the local date"),
+        ("pgrep called from PATH", "\n## 14. ", "\nCheck it with `pgrep -f steward-tick`.\n\n## 14. ", "docs: CLAUDE.md calls pgrep as /usr/bin/pgrep"),
+        ("a digest allowed in the final message", " and at `close` (section 14)", "", "docs: CLAUDE.md never prints a digest in its final message"),
+        ("a question mark in the STATUS block", STATUS_LINE, STATUS_LINE + " ?", "docs: the blocks that hold the DIGEST template, the SUMMARY example and the STATUS line"),
+        ("REQUEST no longer routed", "A QUESTION or REQUEST that a peer can answer", "A QUESTION that a peer can answer", "docs: an unaddressed REQUEST is filed and routed"),
+        ("the NOTE reminder made daily", "\n## 13. ", "\nThat is your one reminder of the day.\n\n## 13. ", "docs: the first summary that counts member mail without a NOTE reminds the topic once"),
+        ("the relayed DECISION's suffix dropped", " (relayed; asked by <worker>)", "", "docs: the relayed DECISION post's subject is spec 6.3's worked example"))
+    for i, (what, old, new, failure) in enumerate(regressions):
+        broken = os.path.join(d, f"regression-{i}")
+        os.makedirs(os.path.join(broken, "steward"))
+        write(os.path.join(broken, "steward"), "CLAUDE.md", good.replace(old, new, 1))
+        failures = docs_checks(broken)
+        ok(old in good and any(f.startswith(failure) for f in failures), f"docs: docs_checks catches {what} (got {without_question_marks(repr(failures))})")
+
+
+def test_docs_checks_keeps_to_its_limits(d):
+    went_on = []
+
+    def expects_a_raise(_):
+        raises(KeyError, dict)  # dict() raises nothing: raises reports it through ok and returns None
+        went_on.append("raises returned")
+
+    def writes(directory):
+        write(directory, "x.txt", "")
+
+    def reads_policy(_):
+        went_on.append(read(os.path.join(conductor_dir(d), "POLICY.md")))
+
+    checkout = os.path.join(d, "with-policy")
+    os.makedirs(os.path.join(checkout, "steward"))
+    write(os.path.join(checkout, "steward"), "POLICY.md", "the POLICY.md of the checkout given\n")
+    saved, before = DOCS_CHECKS, tree(checkout)
+    globals()["DOCS_CHECKS"] = (expects_a_raise, writes, reads_policy)
+    try:
+        failures = docs_checks(checkout)
+    finally:
+        globals()["DOCS_CHECKS"] = saved
+    ok(failures[:1] == ["dict raised no KeyError"] and went_on[:1] == ["raises returned"], "docs: under docs_checks, raises lists its failure, returns None, and the check goes on")
+    ok(len(failures) == 2 and failures[1].startswith("docs: writes could not go on: TypeError") and tree(checkout) == before,
+       "docs: each check function receives None for its directory, so one that writes fails and writes nothing")
+    ok(went_on[1:] == ["the POLICY.md of the checkout given\n"], "docs: conductor_dir copies the POLICY.md of the checkout that docs_checks was given")
 
 
 def test_docs_checks(d):
@@ -4269,10 +4453,13 @@ def test_docs_checks(d):
 
 @section("docs")
 def section_docs(d):
-    test_strip_code_and_template(d)  # first: the checks below read CLAUDE.md's prose through it
+    test_strip_code_and_template(d)  # first: the checks below read CLAUDE.md through these readers
+    test_the_docs_readers(d)
     for check in DOCS_CHECKS:
         check(d)
     test_docs_checks(d)
+    test_docs_checks_catch_each_pinned_regression(d)
+    test_docs_checks_keeps_to_its_limits(d)
 
 
 # ---- main ----
