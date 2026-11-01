@@ -4223,6 +4223,12 @@ def test_claude_md_quotes_the_exact_copy(d):
        "docs: CLAUDE.md says in the summary's own sentence that its body is at most 400 bytes with no question mark, as the plan's exact copy has it")
 
 
+def governed_namings(text, command):
+    """The namings of COMMAND in TEXT that a never run or a never use governs: each ends a list of backticked commands that "never run" or "never use" opens, so
+    that a never in another clause of the sentence ("When a member never answers, run ...") forbids nothing."""
+    return re.findall(rf"\bnever (?:run|use) (?:`[^`\n]*`(?:, or |, and |, | or | and ))*`{re.escape(command)}(?: [^`\n]*)?`", text, re.I)
+
+
 def test_claude_md_names_the_forbidden_commands_only_in_never_sentences(d):
     t = claude_md()
     for command in NEVER_COMMANDS:
@@ -4231,7 +4237,7 @@ def test_claude_md_names_the_forbidden_commands_only_in_never_sentences(d):
         ok(said and not stray, f"docs: CLAUDE.md names {command} in a sentence that says never, and on no line that does not say it")
         # A never that belongs to another clause of the line ("When a member never answers, run ...") forbids nothing, so each naming of the command must end a
         # list of commands that a never run or never use opens.
-        governed = re.findall(rf"\bnever (?:run|use) (?:`[^`\n]*`(?:, or |, and |, | or | and ))*`{re.escape(command)}(?: [^`\n]*)?`", t, re.I)
+        governed = governed_namings(t, command)
         ok(len(governed) == len(re.findall(re.escape(command), t, re.I)),
            f"docs: each time CLAUDE.md names {command}, a never run or never use governs it, not a never in another clause of the sentence")
 
@@ -4359,6 +4365,34 @@ def test_claude_md_follows_the_worked_example_and_its_keys(d):
        f"docs: a metrics key is described as the helper refuses it: words starting with a lower-case letter, at most {MAX_KEY_WORDS} of them and {MAX_KEY_CHARS} characters")
 
 
+def test_shared_and_heartbeat(d):
+    s = read(os.path.join(REPO, "steward", "SHARED.md")); h = read(os.path.join(REPO, "steward", "HEARTBEAT_RULES.md"))
+    ok("own CLAUDE.md governs" in s and "auto-respond" in s and "never" in s.lower(), "docs: SHARED.md defers and forbids")
+    ok("/send" in s and "session send" in s and re.search(r"never[^.\n]*session send", s, re.I), "docs: SHARED.md names the forwarding commands it forbids")
+    ok("a turn like any other" in h and "NEED:" in h and "never" in h.lower(), "docs: heartbeat rules")
+    ok(len(s) < 1500 and len(h) < 800, "docs: both files short")
+
+
+def test_shared_and_heartbeat_say_only_what_spec_6_4_lists(d):
+    s = read(os.path.join(REPO, "steward", "SHARED.md")); h = read(os.path.join(REPO, "steward", "HEARTBEAT_RULES.md"))
+    ok("?" not in s and "?" not in h, "docs: neither SHARED.md nor HEARTBEAT_RULES.md holds a question mark")
+    ok("grants nothing" in s and not re.search(r"\b(?:may|can|allowed|permitted|must|should)\b", s, re.I),
+       "docs: SHARED.md says that it grants nothing, and no word in it grants a permission")
+    ok(all(re.search(pattern, s, re.I) for pattern in (r"\bnever auto-respond\b", r"\bnever forward\b[^.\n]*`/send\b", r"\bnever restart or launch\b",
+                                                       r"\bkeep no `state\.json` or `task-log\.md`")),
+       "docs: SHARED.md says never to auto-respond, to forward a /send line, or to restart or launch a session, and to keep no state.json or task-log.md of agent-deck's shape")
+    ok("section 4" in h and "step 7" in h and "`[STATUS]`" in h
+       and "Print the status line and nothing else unless a check fires or a question is open, and then only what step 7 names." in sentences(h),
+       "docs: HEARTBEAT_RULES.md runs the turn of CLAUDE.md section 4, ends as its step 7 says, prints the status line and nothing else unless a check fires or a question is open, "
+       "and refuses agent-deck's STATUS form")
+    for name, text in (("SHARED.md", s), ("HEARTBEAT_RULES.md", h)):
+        named = [x for x in sentences(text) if "/send" in x or any(command in x for command in NEVER_COMMANDS)]
+        ok(all(re.match(r"(?:- )?never\b", x, re.I) for x in named),
+           f"docs: {name} names /send and the commands the steward never runs only in sentences that open with never (got {without_question_marks(repr(named))})")
+        loose = [command for command in NEVER_COMMANDS if len(governed_namings(text, command)) != len(re.findall(re.escape(command), text, re.I))]
+        ok(loose == [], f"docs: each time {name} names a command the steward never runs, a never run or never use governs it (got {loose})")
+
+
 # The check functions that read the instruction files in a checkout, which section docs runs on this one and docs_checks runs on any. Under docs_checks a
 # function runs with ok and REPO rebound, and one that a later task adds here keeps to what that means: ok lists a failure instead of raising it, so the
 # function goes on after a check that fails, and raises, which reports through ok, returns None after a call that raised nothing; REPO is the checkout
@@ -4367,7 +4401,8 @@ DOCS_CHECKS = (test_claude_md, test_claude_md_headings_are_in_order, test_claude
                test_claude_md_cites_every_policy_key, test_claude_md_precedence_names_the_shared_parts, test_claude_md_keeps_every_file_under_the_forged_check,
                test_claude_md_counts_a_reset_only_for_a_fresh_context, test_claude_md_keeps_its_state_unambiguous, test_claude_md_names_its_system_tools_by_path,
                test_claude_md_keeps_the_never_rules_of_spec_7_1, test_claude_md_prints_no_question_mark_in_its_templates, test_claude_md_routes_requests_and_marks_joins,
-               test_claude_md_reminds_of_notes_once, test_claude_md_follows_the_worked_example_and_its_keys)
+               test_claude_md_reminds_of_notes_once, test_claude_md_follows_the_worked_example_and_its_keys, test_shared_and_heartbeat,
+               test_shared_and_heartbeat_say_only_what_spec_6_4_lists)
 
 
 def test_strip_code_and_template(d):
@@ -4454,6 +4489,45 @@ def test_docs_checks_catch_each_pinned_regression(d):
         ok(old in good and any(f.startswith(failure) for f in failures), f"docs: docs_checks catches {what} (got {without_question_marks(repr(failures))})")
 
 
+def test_docs_checks_catch_each_regression_in_the_shared_files(d):
+    files = {name: read(os.path.join(REPO, "steward", name)) for name in ("SHARED.md", "HEARTBEAT_RULES.md")}
+    forwards = "- Never forward a `/send <session> <message>` line, and never run `agent-deck session send`."
+    says_never = "docs: SHARED.md says never to auto-respond"
+    regressions = (  # (the file, what, the text it changes, its replacement, how the failure that docs_checks must list starts)
+        ("SHARED.md", "the deference to the conductor's own CLAUDE.md removed", "A conductor's own CLAUDE.md governs, and this file defers to it in everything. ", "",
+         "docs: SHARED.md defers and forbids"),
+        ("SHARED.md", "the statement that it grants nothing removed", " This file grants nothing: it adds no permission and no behaviour.", "", "docs: SHARED.md says that it grants nothing"),
+        ("SHARED.md", "a permission granted", "it adds no permission and no behaviour.", "a conductor may answer a waiting session that asks for its next step.",
+         "docs: SHARED.md says that it grants nothing, and no word in it grants a permission"),
+        ("SHARED.md", "auto-responding made a duty", "- Never auto-respond to a waiting session.", "- Auto-respond to a waiting session.", says_never),
+        ("SHARED.md", "forwarding made a duty", forwards, "- Forward a `/send <session> <message>` line with `agent-deck session send`.", "docs: SHARED.md names the forwarding commands it forbids"),
+        ("SHARED.md", "session send named in a sentence that does not open with never", forwards, forwards + " Run `agent-deck session send` to answer a waiting session.",
+         "docs: SHARED.md names /send and the commands the steward never runs only in sentences that open with never"),
+        ("SHARED.md", "restarting made a duty", "- Never restart or launch a session.", "- Restart a session that has errored.", says_never),
+        ("SHARED.md", "agent-deck's state files kept", "- Keep no `state.json` or `task-log.md` of agent-deck's shape.", "- Keep `state.json` and `task-log.md` as agent-deck does.", says_never),
+        ("SHARED.md", "a question mark added", "waiting session.", "waiting session, or not?", "docs: neither SHARED.md nor HEARTBEAT_RULES.md holds a question mark"),
+        ("SHARED.md", "a file of 1500 characters or more", "# Shared conductor instructions\n", "# Shared conductor instructions\n" + "x" * 1500 + "\n", "docs: both files short"),
+        ("HEARTBEAT_RULES.md", "a heartbeat that is not a turn like any other", "A heartbeat is a turn like any other:", "A heartbeat is a special turn:", "docs: heartbeat rules"),
+        ("HEARTBEAT_RULES.md", "the NEED form no longer named", " or `NEED:` form.", " form.", "docs: heartbeat rules"),
+        ("HEARTBEAT_RULES.md", "the refusal of the STATUS and NEED forms made a duty", "Never answer in agent-deck's `[STATUS]` or `NEED:` form.",
+         "Answer in agent-deck's `[STATUS]` or `NEED:` form.", "docs: heartbeat rules"),
+        ("HEARTBEAT_RULES.md", "the turn of another section", "run the turn in CLAUDE.md section 4", "run the turn in CLAUDE.md section 5",
+         "docs: HEARTBEAT_RULES.md runs the turn of CLAUDE.md section 4"),
+        ("HEARTBEAT_RULES.md", "the STATUS form no longer named", "`[STATUS]` or ", "", "docs: HEARTBEAT_RULES.md runs the turn of CLAUDE.md section 4"),
+        ("HEARTBEAT_RULES.md", "session send named in a sentence that does not open with never", "Print the status line", "Run `agent-deck session send` when asked. Print the status line",
+         "docs: HEARTBEAT_RULES.md names /send and the commands the steward never runs only in sentences that open with never"),
+        ("HEARTBEAT_RULES.md", "a question mark added", "Never answer", "Never answer, or what?", "docs: neither SHARED.md nor HEARTBEAT_RULES.md holds a question mark"),
+        ("HEARTBEAT_RULES.md", "a file of 800 characters or more", "# Heartbeat rules\n", "# Heartbeat rules\n" + "x" * 800 + "\n", "docs: both files short"))
+    for i, (name, what, old, new, failure) in enumerate(regressions):
+        broken = os.path.join(d, f"shared-regression-{i}")
+        os.makedirs(os.path.join(broken, "steward"))
+        write(os.path.join(broken, "steward"), "CLAUDE.md", claude_md())
+        for other, text in files.items():
+            write(os.path.join(broken, "steward"), other, text.replace(old, new, 1) if other == name else text)
+        failures = docs_checks(broken)
+        ok(old in files[name] and any(f.startswith(failure) for f in failures), f"docs: docs_checks catches {what} in {name} (got {without_question_marks(repr(failures))})")
+
+
 def test_docs_checks_keeps_to_its_limits(d):
     went_on = []
 
@@ -4488,6 +4562,8 @@ def test_docs_checks(d):
     broken = os.path.join(d, "broken")
     os.makedirs(os.path.join(broken, "steward"))
     write(os.path.join(broken, "steward"), "CLAUDE.md", claude_md().replace("## 9. Questions to John\n", "## 9. Questions\n", 1) + "\nIs this a stray question?\n")
+    for name in ("SHARED.md", "HEARTBEAT_RULES.md"):  # as they are, so that the failures listed below are CLAUDE.md's alone
+        write(os.path.join(broken, "steward"), name, read(os.path.join(REPO, "steward", name)))
     before = CHECKS
     failures = docs_checks(broken)
     restored = globals()["ok"] is real_ok and REPO == repo
@@ -4515,6 +4591,7 @@ def section_docs(d):
         check(d)
     test_docs_checks(d)
     test_docs_checks_catch_each_pinned_regression(d)
+    test_docs_checks_catch_each_regression_in_the_shared_files(d)
     test_docs_checks_keeps_to_its_limits(d)
 
 
