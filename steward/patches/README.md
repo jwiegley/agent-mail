@@ -1,4 +1,6 @@
-# Patches for the director's scanner
+# Patches for the director's scanner and the Discord bridge
+
+Two patches to John's unversioned files, for him to apply, each on its own: the scanner's, below, and the Discord bridge's, in the last section.
 
 `monitor_sessions-steward.patch` changes John's scanner, `~/.local/share/agent-deck/conductor/director/monitor_sessions.py`, in two ways (spec sections 6.9 and 6.12):
 
@@ -71,3 +73,65 @@ cp -p ~/.local/share/agent-deck/conductor/director/monitor_sessions.py.pre-stewa
 ```
 
 Then restart the scanner as above.
+
+## The Discord bridge
+
+`bridge-steward-routing.patch` changes John's Discord bridge, `~/.local/share/agent-deck/conductor/bridge.py`, so that an answer to a steward reaches it in the two forms that go to the director today (spec sections 6.7 and 8):
+
+- **Any case, and space before the colon.** A message that starts with a conductor's name and a colon goes to that conductor whatever the case of the name: `Ingest-steward : ingest-3 A` reaches conductor-ingest-steward as `ingest-3 A`.
+- **A reply to a page.** A reply to the bot's message `NEED(local/conductor-<name>): …`, the page the scanner posts for what it finds in that conductor's pane, goes to conductor `<name>` with the reply's whole text. A conductor prefix at the start of the reply still wins. A reply to one of discord_qna's menu questions is still answered by discord_qna first, and any other message without a prefix, a reply to anything else included, still goes to the first conductor, `director`.
+
+The patch was made against the bridge of 2026-10-31 10:43 (118,714 bytes, sha256 `47e7629d26b186708843ddf1b85cd84336aa55a6df778e8b1e7bd9fe7533d5e0`). `agent-deck conductor setup` overwrites `bridge.py` with the copy built into agent-deck (spec section 5.3), which drops this patch and the Discord Q&A hook alike, so until the fork fix of spec section 8 lands, apply the patch again after any setup run.
+
+### Apply
+
+```sh
+cp -n -p ~/.local/share/agent-deck/conductor/bridge.py ~/.local/share/agent-deck/conductor/bridge.py.pre-steward
+patch -p0 --dry-run -d ~/.local/share/agent-deck/conductor < steward/patches/bridge-steward-routing.patch &&
+    patch -p0 -d ~/.local/share/agent-deck/conductor < steward/patches/bridge-steward-routing.patch
+```
+
+The copy, the `cp -n` and the `&&` work as in the scanner's Apply. If the dry run rejects a hunk, the bridge has changed since the patch was made: regenerate the patch against the new file rather than forcing it.
+
+### Test
+
+The steward tests, now with the bridge too, and John's own bridge tests, which are in `test_discord_qna.py` and load the `bridge.py` beside the director's directory:
+
+```sh
+STEWARD_PATCHED_MONITOR=$HOME/.local/share/agent-deck/conductor/director/monitor_sessions.py \
+STEWARD_PATCHED_BRIDGE=$HOME/.local/share/agent-deck/conductor/bridge.py \
+    ~/.local/share/agent-deck/conductor/venv/bin/python -B -m unittest steward/patches/test_steward_patches.py
+(cd ~/.local/share/agent-deck/conductor/director && ~/.local/share/agent-deck/conductor/venv/bin/python -B -m unittest test_discord_qna.BridgeTests)
+```
+
+The steward tests import the bridge with its home, config and conductor directory in an empty temporary directory, so the import opens no file of John's, and they build its Discord bot without logging in, with agent-deck and Discord's API replaced by recorders. John's tests import the bridge as it stands, so they add six `Discord bot initialized (guild=1, channel=42)` lines to the live `bridge.log`.
+
+### Restart the bridge
+
+The running bridge keeps the old code until its launchd job restarts it. Restart it while no Discord message is waiting for a conductor's reply, since the process holds that wait and a reply still pending when it stops is never posted:
+
+```sh
+launchctl kickstart -k gui/$(id -u)/com.agentdeck.conductor-bridge
+```
+
+### Check
+
+```sh
+tail -n 40 ~/.local/share/agent-deck/conductor/bridge.log | grep -E '^Traceback|Discord bot (initialized|ready)'
+```
+
+A `Discord bot ready` line stamped after the restart, with no `Traceback` after it, means the bridge is back. Then, with conductor-ingest-steward running (spec section 6.4), send `ingest-steward: digest` from Discord: the steward's digest comes back. `Ingest-steward : digest` brings it back too, and so does `digest` sent as a reply to one of the steward's pages.
+
+### Undo
+
+```sh
+patch -R -p0 -d ~/.local/share/agent-deck/conductor < steward/patches/bridge-steward-routing.patch
+```
+
+If the bridge has changed since the patch went in, or the reverse is rejected, put back the copy kept before applying, which also drops any edit made since:
+
+```sh
+cp -p ~/.local/share/agent-deck/conductor/bridge.py.pre-steward ~/.local/share/agent-deck/conductor/bridge.py
+```
+
+Then restart the bridge as above.

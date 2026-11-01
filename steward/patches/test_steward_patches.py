@@ -1,19 +1,28 @@
-"""Tests for the steward patches to John's director scanner, monitor_sessions.py.
+"""Tests for the steward patches to John's director scanner, monitor_sessions.py,
+and to his Discord bridge, bridge.py.
 
-They load the patched copy that STEWARD_PATCHED_MONITOR names and call its
-functions directly. Every fixture lives in a temporary directory, the mailbox
-included. Discord delivery, discord_qna and every command the scanner runs are
-replaced by recorders, so no test reaches agent-deck, Discord, ~/Mailbox, or
-the scanner's own state.json and task log.
+They load the patched copies that STEWARD_PATCHED_MONITOR and
+STEWARD_PATCHED_BRIDGE name and call their functions directly; without
+STEWARD_PATCHED_BRIDGE the bridge tests are skipped. Every fixture lives in a
+temporary directory, the mailbox included. Discord delivery, discord_qna and
+every command the scanner runs are replaced by recorders, so no test reaches
+agent-deck, Discord, ~/Mailbox, or the scanner's own state.json and task log.
+The bridge is imported with its paths in an empty temporary directory
+(load_bridge), and its Discord bot is built without logging in, with a fixed
+list of conductors and recorders for agent-deck and Discord's API.
 
 Run from the repository root with John's venv (README.md beside this file):
 
     STEWARD_PATCHED_MONITOR=<the patched monitor_sessions.py> \\
+    STEWARD_PATCHED_BRIDGE=<the patched bridge.py> \\
         ~/.local/share/agent-deck/conductor/venv/bin/python -B -m unittest steward/patches/test_steward_patches.py
 """
 
+import asyncio
+import contextlib
 import errno
 import importlib.util
+import logging
 import os
 import re
 import signal
@@ -23,9 +32,10 @@ import tempfile
 import time
 import types
 import unittest
+import warnings
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 
 def load_patched(variable, name):
@@ -40,6 +50,27 @@ def load_patched(variable, name):
 
 
 m = load_patched("STEWARD_PATCHED_MONITOR", "steward_patched_monitor")
+
+
+def load_bridge():
+    """The bridge that STEWARD_PATCHED_BRIDGE names, or None when it is unset.
+
+    Importing bridge.py starts nothing: its asyncio.run(main()) waits behind __main__, and it reads no config and
+    runs no command. It does work out its conductor directory and config path from HOME, the XDG variables and
+    AGENT_DECK_CONDUCTOR_DIR, and when that directory exists it opens a log handler on the bridge.log there,
+    which would then take every record the tests log. So the import runs with those four in an empty temporary
+    directory, removed after it: no file of John's is opened, and every path the module keeps names nothing.
+    """
+    if not os.environ.get("STEWARD_PATCHED_BRIDGE"):
+        return None
+    with tempfile.TemporaryDirectory() as empty, patch.dict(os.environ, {
+            "HOME": empty, "XDG_CONFIG_HOME": f"{empty}/config", "XDG_DATA_HOME": f"{empty}/data",
+            "AGENT_DECK_CONDUCTOR_DIR": f"{empty}/conductor"}):
+        return load_patched("STEWARD_PATCHED_BRIDGE", "steward_patched_bridge")
+
+
+b = load_bridge()
+BRIDGE_SKIP = "set STEWARD_PATCHED_BRIDGE to the patched bridge.py to run the bridge tests"
 
 # The steward's files, as steward/CLAUDE.md sections 3 and 12 give them.
 TOPIC = """# +ingest
@@ -599,6 +630,163 @@ class QuestionLine(unittest.TestCase):
         # why the template forbids github: (steward/CLAUDE.md section 9).
         github = question.replace("nixpkgs", "github:nixpkgs")
         self.assertIsNone(m.visible_prompt_or_question(final_message(*detail, github)))
+
+
+@unittest.skipIf(b is None, BRIDGE_SKIP)
+class BridgeRouting(unittest.TestCase):
+    names = ["director", "ingest-steward", "nix-steward"]
+
+    def test_prefix_case_insensitive(self):
+        self.assertEqual(b.parse_conductor_prefix("Ingest-steward: ingest-3 A", self.names), ("ingest-steward", "ingest-3 A"))
+        self.assertEqual(b.parse_conductor_prefix("nix-steward : nix-4 B", self.names), ("nix-steward", "nix-4 B"))
+        self.assertEqual(b.parse_conductor_prefix("ingest-3 A", self.names), (None, "ingest-3 A"))
+
+    def test_reply_to_page_routes_to_that_steward(self):
+        self.assertEqual(b.conductor_for_reply("@johnw NEED(local/conductor-ingest-steward): Q ingest-3: HF org …?", self.names), "ingest-steward")
+        self.assertIsNone(b.conductor_for_reply("NEED(local/nix): some question?", self.names))
+
+
+@unittest.skipIf(b is None, BRIDGE_SKIP)
+class BridgeForms(unittest.TestCase):
+    """The prefixes John types and the pages the director posts, in the forms Discord delivers them."""
+
+    names = BridgeRouting.names
+
+    def test_a_prefix_is_a_known_name_at_the_start_then_a_colon(self):
+        for text, routed in (("INGEST-STEWARD:ingest-3 A", ("ingest-steward", "ingest-3 A")),
+                             ("director: status", ("director", "status")),
+                             ("ingest-stewards: ingest-3 A", (None, "ingest-stewards: ingest-3 A")),
+                             ("fleet-steward: fleet-1 A", (None, "fleet-steward: fleet-1 A")),
+                             ("re ingest-steward: ingest-3 A", (None, "re ingest-steward: ingest-3 A"))):
+            with self.subTest(text=text):
+                self.assertEqual(b.parse_conductor_prefix(text, self.names), routed)
+
+    def test_the_pages_the_director_posts_for_a_conductor(self):
+        # notify_discord.py puts John's mention first, in Discord's raw form; a menu question that discord_qna
+        # publishes carries [Q:<id>] after the place; an error page carries no question.
+        for text in ("<@123456789012345678> NEED(local/conductor-ingest-steward): Q ingest-3: org: A x, B y?",
+                     "<@!123456789012345678> NEED(local/conductor-ingest-steward): Q ingest-3: org: A x, B y?",
+                     "<@123456789012345678> NEED(local/conductor-ingest-steward) [Q:0123456789ab]\n1. Yes",
+                     "NEED(local/conductor-ingest-steward): session status is error"):
+            with self.subTest(text=text):
+                self.assertEqual(b.conductor_for_reply(text, self.names), "ingest-steward")
+
+    def test_pages_that_name_no_conductor_of_this_bridge(self):
+        for text in ("<@1> NEED(local/conductor-fleet-steward): Q fleet-1: org: A x, B y?",  # no such conductor
+                     "<@1> NEED(clio/conductor-ingest-steward): Q ingest-3: org: A x, B y?",  # a session on another host
+                     "<@1> NEED(local/conductor-ingest-steward/restart): rc=1",  # the director restarting it
+                     # A stale STATUS is the director's to act on, not the stuck steward's.
+                     "<@1> NEED(steward): conductor-ingest-steward STATUS unchanged since 20261102T171500Z (tick 15m, 4 open)",
+                     "[ingest-steward] seen: NEED(local/conductor-ingest-steward): Q ingest-3: org: A x, B y?"):
+            with self.subTest(text=text):
+                self.assertIsNone(b.conductor_for_reply(text, self.names))
+
+    def test_any_replied_text_is_read_at_once(self):
+        # The bridge reads the replied text on its event loop. A pattern with two ways to read a run of @ would take
+        # time that grows by about 60 percent with each one, more than a day for these 60.
+        self.assertIsNone(within(2, lambda: b.conductor_for_reply("@" * 60 + "x", self.names)))
+
+
+@unittest.skipIf(b is None, BRIDGE_SKIP)
+class BridgeImport(unittest.TestCase):
+    def test_the_import_opened_no_file_of_johns(self):
+        # Imported without load_bridge's empty directory, the bridge would open a log handler on John's bridge.log.
+        self.assertEqual([type(handler) for handler in b._log_handlers], [logging.StreamHandler])
+        for path in (b.CONDUCTOR_DIR, b.CONFIG_PATH, b.LOG_PATH):
+            self.assertFalse(path.exists(), path)
+
+
+@unittest.skipIf(b is None, BRIDGE_SKIP)
+class BridgeOnMessage(unittest.TestCase):
+    """John's Discord messages through the bridge's on_message. create_discord_bot builds the bot, which never logs
+    in; the conductors are a fixed list, and agent-deck, discord_qna and Discord's API are recorders."""
+
+    names = BridgeRouting.names
+    JOHN, CHANNEL, BOT = 3, 2, 4
+    PAGE = f"<@{JOHN}> NEED(local/conductor-ingest-steward): Q ingest-3: HF org for glm-5.3-fp8: A positron-internal, B positron-ai?"
+
+    def setUp(self):
+        if not b.HAS_DISCORD:
+            self.skipTest("discord.py is not installed beside this Python")
+        empty = tempfile.TemporaryDirectory()
+        self.addCleanup(empty.cleanup)
+        self.sent = []
+
+        def send_to_conductor(session, text, **kwargs):
+            self.sent.append((session, text))
+            return True, "applied ingest-3 A at 20:40Z", False
+
+        # The empty directory holds no director/discord_qna.py, so no reply is offered to discord_qna.
+        for name, value in (("CONDUCTOR_DIR", Path(empty.name)),
+                            ("discover_conductors", lambda: [{"name": c, "profile": "default"} for c in self.names]),
+                            ("ensure_conductor_running", AsyncMock(return_value=True)),
+                            ("send_to_conductor", send_to_conductor),
+                            ("send_discord_output", AsyncMock())):
+            self.enterContext(patch.object(b, name, value))
+        config = {"discord": {"configured": True, "bot_token": "unused", "guild_id": 1, "channel_id": self.CHANNEL,
+                              "user_id": self.JOHN, "listen_mode": "all", "ignore_replies_to_others": False}}
+        with self.assertLogs("conductor-bridge", "INFO"), warnings.catch_warnings():
+            # discord.py 2.6 registers events through asyncio.iscoroutinefunction, deprecated in Python 3.14.
+            warnings.filterwarnings("ignore", "'asyncio.iscoroutinefunction' is deprecated", DeprecationWarning)
+            self.bot, _ = b.create_discord_bot(config)
+        # As if logged in. The pages are the bot's own messages: the director posts them with the bridge's token.
+        self.enterContext(patch.object(type(self.bot), "user", types.SimpleNamespace(id=self.BOT)))
+
+    def page(self, content, author=None):
+        """A message in the channel by the bot, or by AUTHOR, as discord.py resolves the message a reply names."""
+        message = MagicMock(spec=b.discord.Message)
+        message.id, message.content = 98, content
+        message.author = types.SimpleNamespace(id=self.BOT if author is None else author)
+        return message
+
+    def deliver(self, content, replied=None, sent_along=True, fetch=None):
+        """The (session, text) pairs sent for John's message CONTENT, a reply to REPLIED when given. Unless
+        SENT_ALONG, Discord leaves the replied message out and the bridge fetches it with FETCH, by default a
+        fetch that finds it."""
+        self.channel = types.SimpleNamespace(
+            id=self.CHANNEL, send=AsyncMock(), typing=contextlib.nullcontext,
+            fetch_message=AsyncMock(return_value=replied) if fetch is None else fetch)
+        reference = None
+        if replied is not None:
+            reference = types.SimpleNamespace(message_id=replied.id, resolved=replied if sent_along else None)
+        message = types.SimpleNamespace(id=99, content=content, channel=self.channel, reference=reference,
+                                        mentions=[], author=types.SimpleNamespace(id=self.JOHN, bot=False))
+        self.sent.clear()
+        with self.assertLogs("conductor-bridge", "INFO") as self.logs:
+            asyncio.run(self.bot.on_message(message))
+        return self.sent
+
+    def test_a_reply_to_a_stewards_page_goes_to_that_steward(self):
+        page = self.page(self.PAGE)
+        for text in ("ingest-3 A", "Ingest-steward : ingest-3 A", "ingest-steward: ingest-3 A"):
+            with self.subTest(text=text):
+                self.assertEqual(self.deliver(text, page), [("conductor-ingest-steward", "ingest-3 A")])
+                self.channel.fetch_message.assert_not_awaited()
+        # Discord left the page out of the reply: the bridge fetches it by the id the reply names.
+        self.assertEqual(self.deliver("ingest-3 A", page, sent_along=False), [("conductor-ingest-steward", "ingest-3 A")])
+        self.channel.fetch_message.assert_awaited_once_with(page.id)
+
+    def test_a_prefix_in_a_reply_names_the_conductor(self):
+        self.assertEqual(self.deliver("nix-steward: nix-4 B", self.page(self.PAGE)), [("conductor-nix-steward", "nix-4 B")])
+
+    def test_a_reply_whose_page_cannot_be_fetched_goes_to_the_first_conductor(self):
+        gone = AsyncMock(side_effect=RuntimeError("404 Not Found"))
+        self.assertEqual(self.deliver("ingest-3 A", self.page(self.PAGE), sent_along=False, fetch=gone),
+                         [("conductor-director", "ingest-3 A")])
+        self.assertIn("Failed to resolve Discord reply target 98: 404 Not Found", "\n".join(self.logs.output))
+
+    def test_a_bot_that_does_not_know_itself_reads_no_page(self):
+        # Before it has logged in, the bot cannot tell its own pages, so a reply goes to the first conductor.
+        with patch.object(type(self.bot), "user", None):
+            self.assertEqual(self.deliver("ingest-3 A", self.page(self.PAGE)), [("conductor-director", "ingest-3 A")])
+
+    def test_every_other_message_goes_to_the_first_conductor_as_before(self):
+        for case, replied in (("a new message", None),
+                              ("a reply to a page the bot did not post", self.page(self.PAGE, author=5)),
+                              ("a reply to a page of no conductor", self.page(f"<@{self.JOHN}> NEED(local/nix): some question?")),
+                              ("a reply to a conductor's answer", self.page("[ingest-steward] applied ingest-3 A at 20:40Z"))):
+            with self.subTest(case):
+                self.assertEqual(self.deliver("ingest-3 A", replied), [("conductor-director", "ingest-3 A")])
 
 
 if __name__ == "__main__":
