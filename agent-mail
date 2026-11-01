@@ -4291,11 +4291,17 @@ def section_retention(t):
         fields[stat.ST_UID] = st.st_uid + 1
         return os.stat_result(fields)
 
+    # The pass runs once every file in the box has settled. The clock frozen above, before
+    # these files existed, is not enough where file times are coarse: ext4 under Linux 5.15
+    # stamps a new file up to a tick before a clock read just before it, so the reader would
+    # wait for its own mail to settle under a clock that never moves.
+    t.at(max(os.lstat(os.path.join(folder, n)).st_ctime for folder, dirs, files in os.walk(u) for n in dirs + files) + SETTLE + 1)
     os.stat = foreign_stat
     try:
         out = receive(u, "c", s, sink)
     finally:
         os.stat = real_stat
+    t.at(now)
     t.ok(not os.path.exists(control), "the pass prunes a regular file of ours past the window beside the others")
     t.ok(os.path.islink(link) and os.path.exists(target), "a symlink with a mail name is untouched, and so is its target")
     t.ok(os.path.exists(foreign), "direct mail owned by another user is untouched")
