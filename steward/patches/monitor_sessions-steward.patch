@@ -40,16 +40,18 @@
                  return None
              lines = lines[index:]
              break
-@@ -1122,6 +1139,102 @@
+@@ -1122,6 +1139,129 @@
      state["attention_indicator"] = {**result["indicator"], "checked_at": result["timestamp"]}
  
  
 +STEWARD_STAMP = re.compile(r"[0-9]{8}T[0-9]{6}(?:\.[0-9]{6})?Z")
 +# agent-mail's name grammar; a name is also at most 64 characters and does not end in "-".
 +MAIL_NAME = r"[a-z0-9](?:[a-z0-9.]|-(?!-))*"
++MAIL_FUTURE = 24 * 3600  # agent-mail never delivers a post stamped further ahead of its clock than this
 +
 +
-+def steward_status_alerts(now: float, conductor_root: str, mailbox: str | None = None) -> list[dict]:
++def steward_status_alerts(now: float, conductor_root: str, mailbox: str | None = None,
++                          errors: list | None = None) -> list[dict]:
 +    """Attention items for agent-mail topic stewards whose STATUS went stale.
 +
 +    Each ``<conductor_root>/*-steward/STATUS`` holds one line that its steward
@@ -61,89 +63,114 @@
 +    line's own stamp, tick and open count, so it stays the same all through a
 +    stale episode and deliver_attention pages it once; the steward's next
 +    write starts a new text.  Only a regular file named exactly STATUS counts,
-+    so a closed topic, which renames it STATUS-final-<date>, pages nothing; a
-+    directory with no STATUS line in this form is skipped as well.
++    so a closed topic, which renames it STATUS-final-<date>, pages nothing,
++    and a STATUS line out of this form is skipped.  A steward whose STATUS,
++    TOPIC.md or channel cannot be read goes into ERRORS, the pass's error
++    list, and the other stewards are still checked; a file gone since the
++    listing, as when a closing steward renames STATUS, is passed over.
 +    """
 +    mailbox_dir = MAILBOX_DIR if mailbox is None else Path(mailbox)
 +    alerts = []
-+    for directory in sorted(Path(conductor_root).glob("*-steward")):
-+        status = directory / "STATUS"
++    for directory in sorted(path for path in Path(conductor_root).glob("*-steward") if path.is_dir()):
 +        try:
-+            if not status.is_file():  # never open a FIFO, which would hold up the pass
-+                continue
-+            with status.open(encoding="utf-8", errors="replace") as handle:
-+                words = handle.readline(4096).split()
-+            # Stat after reading: a STATUS written in between then looks
-+            # fresh, never stale under the new line's stamp.
-+            mtime = status.stat().st_mtime
-+        except OSError:
++            alert = steward_status_alert(now, directory, mailbox_dir)
++        except FileNotFoundError:
 +            continue
-+        fields = dict(word.split("=", 1) for word in words[1:] if "=" in word)
-+        tick, count = fields.get("tick", ""), fields.get("open", "")
-+        if not (words and STEWARD_STAMP.fullmatch(words[0])
-+                and re.fullmatch(r"[0-9]{1,6}", tick) and re.fullmatch(r"[0-9]{1,6}", count)
-+                and int(tick) > 0):
++        except (OSError, ValueError) as exc:
++            if errors is not None:
++                errors.append({"where": f"steward/conductor-{directory.name}", "error": str(exc)})
 +            continue
-+        if now - mtime <= 2 * int(tick) * 60:
-+            continue
-+        if int(count) == 0 and not steward_channel_has_post_after(
-+                directory, fields.get("last-post", ""), mailbox_dir):
-+            continue
-+        alerts.append({
-+            "where": "steward",
-+            "kind": "steward",
-+            "detail": f"conductor-{directory.name} STATUS unchanged since {words[0]} "
-+                      f"(tick {int(tick)}m, {int(count)} open)",
-+        })
++        if alert:
++            alerts.append(alert)
 +    return alerts
 +
 +
-+def steward_channel_has_post_after(directory: Path, last_post: str, mailbox: Path) -> bool:
++def steward_status_alert(now: float, directory: Path, mailbox: Path) -> dict | None:
++    """The attention item for the steward in DIRECTORY, or None (see steward_status_alerts)."""
++    status = directory / "STATUS"
++    words = steward_file_text(status).partition("\n")[0].split()
++    mtime = status.stat().st_mtime  # after the read, so a STATUS rewritten meanwhile reads as fresh
++    fields = dict(word.split("=", 1) for word in words[1:] if "=" in word)
++    tick, count = fields.get("tick", ""), fields.get("open", "")
++    if not (words and STEWARD_STAMP.fullmatch(words[0])
++            and re.fullmatch(r"[0-9]{1,6}", tick) and re.fullmatch(r"[0-9]{1,6}", count)
++            and int(tick) > 0):
++        return None
++    if now - mtime <= 2 * int(tick) * 60:
++        return None
++    if int(count) == 0 and not steward_channel_has_post_after(
++            directory, fields.get("last-post", ""), mailbox, now):
++        return None
++    return {
++        "where": "steward",
++        "kind": "steward",
++        "detail": f"conductor-{directory.name} STATUS unchanged since {words[0]} "
++                  f"(tick {int(tick)}m, {int(count)} open)",
++    }
++
++
++def steward_file_text(path: Path, limit: int = 4096) -> str:
++    """At most LIMIT characters of PATH, a file a steward writes, which must be a regular file in UTF-8.
++
++    A FIFO is never opened, since that would wait for a writer and hold up the
++    pass.  A missing file raises FileNotFoundError, and any other trouble
++    raises OSError or ValueError with a message that names the file.
++    """
++    if not path.is_file():
++        path.stat()  # FileNotFoundError when it is gone; another OSError when it cannot be looked at
++        raise OSError(f"{path.name} is not a regular file")
++    try:
++        with path.open(encoding="utf-8") as handle:
++            return handle.read(limit)
++    except UnicodeDecodeError as exc:
++        raise ValueError(f"{path.name} is not UTF-8 ({exc.reason} at byte {exc.start})") from None
++
++
++def steward_channel_has_post_after(directory: Path, last_post: str, mailbox: Path, now: float) -> bool:
 +    """Whether the channel a steward's TOPIC.md names holds a post stamped after LAST_POST.
 +
 +    The channel is named by TOPIC.md's first line that is not blank,
 +    ``# +<channel>``.  Its posts are the files that agent-mail names
 +    ``<channel>_<UTC>_from-<sender>_<hex8>.txt``, the channel without its
 +    plus sign, in ``<mailbox>/+<channel>/``.  They are known by name alone,
-+    as agent-mail's reader would count them: no message file is opened.
-+    Stamps compare to the second, the form STATUS writes, so the post that
-+    ``last-post`` names never counts as newer than itself.
++    as agent-mail's reader would count them: no message file is opened, and
++    a sender outside agent-mail's grammar, a stamp that is no time and a stamp
++    more than a day after NOW never count.  Stamps compare to the second, the
++    form STATUS writes, so the post that ``last-post`` names never counts as
++    newer than itself.  A channel with no directory has no posts.
 +    """
 +    if not STEWARD_STAMP.fullmatch(last_post):
 +        return False
-+    topic = directory / "TOPIC.md"
-+    try:
-+        if not topic.is_file():  # never open a FIFO, which would hold up the pass
-+            return False
-+        with topic.open(encoding="utf-8", errors="replace") as handle:
-+            heading = next((line.strip() for line in handle if line.strip()), "")
-+        named = re.fullmatch(rf"# \+({MAIL_NAME})", heading)
-+        if not named:
-+            return False
-+        channel = named.group(1)
-+        names = [path.name for path in (mailbox / f"+{channel}").iterdir()]
-+    except OSError:
++    text = steward_file_text(directory / "TOPIC.md")
++    heading = next((line.strip() for line in text.splitlines() if line.strip()), "")
++    named = re.fullmatch(rf"# \+({MAIL_NAME})", heading)
++    if not named:
 +        return False
-+    post = re.compile(rf"{re.escape(channel)}_(?P<stamp>[0-9]{{8}}T[0-9]{{6}})\.[0-9]{{6}}Z"
++    channel = named.group(1)
++    try:
++        names = [path.name for path in (mailbox / f"+{channel}").iterdir()]
++    except (FileNotFoundError, NotADirectoryError):
++        return False
++    post = re.compile(rf"{re.escape(channel)}_(?P<stamp>[0-9]{{8}}T[0-9]{{6}}\.[0-9]{{6}})Z"
 +                      rf"_from-(?P<sender>{MAIL_NAME})_[0-9a-f]{{8}}\.txt")
 +    for name in names:
 +        found = post.fullmatch(name)
-+        # agent-mail's reader skips a sender outside its grammar and a stamp that is no time.
-+        if (not found or found["stamp"] <= last_post[:15]
++        if (not found or found["stamp"][:15] <= last_post[:15]
 +                or len(found["sender"]) > 64 or found["sender"].endswith("-")):
 +            continue
 +        try:
-+            datetime.strptime(found["stamp"], "%Y%m%dT%H%M%S")
++            stamped = datetime.strptime(found["stamp"], "%Y%m%dT%H%M%S.%f").replace(tzinfo=ZoneInfo("UTC"))
 +        except ValueError:
 +            continue
-+        return True
++        if stamped.timestamp() <= now + MAIL_FUTURE:
++            return True
 +    return False
 +
 +
  def deliver_attention(state: dict, result: dict) -> None:
      """Send actionable alerts; retain deduplication only after confirmed delivery."""
      try:
-@@ -1141,6 +1254,8 @@
+@@ -1141,6 +1281,8 @@
          {"where": item["where"], "kind": "stall", "detail": "No meaningful pane progress for the policy threshold."}
          for item in result["stalled_sessions"]
      )
@@ -152,7 +179,7 @@
      recovered = {
          item["where"] for item in result["actions"]
          if item["action"] == "Continue" and item.get("reason") == "errored-session recovery"
-@@ -1200,6 +1315,7 @@
+@@ -1200,6 +1342,7 @@
          "actions": [],
          "questions": [],
          "stalled_sessions": [],
@@ -160,13 +187,13 @@
          "errors": [],
          "session_ids": {},
      }
-@@ -1603,6 +1719,12 @@
+@@ -1603,6 +1746,12 @@
              finally:
                  run(["tmux", "kill-session", "-t", scan], timeout=10)
  
 +    # Topic stewards guard their liveness with STATUS files, not pane text.
 +    try:
-+        result["steward_alerts"] = steward_status_alerts(time.time(), str(CONDUCTOR_ROOT))
++        result["steward_alerts"] = steward_status_alerts(time.time(), str(CONDUCTOR_ROOT), errors=result["errors"])
 +    except Exception as exc:
 +        result["errors"].append({"where": "steward_status", "error": str(exc)})
 +

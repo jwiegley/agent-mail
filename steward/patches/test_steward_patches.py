@@ -14,6 +14,7 @@ Run from the repository root with John's venv (README.md beside this file):
 
 import importlib.util
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -61,6 +62,11 @@ RECEIPT = '{"message_id":"123","channel_id":"456","mentions":["789"]}'
 def at(stamp):
     """The epoch seconds of STAMP, a UTC time written YYYYMMDDTHHMMSSZ."""
     return datetime.strptime(stamp, "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC).timestamp()
+
+
+def post_stamp(epoch):
+    """EPOCH as the stamp in a message file's name, YYYYMMDDTHHMMSS.ffffffZ."""
+    return datetime.fromtimestamp(epoch, UTC).strftime("%Y%m%dT%H%M%S.%fZ")
 
 
 def line(stamp, tick, open_items, last_post="20261102T171000Z"):
@@ -114,8 +120,23 @@ class StewardFixture(unittest.TestCase):
         self.mailbox = str(self.base / "Mailbox")
         touch_post(self.mailbox, "ingest", ".agent-mail-channel")
 
-    def alerts(self, now):
-        return m.steward_status_alerts(now, self.root, mailbox=self.mailbox)
+    def alerts(self, now, errors=None):
+        """The rule's alerts at NOW. The errors it records for stewards whose files cannot be read go into
+        the list ERRORS when it is given; otherwise there must be none."""
+        found = []
+        alerts = m.steward_status_alerts(now, self.root, mailbox=self.mailbox, errors=found)
+        if errors is None:
+            self.assertEqual(found, [], "the rule recorded errors")
+        else:
+            errors.extend(found)
+        return alerts
+
+    def steward(self, name, channel):
+        """A second steward directory NAME, whose TOPIC.md names +CHANNEL."""
+        directory = Path(self.root) / name
+        directory.mkdir()
+        (directory / "TOPIC.md").write_text(TOPIC.replace("+ingest", f"+{channel}"))
+        return directory
 
     def record_pages(self, *outcomes):
         """Replace Discord delivery with a recorder and return the list of page texts it receives.
@@ -217,7 +238,7 @@ class StatusRule(StewardFixture):
         touch_post(self.mailbox, "ingest", "ingest_20261102T190000.000000Z_from-lfm3_abcdef01.txt")
         self.assertEqual(self.alerts(written + 5 * 3600), [])  # no STATUS yet
         # A closed topic renames STATUS to STATUS-final-<date>, and a writer's temporary file is no STATUS.
-        write_status(self.dir, line("20261102T171500Z", 15, 4), written, name="STATUS-final-20261102")
+        write_status(self.dir, line("20261102T171500Z", 15, 4), written, name="STATUS-final-2026-11-02")
         write_status(self.dir, line("20261102T171500Z", 15, 4), written, name="STATUS.new")
         self.assertEqual(self.alerts(written + 5 * 3600), [])
 
@@ -244,22 +265,109 @@ class StatusRule(StewardFixture):
             with self.subTest(text=text):
                 write_status(self.dir, text, written)
                 self.assertEqual(self.alerts(written + 5 * 3600), [])
-        (self.dir / "STATUS").unlink()
-        (self.dir / "STATUS").mkdir()
-        self.assertEqual(self.alerts(written + 5 * 3600), [])
 
-    def test_a_status_or_topic_that_is_no_regular_file_is_passed_over_without_waiting(self):
+    def test_a_status_or_topic_that_is_no_regular_file_is_an_error_and_never_waited_on(self):
         # Opening a FIFO waits for a writer, which would hold up the whole scanner pass.
         written = at("20261102T171500Z")
+        not_regular = {"where": "steward/conductor-ingest-steward", "error": "STATUS is not a regular file"}
         os.mkfifo(self.dir / "STATUS")
         os.utime(self.dir / "STATUS", (written, written))
-        self.assertEqual(within(5, lambda: self.alerts(written + 5 * 3600)), [])
+        errors = []
+        self.assertEqual(within(5, lambda: self.alerts(written + 5 * 3600, errors)), [])
+        self.assertEqual(errors, [not_regular])
         (self.dir / "STATUS").unlink()
+        (self.dir / "STATUS").mkdir()
+        errors = []
+        self.assertEqual(self.alerts(written + 5 * 3600, errors), [])
+        self.assertEqual(errors, [not_regular])
+        (self.dir / "STATUS").rmdir()
         write_status(self.dir, line("20261102T171500Z", 60, 0), written)
         touch_post(self.mailbox, "ingest", "ingest_20261102T190000.000000Z_from-lfm3_abcdef01.txt")
         (self.dir / "TOPIC.md").unlink()
         os.mkfifo(self.dir / "TOPIC.md")
-        self.assertEqual(within(5, lambda: self.alerts(written + 5 * 3600)), [])
+        errors = []
+        self.assertEqual(within(5, lambda: self.alerts(written + 5 * 3600, errors)), [])
+        self.assertEqual(errors, [{**not_regular, "error": "TOPIC.md is not a regular file"}])
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads a file of mode 000")
+    def test_a_steward_whose_files_cannot_be_read_is_an_error_and_the_rest_are_checked(self):
+        written = at("20261102T171500Z")
+        write_status(self.dir, line("20261102T171500Z", 15, 4), written)
+        fleet = self.steward("fleet-steward", "fleet")  # checked before ingest-steward
+        channel = touch_post(self.mailbox, "fleet", "fleet_20261102T190000.000000Z_from-lfm3_abcdef01.txt").parent
+        # Its STATUS, of mode 000; then its channel, of mode 000, which it lists when nothing is open.
+        for unreadable, status in ((fleet / "STATUS", line("20261102T171500Z", 15, 2)),
+                                   (channel, line("20261102T171500Z", 15, 0))):
+            with self.subTest(unreadable=unreadable.name):
+                write_status(fleet, status, written)
+                unreadable.chmod(0)
+                self.addCleanup(unreadable.chmod, 0o700)
+                errors = []
+                self.assertEqual(self.alerts(written + 40 * 60, errors),
+                                 [{"where": "steward", "kind": "steward", "detail": DETAIL}])
+                self.assertEqual(errors, [{"where": "steward/conductor-fleet-steward",
+                                           "error": f"[Errno 13] Permission denied: '{unreadable}'"}])
+                unreadable.chmod(0o700)
+
+    def test_text_that_is_not_utf8_is_an_error_and_the_rest_are_checked(self):
+        written = at("20261102T171500Z")
+        write_status(self.dir, line("20261102T171500Z", 15, 4), written)
+        fleet = self.steward("fleet-steward", "fleet")  # checked before ingest-steward
+        touch_post(self.mailbox, "fleet", "fleet_20261102T190000.000000Z_from-lfm3_abcdef01.txt")
+        head = b"20261102T171500Z tick=15 open=2 "
+        cases = (
+            ("STATUS", head + b"\xff" + line("20261102T171500Z", 15, 2).encode()[len(head):], TOPIC.encode(),
+             f"STATUS is not UTF-8 (invalid start byte at byte {len(head)})"),
+            # Stale with nothing open, so the rule reads TOPIC.md for the channel.
+            ("TOPIC.md", line("20261102T171500Z", 15, 0).encode(), b"# +fleet\n\xff\n",
+             "TOPIC.md is not UTF-8 (invalid start byte at byte 9)"),
+        )
+        for name, status, topic, error in cases:
+            with self.subTest(file=name):
+                (fleet / "STATUS").write_bytes(status + b"\n")
+                os.utime(fleet / "STATUS", (written, written))
+                (fleet / "TOPIC.md").write_bytes(topic)
+                errors = []
+                self.assertEqual(self.alerts(written + 40 * 60, errors),
+                                 [{"where": "steward", "kind": "steward", "detail": DETAIL}])
+                self.assertEqual(errors, [{"where": "steward/conductor-fleet-steward", "error": error}])
+
+    def test_a_status_rewritten_or_renamed_while_it_is_read(self):
+        written, now = at("20261102T171500Z"), at("20261102T183000Z")
+        nix = self.steward("nix-steward", "nix-config")  # checked after ingest-steward, and stale throughout
+        write_status(nix, line("20261102T150000Z", 60, 1), at("20261102T150000Z"))
+        nix_detail = "conductor-nix-steward STATUS unchanged since 20261102T150000Z (tick 60m, 1 open)"
+        read = m.steward_file_text
+
+        def meanwhile(change):
+            """The rule, with CHANGE made to ingest-steward's STATUS just after the rule reads it."""
+            def read_then_change(path, *args, **kwargs):
+                text = read(path, *args, **kwargs)
+                if path == self.dir / "STATUS":
+                    change()
+                return text
+            return patch.object(m, "steward_file_text", side_effect=read_then_change)
+
+        # The steward's next turn rewrites STATUS between the read and the stat: the old line goes with the
+        # new mtime, so it reads as fresh and never pages under a stamp the file no longer holds.
+        write_status(self.dir, line("20261102T171500Z", 15, 4), written)
+        with meanwhile(lambda: write_status(self.dir, line("20261102T183000Z", 15, 4), now)):
+            self.assertEqual([alert["detail"] for alert in self.alerts(now)], [nix_detail])
+        # The topic closes, renaming STATUS, between the read and the stat: passed over, with no error.
+        write_status(self.dir, line("20261102T171500Z", 15, 4), written)
+        with meanwhile(lambda: (self.dir / "STATUS").rename(self.dir / "STATUS-final-2026-11-02")):
+            self.assertEqual([alert["detail"] for alert in self.alerts(now)], [nix_detail])
+
+    def test_a_post_stamped_more_than_a_day_ahead_does_not_count(self):
+        written = at("20261102T171500Z")
+        stale = written + 3 * 3600
+        write_status(self.dir, line("20261102T171500Z", 60, 0), written)
+        # agent-mail's reader never delivers a post stamped more than 24 hours after its clock.
+        touch_post(self.mailbox, "ingest", f"ingest_{post_stamp(stale + 2 * 86400)}_from-lfm3_abcdef01.txt")
+        self.assertEqual(self.alerts(stale), [])
+        # A post stamped an hour ahead, its sender's clock running fast, is delivered, so it counts.
+        touch_post(self.mailbox, "ingest", f"ingest_{post_stamp(stale + 3600)}_from-lfm3_abcdef02.txt")
+        self.assertEqual(len(self.alerts(stale)), 1)
 
     def test_the_post_clause_needs_last_post_the_topic_and_its_channel(self):
         written = at("20261102T171500Z")
@@ -360,6 +468,18 @@ class MonitorPass(StewardFixture):
         self.assertEqual(self.pages, ["NEED(steward_status): fixture failure"])
         self.assertEqual(self.log.read_text().count("## Steward fixture pass "), 1)
 
+    @unittest.skipIf(os.geteuid() == 0, "root reads a file of mode 000")
+    def test_a_steward_whose_status_cannot_be_read_is_an_error_of_the_pass(self):
+        write_status(self.dir, line("20261102T171500Z", 15, 4), time.time() - 40 * 60)
+        fleet = self.steward("fleet-steward", "fleet")
+        write_status(fleet, line("20261102T171500Z", 15, 2), time.time() - 40 * 60).chmod(0)
+        result = m.monitor([], "Steward fixture pass")
+        self.assertEqual(result["steward_alerts"], [{"where": "steward", "kind": "steward", "detail": DETAIL}])
+        self.assertEqual([error["where"] for error in result["errors"]], ["steward/conductor-fleet-steward"])
+        self.assertIn("Permission denied", result["errors"][0]["error"])
+        self.assertEqual(self.pages, ["NEED(steward): " + DETAIL,
+                                      "NEED(steward/conductor-fleet-steward): " + result["errors"][0]["error"]])
+
 
 # A steward pane after an agent-mail receive: the MCP call's result ends in a peer's question,
 # framed as agent-mail frames a delivered post, above Claude Code's empty editor.
@@ -416,6 +536,48 @@ class McpBullet(unittest.TestCase):
     def test_the_stewards_own_question_after_the_block_still_pages(self):
         pane = MCP_RECEIVE_BLOCK_ENDING_IN_PEER_QUESTION + "\n" + QUESTION_LINE + "\n\n" + EDITOR
         self.assertEqual(m.visible_prompt_or_question(pane), QUESTION_LINE)
+
+
+def final_message(*lines):
+    """A steward's final text as Claude Code shows it, a bullet before its first line and the rest indented,
+    above the empty editor."""
+    return "⏺ " + "\n  ".join(lines) + "\n" + EDITOR
+
+
+def in_template(question):
+    """Whether QUESTION is a question line in steward/CLAUDE.md section 9's template: Q <prefix>-<n>: <text>:
+    A <x>, B <y>? in at most 80 characters, using only letters, digits, spaces and - . , : ( )."""
+    return (len(question) <= 80 and re.fullmatch(r"[A-Za-z0-9 .,:()-]+\?", question) is not None
+            and re.fullmatch(r"Q [a-z0-9-]+-[0-9]+: .+: A .+, B .+\?", question) is not None)
+
+
+class QuestionLine(unittest.TestCase):
+    """The question line against John's filters, the two fixtures spec 6.12 and section 8 promise beside the
+    MCP block: the template pages, and so does a flake input named without github:, which the filters drop."""
+
+    def test_the_question_line_template_pages(self):
+        question = "Q ingest-3: HF org for glm-5.3-fp8: A positron-internal, B positron-ai?"
+        self.assertTrue(in_template(question))
+        pane = final_message(
+            "ingest-3, from glm-5.2: which HF org gets the glm-5.3-fp8 weights. A keeps them internal for the",
+            "eval; B publishes them. I recommend A. The default, hold, applies at 21:00Z. It blocks glm53-fp8.",
+            "Send ingest-steward: ingest-3 A, as a new message.",
+            "",
+            question)
+        self.assertEqual(m.visible_prompt_or_question(pane), question)
+
+    def test_a_flake_input_named_without_github_pages(self):
+        question = "Q nix-2: bump nixpkgs flake input: A now, B after the freeze?"
+        self.assertTrue(in_template(question))
+        detail = ("nix-2, from nix-config: nixpkgs moves to the new release for the kernel fix. A bumps it now;",
+                  "B waits for the freeze to end on 2026-11-05. I recommend B. The default, wait, applies at 21:00Z.",
+                  "Send nix-steward: nix-2 B, as a new message.",
+                  "")
+        self.assertEqual(m.visible_prompt_or_question(final_message(*detail, question)), question)
+        # Written with github:, the same line is dropped by the scanner's filter for flake references, which is
+        # why the template forbids github: (steward/CLAUDE.md section 9).
+        github = question.replace("nixpkgs", "github:nixpkgs")
+        self.assertIsNone(m.visible_prompt_or_question(final_message(*detail, github)))
 
 
 if __name__ == "__main__":
