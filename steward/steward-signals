@@ -15,12 +15,13 @@ so is a file with no such heading. Each member's agent-deck row comes from one r
 that does not answer leaves its members unknown, never stopped.
 
 The census lists names and ctimes only: the message files named in the mailbox's top level and in +CHANNEL/, never a message's text.
-A file counts only when its whole name is a message's, agent-mail's TO_UTC_from-FROM_HEX8.txt, and names are compared whole, so pi
-is never pipeline. With the steward's SENT.log (two phases: `intent <seq> <UTC> <to> <subject> <body-sha>` before each send, `sent
-<seq> <id>` after) and NOTES.log (`<UTC> <id>` for each direct mail a NOTE named) it shows each member's unread mail and the age of its
-oldest, the steward's own NUDGEs still unread, the files in the steward's name that SENT.log does not account for (no sent line, and
-no intent for the same recipient within 10 seconds of the stamp), the mail from one member to another that no NOTE names, and how many
-posts the channel has had since a time, by ctime.
+A file counts only as agent-mail's reader counts it: a regular file, not a symlink or a directory, whose whole name is a message's,
+TO_UTC_from-FROM_HEX8.txt, with names of at most 64 characters that do not end in a hyphen and a stamp that is a time. Names are
+compared whole, so pi is never pipeline. With the steward's SENT.log (two phases: `intent <seq> <UTC> <to> <subject> <body-sha>`
+before each send, `sent <seq> <id>` after) and NOTES.log (`<UTC> <id>` for each direct mail a NOTE named) it shows each member's
+unread mail and the age of its oldest, the steward's own NUDGEs still unread, the files in the steward's name that SENT.log does not
+account for (no sent line names the file, and no intent that has no sent line yet names the same recipient within 10 seconds of the
+stamp), the mail from one member to another that no NOTE names, and how many posts the channel has had since a time, by ctime.
 
 Commands:
   self-test [SECTION ...]
@@ -308,31 +309,43 @@ def stamp_time(stamp):
         return None
 
 
+def parse_name(name):
+    """(to, sender, stamp) from NAME, a message file's name, as agent-mail's parse_msg reads it: None unless NAME fully matches
+    MSG_RE, both names are grammatical (at most 64 characters, not ending in a hyphen) and the stamp is a time."""
+    m = MSG_RE.fullmatch(name)
+    if m is None or not (grammatical(m["to"]) and grammatical(m["sender"])) or stamp_time(m["stamp"]) is None:
+        return None
+    return m["to"], m["sender"], m["stamp"]
+
+
 def scan_entries(where, path):
     """The Entries (see list_entries) for the message files in the directory PATH, which WHERE, "top" or "channel", says it is,
     oldest stamp first."""
     found = []
     with os.scandir(path) as scan:
         for item in scan:
-            m = MSG_RE.fullmatch(item.name)
-            if m is None:
+            parsed = parse_name(item.name)
+            if parsed is None:
                 continue
             try:
+                if not item.is_file(follow_symlinks=False):  # agent-mail's reader counts regular files only
+                    continue
                 ctime = item.stat(follow_symlinks=False).st_ctime
             except OSError:  # the member's reader claimed the file since the listing
                 continue
-            found.append(Entry(where, item.name, m["to"], m["sender"], m["stamp"], ctime))
+            found.append(Entry(where, item.name, *parsed, ctime))
     return sorted(found, key=lambda e: (e.stamp, e.name))
 
 
 def list_entries(mailbox, channel):
     """The message files named in the directory MAILBOX and in its subdirectory +CHANNEL, as Entry(dir, name, to, sender, stamp,
     ctime): the top level first, then the channel, each oldest stamp first (the stamp is the writer's word; a file's ctime says when
-    it arrived here). A name that does not fully match MSG_RE is skipped, so hidden names, the channel's own directory, notes and
-    every other name stay out. Only names and metadata are read: no file is opened and no symlink is followed (a ctime is the
-    entry's own, from lstat; MAILBOX itself is taken as given, since it may be a link, but a +CHANNEL that is a symlink is no
-    channel, as agent-mail has it), and a file gone by the time it is asked about, claimed by its reader, is left out. A channel
-    that is not a directory has no posts; a directory that cannot be listed otherwise raises OSError."""
+    it arrived here). An entry is listed only as agent-mail's reader would count it: its name is a message's (see parse_name, so no
+    hidden name, note or other name, no name over 64 characters or ending in a hyphen, no stamp that is not a time) and it is a
+    regular file, not a symlink or a directory. Only names and metadata are read: no file is opened and no symlink is followed (a
+    ctime is the entry's own, from lstat; MAILBOX itself is taken as given, since it may be a link, but a +CHANNEL that is a symlink
+    is no channel, as agent-mail has it), and a file gone by the time it is asked about, claimed by its reader, is left out. A
+    channel that is not a directory has no posts; a directory that cannot be listed otherwise raises OSError."""
     entries = scan_entries("top", mailbox)
     where = os.path.join(mailbox, f"+{channel}")
     if not os.path.islink(where):
@@ -393,19 +406,21 @@ def entry_age(entry, now):
     return now - (entry.ctime if when is None else when)
 
 
-def intent_times(intents):
-    """The times of the INTENTS, in epoch seconds, by the recipient each names; an intent whose UTC is not a time has none."""
+def open_intent_times(intents):
+    """The times of the INTENTS that no sent line completes, in epoch seconds, by the recipient each names; an intent whose UTC is
+    not a time has none. Only such an intent can account for a file that no sent line names: a completed one is paired with its own
+    file already (spec 6.12)."""
     times = {}
     for intent in intents:
         when = stamp_time(intent.utc)
-        if when is not None:
+        if intent.id is None and when is not None:
             times.setdefault(intent.to, []).append(when)
     return times
 
 
 def announced(entry, planned):
-    """Whether an intent among PLANNED (the times intent_times gives) names the recipient of the Entry ENTRY, a channel as +NAME, at a
-    time within INTENT_WINDOW_S seconds of its stamp. An entry whose stamp is not a time has no such intent."""
+    """Whether an intent among PLANNED (the times open_intent_times gives) names the recipient of the Entry ENTRY, a channel as
+    +NAME, at a time within INTENT_WINDOW_S seconds of its stamp. An entry whose stamp is not a time has no such intent."""
     when = stamp_time(entry.stamp)
     recipient = entry.to if entry.dir == "top" else f"+{entry.to}"
     return when is not None and any(abs(t - when) <= INTENT_WINDOW_S for t in planned.get(recipient, ()))
@@ -437,13 +452,13 @@ def census(entries, members, steward, sent, notes, nudge_ids, now):
     STEWARD, as of NOW in epoch seconds. SENT is read_sent_log's (intents, sent_ids), NOTES read_notes_log's set of ids and
     NUDGE_IDS the set of the steward's NUDGE ids (see nudge_ids). A file's id is its name without .txt, and its age is NOW less the
     time of its stamp, or less its ctime when the stamp is not a time. Names are compared whole, never by prefix, so pi is not
-    pipeline. A file from STEWARD is accounted for by a sent line that names its id, or by an intent that names its recipient (a
-    channel as +NAME) within INTENT_WINDOW_S seconds of its stamp; a stamp that is not a time matches no intent. Only names and
-    metadata are used: no file is opened."""
+    pipeline. A file from STEWARD is accounted for by a sent line that names its id, or by an intent that no sent line completes and
+    that names its recipient (a channel as +NAME) within INTENT_WINDOW_S seconds of its stamp; a stamp that is not a time matches no
+    intent. Only names and metadata are used: no file is opened."""
     intents, sent_ids = sent
     ages = {m.name: [] for m in members}  # the ages of the top-level files addressed to each member
     nudges_unread, unmatched_own, transit_without_note, post_ctimes = [], [], 0, []
-    planned = intent_times(intents)
+    planned = open_intent_times(intents)
     for e in entries:
         ident = entry_id(e)
         if e.dir == "channel":
@@ -557,8 +572,9 @@ def mailbox(d, top=(), channel=None, members_checked=None):
 
 
 def entries_named(*names, channel=None, ctime=None):
-    """The Entry that list_entries would give for each message file name in NAMES: a channel entry when the name is to CHANNEL, a
-    top-level one otherwise. Its ctime is CTIME, or the time of its own stamp when CTIME is None."""
+    """An Entry for each message file name in NAMES, shaped as list_entries shapes one: a channel entry when the name is to CHANNEL, a
+    top-level one otherwise. Its ctime is CTIME, or the time of its own stamp when CTIME is None. The name need only fit MSG_RE, so
+    a check can hand the census an Entry that list_entries would refuse, such as one whose stamp is not a time."""
     entries = []
     for name in names:
         m = MSG_RE.fullmatch(name)
@@ -1057,7 +1073,9 @@ def test_helpers_build_what_the_checks_name(d):
 
 
 def test_names_are_exact(d):
-    box = mailbox(d, top=[f"pipeline_{stamp(1)}_from-glm-5.2_aaaaaaaa.txt", f"pi_{stamp(2)}_from-nix_bbbbbbbb.txt", ".pipeline-claimed-1-x-y.txt", "pipeline.md"],
+    not_names = [f"{'p' * 65}_{stamp(4)}_from-nix_dddddddd.txt", f"pipeline_{stamp(5)}_from-{'n' * 65}_eeeeeeee.txt",  # a name over 64 characters, as recipient and as sender
+                 f"pipeline-_{stamp(6)}_from-nix_ffffffff.txt", f"pipeline_{stamp(7)}_from-nix-_99999999.txt"]       # and one ending in a hyphen
+    box = mailbox(d, top=[f"pipeline_{stamp(1)}_from-glm-5.2_aaaaaaaa.txt", f"pi_{stamp(2)}_from-nix_bbbbbbbb.txt", ".pipeline-claimed-1-x-y.txt", "pipeline.md", *not_names],
                   channel=("ingest", [f"ingest_{stamp(3)}_from-glm-5.3-flash_cccccccc.txt"]))
     e = list_entries(box, "ingest")
     ok([x.name for x in e if x.dir == "top"] == [f"pipeline_{stamp(1)}_from-glm-5.2_aaaaaaaa.txt", f"pi_{stamp(2)}_from-nix_bbbbbbbb.txt"], "census: hidden and malformed names skipped")
@@ -1156,23 +1174,39 @@ def test_only_whole_message_names_are_listed(d):
            "pipeline--20261030T000002Z--from-catalog.md"]  # no two of these differ only in case, which a case-insensitive filesystem would merge
     box = mailbox(d, top=[*held, *odd, good])
     ok([x.name for x in list_entries(box, "ingest")] == [good], "census: only a name that is wholly a message's is listed, not a held file or a near miss")
+    longest = f"{'p' * 64}_{stamp(2)}_from-{'n' * 64}_0123abce.txt"  # 64 characters is the most a name may have
+    ok([x.name for x in list_entries(mailbox(d, top=[longest]), "ingest")] == [longest], "census: a name of 64 characters is not too long")
 
 
-def test_list_entries_follows_no_symlink(d):
-    name, post = f"pipeline_{stamp(1)}_from-nix_00000001.txt", f"ingest_{stamp(2)}_from-nix_00000002.txt"
-    box = mailbox(d)
-    link = os.path.join(box, name)
-    os.symlink(os.path.join(d, "nowhere"), link)
-    e = list_entries(box, "ingest")
-    ok([x.name for x in e] == [name] and e[0].ctime == os.lstat(link).st_ctime, "census: a symlink with a message's name is listed by its own ctime, never followed")
+def test_a_stamp_that_is_not_a_time_is_not_listed(d):
+    good, post = f"pipeline_{stamp(1)}_from-nix_00000001.txt", f"ingest_{stamp(2)}_from-nix_00000002.txt"
+    # Each has the shape of a stamp, and none is a time: a month 13, an hour 25, a minute 60, a second 60, November 31 and February 30.
+    not_times = ["20261302T200000.000000Z", "20261102T250000.000000Z", "20261102T206000.000000Z", "20261102T200060.000000Z", "20261131T200000.000000Z", "20260230T200000.000000Z"]
+    box = mailbox(d, top=[good, *(f"pipeline_{t}_from-nix_0000000{i}.txt" for i, t in enumerate(not_times, start=3))],
+                  channel=("ingest", [post, *(f"ingest_{t}_from-nix_0000000{i}.txt" for i, t in enumerate(not_times, start=3))]))
+    ok([(x.dir, x.name) for x in list_entries(box, "ingest")] == [("top", good), ("channel", post)],
+       "census: a name whose stamp is not a time is not listed, as agent-mail's reader skips it, whatever its ctime")
+
+
+def test_only_regular_files_are_listed(d):
+    good, post = f"pipeline_{stamp(1)}_from-nix_00000001.txt", f"ingest_{stamp(2)}_from-nix_00000002.txt"
+    box = mailbox(d, top=[good], channel=("ingest", [post]))
+    write(d, "real.txt", "")  # a regular file for a link to point at
+    for to, where in (("pipeline", box), ("ingest", os.path.join(box, "+ingest"))):
+        os.symlink(os.path.join(d, "real.txt"), os.path.join(where, f"{to}_{stamp(3)}_from-nix_00000003.txt"))  # a link to a regular file is not one itself
+        os.symlink(os.path.join(d, "nowhere"), os.path.join(where, f"{to}_{stamp(4)}_from-nix_00000004.txt"))  # nor is a link to nothing
+        os.mkdir(os.path.join(where, f"{to}_{stamp(5)}_from-nix_00000005.txt"))
+    ok([(x.dir, x.name) for x in list_entries(box, "ingest")] == [("top", good), ("channel", post)],
+       "census: a symlink or a directory with a message's name is not listed, in the top level or in a channel, as agent-mail counts regular files only")
+    box = mailbox(d, top=[good])
     elsewhere = os.path.join(d, "elsewhere")
     os.mkdir(elsewhere)
     write(elsewhere, post, "")
     os.symlink(elsewhere, os.path.join(box, "+ingest"))
-    ok([x.name for x in list_entries(box, "ingest")] == [name], "census: a channel that is a symlink is no channel, so it lists nothing")
+    ok([x.name for x in list_entries(box, "ingest")] == [good], "census: a channel that is a symlink is no channel, so it lists nothing")
     shortcut = os.path.join(d, "shortcut")
     os.symlink(box, shortcut)
-    ok([x.name for x in list_entries(shortcut, "ingest")] == [name], "census: the mailbox itself may be reached through a symlink")
+    ok([x.name for x in list_entries(shortcut, "ingest")] == [good], "census: the mailbox itself may be reached through a symlink")
 
 
 @contextlib.contextmanager
@@ -1269,9 +1303,24 @@ def test_own_files_match_intents_by_recipient_and_time(d):
     accounted = own("pipeline", stamp(700), "0000000b")               # no intent, but a sent line names it
     c = census(entries_named(accounted, *elsewhere), CENSUS_MEMBERS, STEWARD, ([], set(ids(accounted))), set(), set(), NOW)
     ok(c.unmatched_own == [], "census: a file from another sender, or one a sent line names, is not disputed")
-    odd = own("lfm3", "20261340T250000.000000Z", "0000000c")
+    odd = own("lfm3", "20261340T250000.000000Z", "0000000c")  # an Entry made by hand: list_entries lists no such name
     c = census(entries_named(odd, ctime=STAMP_BASE.timestamp()), CENSUS_MEMBERS, STEWARD, sent, set(), set(), NOW)
-    ok(c.unmatched_own == ids(odd), "census: a stamp that is not a time matches no intent, whatever its ctime")
+    ok(c.unmatched_own == ids(odd), "census: an Entry whose stamp is not a time matches no intent, whatever its ctime")
+
+
+def test_a_completed_intent_accounts_for_its_own_file_only(d):
+    first = "lfm3_20261102T200003.000000Z_from-conductor-ingest-steward_00000001"   # 3 s after intent 1
+    second = "lfm3_20261102T200008.000000Z_from-conductor-ingest-steward_00000002"  # 5 s after the first, to the same recipient
+    e = entries_named(f"{first}.txt", f"{second}.txt")
+    done = read_sent_log(write(d, "SENT.log", f"intent 1 20261102T200000Z lfm3 NUDGE_a ab12\nsent 1 {first}\n"))
+    ok(census(e, CENSUS_MEMBERS, STEWARD, done, set(), set(), NOW).unmatched_own == [second],
+       "census: an intent that a sent line completes accounts for that file only, not another to the same recipient within 10 s")
+    pending = read_sent_log(write(d, "SENT-pending.log", "intent 1 20261102T200000Z lfm3 NUDGE_a ab12\n"))
+    ok(census(entries_named(f"{first}.txt"), CENSUS_MEMBERS, STEWARD, pending, set(), set(), NOW).unmatched_own == [],
+       "census: an intent with no sent line accounts for the file written within 10 s of it")
+    both = read_sent_log(write(d, "SENT-both.log", f"intent 1 20261102T200000Z lfm3 NUDGE_a ab12\nsent 1 {first}\nintent 2 20261102T200005Z lfm3 NUDGE_b cd34\n"))
+    ok(census(e, CENSUS_MEMBERS, STEWARD, both, set(), set(), NOW).unmatched_own == [],
+       "census: a completed intent does not hide the open intent that accounts for the second file")
 
 
 def test_nudges_and_notes(d):
@@ -1309,9 +1358,10 @@ def test_unread_counts_and_ages(d):
 
 
 def test_age_falls_back_to_ctime(d):
-    odd = "pipeline_20261340T250000.000000Z_from-lfm3_00000001"  # in the shape of a stamp, but month 13 is not a time
+    # list_entries lists no such name, so the Entry is made by hand: a stamp in shape, but month 13 is not a time.
+    odd = "pipeline_20261340T250000.000000Z_from-lfm3_00000001"
     c = census(entries_named(f"{odd}.txt", ctime=NOW - 90), members_named("pipeline"), STEWARD, ([], set()), set(), {odd}, NOW)
-    ok(c.unread["pipeline"] == (1, 90.0) and c.nudges_unread == [(odd, 90.0)], "census: a stamp that is not a time gives the age from the file's ctime")
+    ok(c.unread["pipeline"] == (1, 90.0) and c.nudges_unread == [(odd, 90.0)], "census: an Entry whose stamp is not a time gives its age from the file's ctime")
 
 
 def test_posts_since(d):
@@ -1339,12 +1389,14 @@ def section_census(d):
     test_stamp_time(d)
     test_list_entries_fields_and_order(d)
     test_only_whole_message_names_are_listed(d)
-    test_list_entries_follows_no_symlink(d)
+    test_a_stamp_that_is_not_a_time_is_not_listed(d)
+    test_only_regular_files_are_listed(d)
     test_listing_order_is_the_stamps_not_the_filesystems(d)
     test_list_entries_in_a_changing_mailbox(d)
     test_listing_opens_no_file(d)
     test_unmatched_own_files(d)
     test_own_files_match_intents_by_recipient_and_time(d)
+    test_a_completed_intent_accounts_for_its_own_file_only(d)
     test_nudges_and_notes(d)
     test_transit_counts_member_to_member_mail_only(d)
     test_unread_counts_and_ages(d)
