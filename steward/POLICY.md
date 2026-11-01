@@ -2,7 +2,7 @@
 
 The thresholds and self-caps a topic steward works by, one row for each key. They live here and nowhere else: the steward reads this file at the start of every turn, and its instructions refer to the rows by key. John edits the copy in the conductor's directory, not the one in the checkout; a change takes effect at the steward's next turn.
 
-`steward-signals` refuses a file that lacks a key, lists a key twice, has a key it does not know, or gives a key a value it cannot use, and it names the key. Nothing falls back to a default, so keep every row and spell each key exactly. Every value is a number above zero, except the two summary rows: summary_local_time is a time of day as HH:MM, and summary_tz is a tz database name.
+`steward-signals` refuses a file that lacks a key, lists a key twice, has a key it does not know, or gives a key a value it cannot use, and it names the key. Nothing falls back to a default, so keep every row and spell each key exactly. Every value is a number above zero of at most 12 digits, except the two summary rows; the six counts (nudges_per_item_day, offer_items, sends_per_turn, sends_per_hour, log_days, ledger_kb) must be whole numbers. The summary rows are summary_local_time, a time of day as HH:MM, and summary_tz, a tz database name.
 
 | key | value | meaning |
 |---|---|---|
