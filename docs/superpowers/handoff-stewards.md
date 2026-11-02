@@ -4,7 +4,7 @@ Frozen plan: `docs/superpowers/plans/2026-10-31-agent-mail-stewards.md` (approve
 
 ## Refocus checkpoint
 
-- Last check: 2026-11-01 15:26 PST. Goal unchanged. Tasks 1 to 9 complete and audited; Task 10 committed (5babf37), reviewed (Needs fixes: one spec fixture the plan omitted, five minors) and audited (no blocker), its fix round committed (f88c3cd) and under scoped re-review; main moved to 8723960 (docs only), so a restack is due at Task 10's close; Tasks 11 and 12 pending. No scope creep (a misaddressed mail from the nix session was answered and resolved without work). Next deadline: 2026-11-01 16:26 PST. Next step: the re-review's verdict, close Task 10, commit this file, restack onto 8723960, dispatch Task 11 (reusing /Users/johnw/Products/steward-patch-scratch/, whose monitor_sessions.py is the round-1 patched copy), then Task 12 with the accumulated runbook carries, the final review.
+- Last check: 2026-11-01 16:26 PST. Goal unchanged. Tasks 1 to 10 complete and audited; Task 11 committed (5be4d9c the carries, b2f8fcf the bridge patch), reviewed (Needs fixes: `-N -F0` on the patch commands, a test for the author and channel gate; eight minors) and audited (no blocker), its fix round 1 running on impl-task-11 (BASE b2f8fcf); main at 1df19f2 (docs only ahead of the branch), restack due at Task 11's close; Task 12 pending with its carries in `.superpowers/sdd/2026-10-31-agent-mail-stewards/task-12-carries.md`. No scope creep. Next deadline: 2026-11-01 17:26 PST. Next step: the fix commit, its scoped re-review, close Task 11, commit this file, restack, dispatch Task 12 (the README, the day-zero runbook and the top-level pointer), then the final whole-branch review on the most capable model, one fix wave at most, the final fess audit, the restack, the workspace deletion and the finishing steps; nothing pushed or merged without John.
 
 ## Definition of Done (frozen)
 
@@ -28,7 +28,7 @@ Frozen plan: `docs/superpowers/plans/2026-10-31-agent-mail-stewards.md` (approve
 | 8 SHARED.md, HEARTBEAT_RULES.md | complete | 26a00c7 (Task 7's carries), a89e677 | Approved (5 minors carried to Task 9) | no blocker; 4 Minor (3 carried to Task 9, 1 accepted), 5 nits noted for the final review |
 | 9 WORKER.md | complete | 6d942df (Task 8's carries), 23bf16c, then the round: cab4f13, 6fba08e, cad1072, 9757020, e1e2a09 | Needs fixes (2 Important, 10 Minor), then round 1 all addressed; 2 comment minors carried to Task 12 or the final wave | no blocker on 89fd4bb..23bf16c (its Medium fixed in the round); the fix commits are covered by the re-review |
 | 10 scanner patch | complete | 5babf37, f88c3cd | Needs fixes (1 Important: a spec fixture the plan omitted; 5 minors), then round 1 all addressed; 3 minors and one README fix carried to Task 11 | no blocker; its Medium (the same fixtures) fixed in the round; the fix commit is covered by the re-review |
-| 11 bridge patch | | | | |
+| 11 bridge patch | complete | 5be4d9c (Task 10's carries), b2f8fcf, then the round: 5706fb4, bd8862b | Needs fixes (2 Important: `-N -F0` on the patch commands, a gate test; 8 minors), then round 1 all addressed; 1 README minor carried to Task 12 | no blocker; its Minors were the review's items, fixed in the round; the fix commits are covered by the re-review |
 | 12 README, runbook, pointer | | | | |
 
 ## Parallel work John approved
@@ -40,7 +40,7 @@ Frozen plan: `docs/superpowers/plans/2026-10-31-agent-mail-stewards.md` (approve
 ## Attempt counts (reset when the gate passes)
 
 - Task 10 implementer stall: attempt 1 (impl-task-10, opus) went silent after its GREEN runs at 12:47 PST and was stopped at 13:38; attempt 2 (impl-task-10b, opus) finished from its draft at 13:59 (5babf37). Resolved.
-- None open (Task 10's review gate passed at round 1).
+- None open (Task 11's review gate passed at round 1).
 
 ## Independence probe
 
@@ -75,6 +75,6 @@ Frozen plan: `docs/superpowers/plans/2026-10-31-agent-mail-stewards.md` (approve
 
 ## How to resume
 
-1. Re-read the wiggum and refocus skills, the frozen plan, the spec's section 11, this file and the SDD ledger; refocus; check the watcher and the live tree's HEAD. The live agent-mail checkout was last verified at 8723960, agent-mail 2.1.0 (2026-11-01 15:20 PST, 456 checks); rerun its self-test whenever its HEAD moves. Mailbox after a restart: hera now has agent-mail 2.0.0 and its MCP server (mail-dev's note of 23:27 PDT), so join with `/wiggum join the mailbox as mail-conductor` (the `channels` tool for the binding, `receive` with `me`, the doorbell watch) instead of the old /setup-mailbox procedure; until then the CLI watcher stays.
+1. Re-read the wiggum and refocus skills, the frozen plan, the spec's section 11, this file and the SDD ledger; refocus; check the watcher and the live tree's HEAD. The live agent-mail checkout was last verified at 697e67d, agent-mail 2.1.0 (2026-11-01 16:34 PST, 456 checks); rerun its self-test whenever its HEAD moves. Mailbox after a restart: hera now has agent-mail 2.0.0 and its MCP server (mail-dev's note of 23:27 PDT), so join with `/mailbox mail-conductor` (mail-dev's correction of 2026-11-01 15:53 PST: the earlier "/wiggum join the mailbox as NAME" sentence is refused since nix-config 465f9109; the `channels` tool for the binding, `receive` with `me`, the doorbell watch) instead of the old /setup-mailbox procedure; until then the CLI watcher stays.
 2. Baseline: `python3 -I ./agent-mail self-test` and, once Task 1 exists, `python3 -I steward/steward-signals self-test`; `git log --oneline main..HEAD`.
-3. Resume the SDD loop at the first task without a `complete` line in the ledger (a task whose last line is a fix round resumes at the next round). Dispatch the fess audit for any completed task whose row above has no fess entry.
+3. Resume the SDD loop at the first task without a `complete` line in the ledger (a task whose last line is a fix round resumes at the next round). Dispatch the fess audit for any completed task whose row above has no fess entry. Task 12's dispatch carries `.superpowers/sdd/2026-10-31-agent-mail-stewards/task-12-carries.md` (the runbook and README facts and rulings collected from Tasks 7 to 11) beside its brief.
