@@ -19,7 +19,46 @@
  
  
  def run(args: list[str], timeout: int = 20) -> subprocess.CompletedProcess[str]:
-@@ -742,6 +747,19 @@
+@@ -203,8 +208,22 @@
+ def capture_tmux(target: str, lines: int = 260) -> str:
+     if not target:
+         return ""
+-    proc = run(["tmux", "capture-pane", "-p", "-S", f"-{lines}", "-t", str(target)], timeout=10)
+-    return proc.stdout if proc.returncode == 0 else ""
++    proc = run(["tmux", "capture-pane", "-p", "-J", "-S", f"-{lines}", "-t", str(target)], timeout=10)
++    return trim_trailing_spaces(proc.stdout) if proc.returncode == 0 else ""
++
++
++def trim_trailing_spaces(text: str) -> str:
++    """TEXT, a pane captured with ``tmux capture-pane -J``, less the spaces at each line's end.
++
++    -J joins the lines that tmux wrapped at the pane's edge, so that a line
++    longer than the pane, such as a question, is read whole.  Unlike a
++    capture without it, it also keeps the spaces that a program wrote at a
++    line's end, which Claude Code's rows carry.  Those would widen the gaps
++    that SAFE_PATTERNS bound between the words of an error that a line break
++    parts, so they go, as a capture without -J drops them: every check reads
++    the lines it read before, a line that tmux wrapped joined.
++    """
++    return re.sub(r" +$", "", text, flags=re.M)
+ 
+ 
+ def tmux_exists(target: str) -> bool:
+@@ -401,11 +420,11 @@
+ def capture_remote_direct(host: str, target: str, lines: int = 260) -> tuple[str, str | None]:
+     proc = ssh(
+         host,
+-        remote_tmux_command(f"tmux capture-pane -p -S -{int(lines)} -t {shlex.quote(str(target))}"),
++        remote_tmux_command(f"tmux capture-pane -p -J -S -{int(lines)} -t {shlex.quote(str(target))}"),
+         timeout=15,
+     )
+     if proc.returncode == 0:
+-        return proc.stdout, None
++        return trim_trailing_spaces(proc.stdout), None
+     return "", (proc.stderr or proc.stdout).strip() or f"rc={proc.returncode}"
+ 
+ 
+@@ -742,6 +761,19 @@
      result["questions"].append(item)
  
  
@@ -39,7 +78,7 @@
  def visible_prompt_or_question(text: str) -> str | None:
      lines = [clean(line) for line in text.splitlines() if clean(line)]
      # Native question forms remain actionable even when '?' is mid-wrap or
-@@ -810,7 +828,7 @@
+@@ -810,7 +842,7 @@
              last_assistant = index
              if "User answered Claude's questions" in lines[index]:
                  return None
@@ -48,7 +87,7 @@
                  return None
              lines = lines[index:]
              break
-@@ -1133,6 +1151,129 @@
+@@ -1133,6 +1165,129 @@
      state["attention_indicator"] = {**result["indicator"], "checked_at": result["timestamp"]}
  
  
@@ -178,7 +217,7 @@
  def deliver_attention(state: dict, result: dict) -> None:
      """Send actionable alerts; retain deduplication only after confirmed delivery."""
      try:
-@@ -1152,6 +1293,8 @@
+@@ -1152,6 +1307,8 @@
          {"where": item["where"], "kind": "stall", "detail": "No meaningful pane progress for the policy threshold."}
          for item in result["stalled_sessions"]
      )
@@ -187,7 +226,7 @@
      recovered = {
          item["where"] for item in result["actions"]
          if item["action"] == "Continue" and item.get("reason") == "errored-session recovery"
-@@ -1211,6 +1354,7 @@
+@@ -1211,6 +1368,7 @@
          "actions": [],
          "questions": [],
          "stalled_sessions": [],
@@ -195,7 +234,7 @@
          "errors": [],
          "session_ids": {},
      }
-@@ -1614,6 +1758,12 @@
+@@ -1614,6 +1772,12 @@
              finally:
                  run(["tmux", "kill-session", "-t", scan], timeout=10)
  
