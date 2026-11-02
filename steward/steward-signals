@@ -4325,6 +4325,8 @@ def test_claude_md_keeps_its_state_unambiguous(d):
     state = [s for s in sentences(t) if s.startswith("`steward-state.json` holds")]
     ok(len(trigger) == 1 and "`last_summary_date`" in trigger[0] and len(state) == 1 and "`last_summary_date`" in state[0],
        "docs: the summary's trigger compares the local date of the last summary, which steward-state.json keeps beside its id, whose stamp is UTC")
+    ok(len(trigger) == 1 and "`last_summary_date` being absent or an earlier date" in trigger[0],
+       "docs: the summary's trigger also posts when last_summary_date is absent, as it is on a topic's first day until the first summary sets it")
     decisions = [line for line in t.splitlines() if line.startswith("D-<n> ")]
     ok(len(decisions) == 1 and decisions[0].count("|") == 3, "docs: the DECISIONS.md line has three bars, between its four fields, and its by: alternatives are in prose")
 
@@ -4381,22 +4383,46 @@ def test_claude_md_follows_the_worked_example_and_its_keys(d):
        f"docs: a metrics key is described as the helper refuses it: words starting with a lower-case letter, at most {MAX_KEY_WORDS} of them and {MAX_KEY_CHARS} characters")
 
 
+# How long the question line may be: spec decision 4 caps it at 80 characters, and the final review (I-3) added a margin, since Claude Code indents the later
+# lines of the final text by two columns, so that an 80-character line can wrap in a pane 80 wide, and the scanner, which captures the pane without joining
+# wrapped lines, would page the line's tail without the question's id. These are the only sentences of section 9 that name either number, each as pinned: the
+# cap with its margin, and the 4-hour form inside the margin.
+QUESTION_LENGTH_SENTENCES = (
+    "It is at most 80 characters, and keep it under 76, since your final text is indented two columns in a pane that may be 80 wide.",
+    "- After 4 hours unanswered, change its text once, still under 76 characters, so that the scanner pages it again:")
+
+
+def test_claude_md_keeps_the_question_line_inside_the_pane(d):
+    found = tuple(s for s in sentences(claude_section(claude_md(), 9)) if re.search(r"\b(?:76|80)\b", s))
+    ok(found == QUESTION_LENGTH_SENTENCES,
+       "docs: section 9 of CLAUDE.md caps the question line at 80 characters and keeps it, and its 4-hour form, under 76, for the two columns that indent it "
+       f"in a pane that may be 80 wide, as pinned (got {without_question_marks(repr(found))})")
+
+
 # How a steward knows its channel, from Task 12's review (Important 4): the channel in TOPIC.md's heading once TOPIC.md exists; before that, the one John named
 # with the channel control since the last close, which a channel whose purpose names no steward (+steward-test's) needs; else the one whose purpose names the
 # steward. The re-review of that fix (N1 and N4) added how the control's naming is held until TOPIC.md, replaced by a later one and ended by close, and that a
-# channel typed while a topic is open is refused, so that day zero's naming cannot outlive day zero. The definition, the control's row, section 3's step 2 and
-# section 13's step 1 are each pinned whole, so that none of them can turn back to the purposes alone, or to a naming that never ends, unseen.
-CHANNEL_DEFINITION = ("- `<channel>` is your channel's name without its `+`: the one in TOPIC.md's heading once TOPIC.md exists; before that, the one John has named with "
-                      "`channel` since your last `close` (section 9), or else the channel whose purpose names you (`ingest`, `nix-config`).")
+# channel typed while a topic is open is refused, so that day zero's naming cannot outlive day zero. The final review (I-1) found that a restart after close
+# reopened the topic, since close leaves TOPIC.md in place: TOPIC.md's heading now counts only while a topic is open, which steward-state.json's closed key ends;
+# a fresh context that finds closed starts and writes nothing; a new topic's start removes closed; and the control takes a channel once the topic is closed,
+# though the old TOPIC.md is still there. The definition, the control's row, section 3's step 2 and section 13's step 1 are each pinned whole, and section 3's
+# one sentence on closed is pinned as the only one there, so that none of them can turn back to the purposes alone, to a naming that never ends, or to a
+# closed topic that a restart opens again, unseen.
+CHANNEL_DEFINITION = ("- `<channel>` is your channel's name without its `+`: the one in TOPIC.md's heading while a topic is open (TOPIC.md exists and steward-state.json "
+                      "holds no `closed`); otherwise, the one John has named with `channel` since your last `close` (section 9), or else the channel whose purpose "
+                      "names you (`ingest`, `nix-config`).")
 CHANNEL_ROW = ("| `channel <name>` | take `+<name>` as your channel, even when its purpose names no steward: hold the name until step 3 of section 3 writes TOPIC.md, "
                "whose heading, `# +<name>`, then carries it, and write no TOPIC.md before then. John types it before `purpose` and `members`, for a channel whose "
-               "purpose does not name you. A later `channel` typed before TOPIC.md exists replaces the earlier one, and `close` ends the naming. While a topic is "
-               "open, refuse it in one line: \"close the topic first\" |")
+               "purpose does not name you. A later `channel` typed before section 3 writes TOPIC.md replaces the earlier one, and `close` ends the naming. While a "
+               "topic is open, refuse it in one line: \"close the topic first\"; once `close` has set `closed`, take it, though the old TOPIC.md is still there |")
 START_CHANNEL_STEP = ("2. Call `channels`: `+<channel>` must exist, with a purpose that names you unless John named the channel with `channel`, which needs no such "
                       "purpose. If it is missing, tell John in one line; only he creates channels.")
-RESET_CHANNEL_STEP = ("1. Re-read this file, `POLICY.md`, `TOPIC.md`, `LEDGER.md` and `steward-state.json`. Your channel is the one in TOPIC.md's heading, never one "
-                      "taken again from the channels' purposes. With no TOPIC.md there is no topic yet: stop here, subscribing to nothing and arming neither the "
-                      "doorbell nor the tick, until John gives you a topic (section 3).")
+START_REOPEN_SENTENCE = "Then remove `closed` from steward-state.json if a closed topic left it there."  # the end of section 3's step 3, which writes TOPIC.md
+RESET_CHANNEL_STEP = ("1. Re-read this file, `POLICY.md`, `TOPIC.md`, `LEDGER.md` and `steward-state.json`. If steward-state.json holds `closed`, the topic is closed: "
+                      "stop here, subscribing to nothing, arming nothing and writing nothing, and end with one status line, until John types `channel` and gives "
+                      "you a new topic (section 3). Your channel is the one in TOPIC.md's heading, never one taken again from the channels' purposes. With no "
+                      "TOPIC.md there is no topic yet: stop here, subscribing to nothing and arming neither the doorbell nor the tick, until John gives you a "
+                      "topic (section 3).")
 # What the steward does with the message agent-deck types into a conductor's pane at each start or restart, from the same review (Important 2): that message asks
 # for agent-deck inbox drain and ./state.json, which section 1 and the rest of section 2 forbid, so section 2 names it among the shared parts that do not apply.
 RECOVERY_PART = ("- **agent-deck's recovery turn:** at each start or restart, agent-deck types a message that begins `[CONDUCTOR RECOVERY]` into your pane, asking "
@@ -4407,16 +4433,18 @@ RECOVERY_PART = ("- **agent-deck's recovery turn:** at each start or restart, ag
 def test_claude_md_takes_its_channel_from_topic_md_or_from_john(d):
     t = claude_md()
     ok([line for line in t.splitlines() if line.startswith("- `<channel>` is ")] == [CHANNEL_DEFINITION],
-       "docs: CLAUDE.md defines <channel> as pinned: TOPIC.md's heading once it exists, before that the channel John named with channel since the last close, "
-       "else the one whose purpose names the steward")
+       "docs: CLAUDE.md defines <channel> as pinned: TOPIC.md's heading while a topic is open, TOPIC.md there and no closed key, otherwise the channel John "
+       "named with channel since the last close, else the one whose purpose names the steward")
     ok([line for line in claude_section(t, 9).splitlines() if line.startswith("| `channel ")] == [CHANNEL_ROW],
        "docs: section 9 of CLAUDE.md has the channel control as pinned, which takes a channel whose purpose names no steward, holds it until TOPIC.md's heading "
-       "carries it, lets a later channel replace it and close end it, and refuses it while a topic is open")
+       "carries it, lets a later channel replace it and close end it, refuses it while a topic is open, and takes it once the topic is closed")
     ok([line for line in claude_section(t, 3).splitlines() if line.startswith("2. ")] == [START_CHANNEL_STEP],
        "docs: step 2 of section 3 of CLAUDE.md accepts a channel John named with channel, as pinned")
+    ok([s for s in sentences(claude_section(t, 3)) if "`closed`" in s] == [START_REOPEN_SENTENCE],
+       "docs: section 3 of CLAUDE.md removes closed when a new topic starts, in its one sentence on closed, as pinned")
     ok([line for line in claude_section(t, 13).splitlines() if line.startswith("1. ")] == [RESET_CHANNEL_STEP],
-       "docs: step 1 of section 13 of CLAUDE.md takes the channel from TOPIC.md's heading, never from the purposes again, and starts nothing without a TOPIC.md, "
-       "as pinned")
+       "docs: step 1 of section 13 of CLAUDE.md takes the channel from TOPIC.md's heading, never from the purposes again, starts nothing without a TOPIC.md, "
+       "and starts and writes nothing on a closed topic, as pinned")
 
 
 def test_claude_md_answers_agent_decks_recovery_turn(d):
@@ -4621,7 +4649,7 @@ DOCS_CHECKS = (test_claude_md, test_claude_md_headings_are_in_order, test_claude
                test_claude_md_counts_a_reset_only_for_a_fresh_context, test_claude_md_keeps_its_state_unambiguous, test_claude_md_names_its_system_tools_by_path,
                test_claude_md_keeps_the_never_rules_of_spec_7_1, test_claude_md_prints_no_question_mark_in_its_templates, test_claude_md_routes_requests_and_marks_joins,
                test_claude_md_reminds_of_notes_once, test_claude_md_follows_the_worked_example_and_its_keys,
-               test_claude_md_takes_its_channel_from_topic_md_or_from_john, test_claude_md_answers_agent_decks_recovery_turn, test_shared_and_heartbeat,
+               test_claude_md_keeps_the_question_line_inside_the_pane, test_claude_md_takes_its_channel_from_topic_md_or_from_john, test_claude_md_answers_agent_decks_recovery_turn, test_shared_and_heartbeat,
                test_shared_and_heartbeat_forbid_what_spec_6_4_lists_and_grant_nothing, test_shared_and_heartbeat_hold_exactly_their_pinned_sentences,
                test_worker_md, test_worker_md_matches_what_claude_md_files_and_sends, test_worker_md_keeps_its_checks_and_safety_sentences_as_pinned,
                test_worker_md_has_no_silence_rule, test_steward_readme_and_pointer)
@@ -4764,7 +4792,28 @@ def test_docs_checks_catch_each_pinned_regression(d):
         ("close no longer ending the naming", ", and `close` ends the naming", "", "docs: section 9 of CLAUDE.md has the channel control as pinned"),
         ("a TOPIC.md written for its heading alone", ", and write no TOPIC.md before then", ", and write TOPIC.md with that heading at once",
          "docs: section 9 of CLAUDE.md has the channel control as pinned"),
-        ("a naming that no close ends, in the definition", " since your last `close`", "", "docs: CLAUDE.md defines <channel> as pinned"))
+        ("a naming that no close ends, in the definition", " since your last `close`", "", "docs: CLAUDE.md defines <channel> as pinned"),
+        # the final review: I-1 (a restart after close), I-2 (the first day's summary) and I-3 (the question line in the pane)
+        ("a definition that reads TOPIC.md's heading after close", "while a topic is open (TOPIC.md exists and steward-state.json holds no `closed`); otherwise,",
+         "once TOPIC.md exists; before that,", "docs: CLAUDE.md defines <channel> as pinned"),
+        ("a restart after close that subscribes and arms again",
+         " If steward-state.json holds `closed`, the topic is closed: stop here, subscribing to nothing, arming nothing and writing nothing, and end with one status "
+         "line, until John types `channel` and gives you a new topic (section 3).", "", "docs: step 1 of section 13 of CLAUDE.md takes the channel from TOPIC.md's heading"),
+        ("a restart after close that writes again", "arming nothing and writing nothing,", "arming nothing,",
+         "docs: step 1 of section 13 of CLAUDE.md takes the channel from TOPIC.md's heading"),
+        ("a new topic's start that leaves closed in place", " " + START_REOPEN_SENTENCE, "", "docs: section 3 of CLAUDE.md removes closed when a new topic starts"),
+        ("a new topic's start that keeps closed", START_REOPEN_SENTENCE, "Keep `closed` in steward-state.json if a closed topic left it there.",
+         "docs: section 3 of CLAUDE.md removes closed when a new topic starts"),
+        ("a channel refused after close while the old TOPIC.md stays", "; once `close` has set `closed`, take it, though the old TOPIC.md is still there", "",
+         "docs: section 9 of CLAUDE.md has the channel control as pinned"),
+        ("a later channel that replaces the earlier one only before any TOPIC.md", "typed before section 3 writes TOPIC.md replaces", "typed before TOPIC.md exists replaces",
+         "docs: section 9 of CLAUDE.md has the channel control as pinned"),
+        ("an absent last_summary_date no longer a trigger", "`last_summary_date` being absent or an earlier date", "`last_summary_date` being an earlier date",
+         "docs: the summary's trigger also posts when last_summary_date is absent"),
+        ("the question line's margin for the pane dropped", ", and keep it under 76, since your final text is indented two columns in a pane that may be 80 wide", "",
+         "docs: section 9 of CLAUDE.md caps the question line at 80 characters"),
+        ("the 4-hour form allowed the whole 80 characters", "still under 76 characters", "still within 80 characters",
+         "docs: section 9 of CLAUDE.md caps the question line at 80 characters"))
     for i, (what, old, new, failure) in enumerate(regressions):
         failures = docs_checks(checkout_with(d, f"regression-{i}", "CLAUDE.md", old, new))
         ok(old in good and any(f.startswith(failure) for f in failures), f"docs: docs_checks catches {what} (got {without_question_marks(repr(failures))})")
