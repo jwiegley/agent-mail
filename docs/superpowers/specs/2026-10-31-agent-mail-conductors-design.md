@@ -267,7 +267,7 @@ agent-deck conductor setup ingest-steward -agent claude \
 
 - `SHARED.md` is a steward-safe replacement for the shared conductor instructions (today the stewards are the only Claude conductors; `director` runs Codex); `CLAUDE.md` also states that it takes precedence over any shared conductor text and names the parts that do not apply (auto-respond, `/send`, session control, the heartbeat `NEED:` format, `state.json` and `task-log.md`) **[my call]**.
 - The four files live in the agent-mail repository under `steward/` and are landed on `main` before the pilot, so every host's checkout carries them **[John 14]**. Setup links `CLAUDE.md`, `SHARED.md` and `HEARTBEAT_RULES.md` into hera's checkout, so a revision reaches both stewards when the checkout is pulled; the conductor's `POLICY.md` is made a copy right after setup, because John edits thresholds there and must not dirty the checkout **[my call]**. nix packaging of `steward/` follows v2's Task 22 pattern after the pilot.
-- `AGENTDECK_CONTEXT_WINDOW`, set to 200000 **[John 24]**, arms agent-deck's clear-on-compact, the design's daily context reset; whether it fires without a TUI, and what starts the next turn after a `/clear`, are day-zero checks (section 10) **[my call]**. The default heartbeat stays enabled; it is inert until John groups hera members under the conductor's name, and the design never depends on it **[my call]**.
+- `AGENTDECK_CONTEXT_WINDOW`, set to 200000 **[John 24]**, arms agent-deck's clear-on-compact, the design's daily context reset; agent-deck decides the clear only in its TUI loop, and no day-zero row sees it (its signs are those `steward/README.md` section 4 names) **[John 24]**; what starts the next turn after a `/clear` is a day-zero check (section 10) **[my call]**. The default heartbeat stays enabled; it is inert until John groups hera members under the conductor's name, and the design never depends on it **[my call]**.
 - agent-deck opens every start or restart of a conductor with a recovery turn: it types a message that begins `[CONDUCTOR RECOVERY]` into the pane, asking the conductor to drain its inbox with `agent-deck inbox drain` and read `./state.json`. The steward's `CLAUDE.md` answers it in section 2 as the start of a fresh context: it runs its restart steps (its section 13), never `agent-deck inbox drain`, and never reads or keeps a `state.json` **[John 25]**.
 - The model and account are the fleet's defaults **[John 15]**.
 
@@ -624,7 +624,7 @@ Checked daily during the pilots (6.10), then weekly.
 ## 13. Still unknown, and verified on day zero
 
 - A background `sleep` exit wakes an idle agent-deck Claude session the way the watcher's exit does.
-- Whether agent-deck's clear-on-compact fires for a conductor without a TUI, whether background tasks survive a `/clear`, and what starts the next turn after one.
+- Whether background tasks survive a `/clear`, and what starts the next turn after one; agent-deck decides its clear-on-compact only in its TUI loop, and no day-zero row sees it (its signs are those `steward/README.md` section 4 names) **[John 24]**.
 - That `-instructions-md` and `-shared-instructions-md` are loaded on every start and after a `/clear`, and that `SHARED.md` displaces the shared conductor text (`agent-deck session context --all`).
 - The exact rendering of MCP tool-call bullets on this Claude Code build, for the scanner's fixture.
 - The syntax of `agent-deck remote <host> output <name>`, if the waiting-on-John probe is wanted for remote members.
