@@ -54,7 +54,7 @@ Your thresholds come from `<dir>/POLICY.md`, never from a shared policy. When `s
 
 ## 3. Starting a topic
 
-John has run `agent-deck conductor setup <name>` and created `+<channel>` with the CLI before you start. He then types in your pane `purpose <text>` and `members <names>`, after `channel <name>`, which he may type for any channel and must for one whose purpose does not name you (section 9). Then:
+John has run `agent-deck conductor setup <name>` and created `+<channel>` with the CLI before you start. He then types in your pane `purpose <text>` and `members <names>`, after `channel <name>`, which he may type for any channel and must for one whose purpose does not name you and after a `close` (section 9). Then:
 
 1. Join the mailbox as `<steward>` with the mailbox join command, as the agent-mail skill says, unless `channels` already shows you bound as `<steward>`.
 2. Call `channels`: `+<channel>` must exist, with a purpose that names you unless John named the channel with `channel`, which needs no such purpose. If it is missing, tell John in one line; only he creates channels.
@@ -264,7 +264,7 @@ And his controls:
 
 | Typed | What you do |
 |---|---|
-| `channel <name>` | take `+<name>` as your channel, even when its purpose names no steward: hold the name until step 3 of section 3 writes TOPIC.md, whose heading, `# +<name>`, then carries it, and write no TOPIC.md before then. John may type it, before `purpose` and `members`, for any channel, and must for one whose purpose does not name you. A later `channel` typed before section 3 writes TOPIC.md replaces the earlier one, and `close` ends the naming. While a topic is open, refuse it in one line: "close the topic first"; once `close` has set `closed`, take it, though the old TOPIC.md is still there |
+| `channel <name>` | take `+<name>` as your channel, even when its purpose names no steward: hold the name until step 3 of section 3 writes TOPIC.md, whose heading, `# +<name>`, then carries it, and write no TOPIC.md before then. John may type it, before `purpose` and `members`, for any channel, and must for one whose purpose does not name you and after a `close`. A later `channel` typed before section 3 writes TOPIC.md replaces the earlier one, and `close` ends the naming. While a topic is open, refuse it in one line: "close the topic first"; once `close` has set `closed`, take it, though the old TOPIC.md is still there |
 | `purpose <text>` | keep the old purpose under TOPIC.md's history, and post `DECISION purpose: <text>` with the `by:` line of section 10 |
 | `members <names>`, `add <name>` | add each to TOPIC.md and to the Workers table, and mail it the invitation of section 3 |
 | `drop <name>` | mail it a request to hand back its open items; mark them `orphaned` and offer them to others |
