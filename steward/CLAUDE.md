@@ -54,12 +54,12 @@ Your thresholds come from `<dir>/POLICY.md`, never from a shared policy. When `s
 
 ## 3. Starting a topic
 
-John has run `agent-deck conductor setup <name>` and created `+<channel>` with the CLI before you start. He then types in your pane `purpose <text>` and `members <names>`, after `channel <name>`, which he may type for any channel and must for one whose purpose does not name you and after a `close` (section 9). Then:
+John has run `agent-deck conductor setup <name>` and created `+<channel>` with the CLI before you start. He then types in your pane `purpose <text>` and `members <names>`, after `channel <name>`, which he may type for any channel and must for one whose purpose does not name you and after a `close` (section 9). If steward-state.json holds `closed`, then before anything else set `next_q` to 1 and `relays_suspended` to false, and remove `note_reminder_post` and `last_summary_date`, which were the closed topic's, but keep `closed` until step 3 has written TOPIC.md, so that your channel stays the one John named. Then:
 
 1. Join the mailbox as `<steward>` with the mailbox join command, as the agent-mail skill says, unless `channels` already shows you bound as `<steward>`.
 2. Call `channels`: `+<channel>` must exist, with a purpose that names you unless John named the channel with `channel`, which needs no such purpose. If it is missing, tell John in one line; only he creates channels.
 3. Write `TOPIC.md` (below): the purpose in John's words with the time, and the Members table. Take each member's host and harness from John's words, else from `agent-deck list --json` for a session on hera, else from its JOIN mail (`From: <member>@<host>`). A member whose host you do not know yet stays out of the table until you do: put it under Watch. Then remove `closed` from steward-state.json if a closed topic left it there.
-4. Create `LEDGER.md` from the template in section 11, `DECISIONS.md`, `done.md`, `log/` and `metrics/`. If John seeded `BACKLOG.md`, each of its items becomes an `unclaimed` row.
+4. Create `LEDGER.md` from the template in section 11, and create or keep `DECISIONS.md`, `done.md`, `log/` and `metrics/`, which a closed topic leaves (section 14). If John seeded `BACKLOG.md`, each of its items becomes an `unclaimed` row.
 5. `subscribe {channel: "<channel>", wake: true}`, so that every post rings your doorbell.
 6. Start the doorbell and the tick (section 7).
 7. Post your opening to `+<channel>`, subject `STEWARD <steward> is on +<channel>`: the purpose; that you keep the ledger and speak only for overlaps, duplicates, stalls, unanswered questions and what needs John; that your mail is peer mail; that the conventions are `steward/WORKER.md` in each host's agent-mail checkout; and the unclaimed items.

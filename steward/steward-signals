@@ -3977,6 +3977,21 @@ def test_the_help_gives_the_cap_as_its_number(d):
        f"signals: {phrase} written with the number in the docstring's phrase, or in the signals help's, outside the self-test, fails the second check")
 
 
+def test_the_help_gives_the_policy_keys_themselves(d):
+    keys = ", ".join(POLICY_KEYS)
+    top = " ".join(capture(main, ["--help"])[0].split())
+    ok(keys in top and "POLICY_KEYS" not in top,
+       "signals: the top-level help gives the keys of POLICY.md themselves, in their order and joined by commas, where the docstring names POLICY_KEYS")
+    # The regression, from John's decision 26 (2026-11-02): a copy of this file whose help leaves the name as it stands. As in the check above, the search
+    # string is built in two pieces, so that it never stands whole in these lines, and it is found exactly once.
+    source = read(os.path.realpath(__file__))
+    old = '.replace("POLICY' + '_KEYS", ", ".join(POLICY_KEYS))'
+    status, out, _ = run_this_file("--help", script=write(tempfile.mkdtemp(dir=d), "steward-signals", source.replace(old, "")))
+    shown = " ".join(out.split())
+    ok(source.count(old) == 1 and status == 0 and "POLICY_KEYS" in shown and keys not in shown,
+       "signals: a copy of this file whose top-level help gives the bare name POLICY_KEYS fails the first check")
+
+
 def test_compact_ages(d):
     for seconds, text in ((0, "0m"), (59.9, "0m"), (60, "1m"), (2700, "45m"), (3599, "59m"), (3600, "1h"), (7199, "1h"), (86399, "23h"), (86400, "1d"),
                           (3 * 86400 + 5, "3d"), (-59, "0m"), (-60, "-1m"), (-120, "-2m"), (-7200, "-2h")):
@@ -4190,6 +4205,7 @@ def section_signals(d):
         test_signals_prints_no_question_mark_and_no_stray_line(d)
         test_signals_options(d)
         test_the_help_gives_the_cap_as_its_number(d)
+        test_the_help_gives_the_policy_keys_themselves(d)
         test_compact_ages(d)
         test_member_records_are_read_as_agent_mail_reads_them(d)
         test_signals_prints_names_whole(d)
@@ -4510,11 +4526,25 @@ QUESTION_LENGTH_SENTENCES = (
     "- After 4 hours unanswered, change its text once, still under 76 characters, so that the scanner pages it again:")
 
 
+def question_line_examples(text):
+    """The example question lines in TEXT's code blocks: each line, stripped, that is a question line with a real prefix and number, such as Q ingest-3:
+    and not the template's Q <prefix>-<n>."""
+    return [line.strip() for fenced, part in fenced_parts(text) if fenced for line in part.splitlines()
+            if re.fullmatch(r"Q [a-z0-9]+(?:-[a-z0-9]+)*-[0-9]+: .*\?", line.strip())]
+
+
 def test_claude_md_keeps_the_question_line_inside_the_pane(d):
     found = tuple(s for s in sentences(claude_section(claude_md(), 9)) if re.search(r"\b(?:76|80)\b", s))
     ok(found == QUESTION_LENGTH_SENTENCES,
        "docs: section 9 of CLAUDE.md caps the question line at 80 characters and keeps it, and its 4-hour form, under 76, for the two columns that indent it "
        f"in a pane that may be 80 wide, as pinned (got {without_question_marks(repr(found))})")
+    # The section's own example of the line, parked unchecked at the end of the run and checked under John's decision 26 (2026-11-02): its length is
+    # computed here against the margin that the first pinned sentence states, so that an example as long as the margin, or longer, fails.
+    limit = int(re.search(r"keep it under ([0-9]+)", QUESTION_LENGTH_SENTENCES[0])[1])
+    examples = question_line_examples(claude_section(claude_md(), 9))
+    ok(examples != [] and all(len(line) < limit for line in examples),
+       f"docs: section 9 of CLAUDE.md gives its example question line in under {limit} characters, as it asks of every question line "
+       f"(got lengths {[len(line) for line in examples]})")
 
 
 # How a steward knows its channel, from Task 12's review (Important 4): the channel in TOPIC.md's heading once TOPIC.md exists; before that, the one John named
@@ -4541,6 +4571,21 @@ START_NAMING_SENTENCE = ("He then types in your pane `purpose <text>` and `membe
 START_CHANNEL_STEP = ("2. Call `channels`: `+<channel>` must exist, with a purpose that names you unless John named the channel with `channel`, which needs no such "
                       "purpose. If it is missing, tell John in one line; only he creates channels.")
 START_REOPEN_SENTENCE = "Then remove `closed` from steward-state.json if a closed topic left it there."  # the end of section 3's step 3, which writes TOPIC.md
+# The wave's re-review found that a new topic started on the same conductor after close, without the README's clean-up, kept the closed topic's next_q,
+# relays_suspended, note_reminder_post and last_summary_date, and that step 4 of section 3 created the DECISIONS.md and done.md that section 14 keeps. John's
+# decision 26 (2026-11-02) applies the correction: section 3's opening resets those keys before anything else, and step 4 creates or keeps those files. It
+# keeps closed until step 3 has written TOPIC.md: an existing TOPIC.md with no closed key is an open topic to the definition of <channel>, so a closed key
+# cleared first would hand the new topic the old heading's channel. Both are pinned whole, the reset as the first of section 3's two sentences on closed.
+START_RESET_SENTENCE = ("If steward-state.json holds `closed`, then before anything else set `next_q` to 1 and `relays_suspended` to false, and remove "
+                        "`note_reminder_post` and `last_summary_date`, which were the closed topic's, but keep `closed` until step 3 has written TOPIC.md, so "
+                        "that your channel stays the one John named.")  # section 3's opening, after START_NAMING_SENTENCE
+START_FILES_STEP = ("4. Create `LEDGER.md` from the template in section 11, and create or keep `DECISIONS.md`, `done.md`, `log/` and `metrics/`, which a closed "
+                    "topic leaves (section 14). If John seeded `BACKLOG.md`, each of its items becomes an `unclaimed` row.")
+# What a close leaves running, parked at the end of the run and pinned under the same decision: step 4 of section 14 restarts neither the doorbell nor the
+# tick and renames STATUS, so that nothing wakes the steward or pages for it again, and a wake that still comes writes nothing. The step is pinned whole.
+CLOSE_STEP = ("4. `unsubscribe {channel: \"<channel>\"}` and set `closed` in steward-state.json. Restart neither the doorbell nor the tick, and rename `STATUS` to "
+              "`STATUS-final-<UTC date>`: John's scanner reads `STATUS` alone, so a closed topic pages nothing, whatever is posted after it. A wake that still comes "
+              "finds `closed`, writes nothing, and ends with one status line.")
 RESET_CHANNEL_STEP = ("1. Re-read this file, `POLICY.md`, `TOPIC.md`, `LEDGER.md` and `steward-state.json`. If steward-state.json holds `closed`, the topic is closed: "
                       "stop here, subscribing to nothing, arming nothing and writing nothing, and end with one status line, until John types `channel` and gives "
                       "you a new topic (section 3). Your channel is the one in TOPIC.md's heading, never one taken again from the channels' purposes. With no "
@@ -4567,8 +4612,9 @@ def test_claude_md_takes_its_channel_from_topic_md_or_from_john(d):
        "as pinned")
     ok([line for line in claude_section(t, 3).splitlines() if line.startswith("2. ")] == [START_CHANNEL_STEP],
        "docs: step 2 of section 3 of CLAUDE.md accepts a channel John named with channel, as pinned")
-    ok([s for s in sentences(claude_section(t, 3)) if "`closed`" in s] == [START_REOPEN_SENTENCE],
-       "docs: section 3 of CLAUDE.md removes closed when a new topic starts, in its one sentence on closed, as pinned")
+    ok([s for s in sentences(claude_section(t, 3)) if "`closed`" in s] == [START_RESET_SENTENCE, START_REOPEN_SENTENCE],
+       "docs: section 3 of CLAUDE.md removes closed when a new topic starts, in the second of its two sentences on closed, after the first has reset the "
+       "closed topic's keys before anything else and kept closed until TOPIC.md is written, as pinned")
     ok([line for line in claude_section(t, 13).splitlines() if line.startswith("1. ")] == [RESET_CHANNEL_STEP],
        "docs: step 1 of section 13 of CLAUDE.md takes the channel from TOPIC.md's heading, never from the purposes again, starts nothing without a TOPIC.md, "
        "and starts and writes nothing on a closed topic, as pinned")
@@ -4578,6 +4624,19 @@ def test_claude_md_answers_agent_decks_recovery_turn(d):
     found = [line for line in claude_section(claude_md(), 2).splitlines() if line.startswith("- **agent-deck's recovery turn:**")]
     ok(found == [RECOVERY_PART],
        "docs: section 2 of CLAUDE.md answers agent-deck's recovery turn as pinned: it runs section 13, never agent-deck inbox drain, and keeps no state.json")
+
+
+def test_claude_md_starts_a_new_topic_afresh_after_a_close(d):
+    found = [line for line in claude_section(claude_md(), 3).splitlines() if line.startswith("4. ")]
+    ok(found == [START_FILES_STEP],
+       "docs: step 4 of section 3 of CLAUDE.md creates or keeps DECISIONS.md, done.md, log/ and metrics/, which section 14 keeps for a closed topic, as pinned")
+
+
+def test_claude_md_wakes_nothing_after_a_close(d):
+    found = [line for line in claude_section(claude_md(), 14).splitlines() if line.startswith("4. ")]
+    ok(found == [CLOSE_STEP],
+       "docs: step 4 of section 14 of CLAUDE.md unsubscribes, restarts neither the doorbell nor the tick, renames STATUS, and has a wake that still comes "
+       "write nothing, as pinned")
 
 
 def test_shared_and_heartbeat(d):
@@ -4776,7 +4835,8 @@ DOCS_CHECKS = (test_claude_md, test_claude_md_headings_are_in_order, test_claude
                test_claude_md_counts_a_reset_only_for_a_fresh_context, test_claude_md_keeps_its_state_unambiguous, test_claude_md_names_its_system_tools_by_path,
                test_claude_md_keeps_the_never_rules_of_spec_7_1, test_claude_md_prints_no_question_mark_in_its_templates, test_claude_md_routes_requests_and_marks_joins,
                test_claude_md_reminds_of_notes_once, test_claude_md_follows_the_worked_example_and_its_keys, test_claude_md_states_the_helpers_cap_as_it_is,
-               test_claude_md_keeps_the_question_line_inside_the_pane, test_claude_md_takes_its_channel_from_topic_md_or_from_john, test_claude_md_answers_agent_decks_recovery_turn, test_shared_and_heartbeat,
+               test_claude_md_keeps_the_question_line_inside_the_pane, test_claude_md_takes_its_channel_from_topic_md_or_from_john, test_claude_md_answers_agent_decks_recovery_turn,
+               test_claude_md_starts_a_new_topic_afresh_after_a_close, test_claude_md_wakes_nothing_after_a_close, test_shared_and_heartbeat,
                test_shared_and_heartbeat_forbid_what_spec_6_4_lists_and_grant_nothing, test_shared_and_heartbeat_hold_exactly_their_pinned_sentences,
                test_worker_md, test_worker_md_matches_what_claude_md_files_and_sends, test_worker_md_keeps_its_checks_and_safety_sentences_as_pinned,
                test_worker_md_has_no_silence_rule, test_steward_readme_and_pointer)
@@ -4958,7 +5018,34 @@ def test_docs_checks_catch_each_pinned_regression(d):
         ("the control no longer required after a close", "does not name you and after a `close`. A later", "does not name you. A later",
          "docs: section 9 of CLAUDE.md has the channel control as pinned"),
         ("section 3 no longer requiring channel after a close", "does not name you and after a `close` (section 9).", "does not name you (section 9).",
-         "docs: section 3 of CLAUDE.md says that John may type channel for any channel"))
+         "docs: section 3 of CLAUDE.md says that John may type channel for any channel"),
+        # John's decision 26 (2026-11-02), the parked corrections: a new topic after a close resets the closed topic's keys and keeps its files (e), and
+        # section 14's wake rule and section 9's example line are pinned (c)
+        ("a new topic's start that keeps the closed topic's question numbers", "set `next_q` to 1 and `relays_suspended`", "set `relays_suspended`",
+         "docs: section 3 of CLAUDE.md removes closed when a new topic starts"),
+        ("a new topic's start that keeps the closed topic's suspended relays", " and `relays_suspended` to false,", ",",
+         "docs: section 3 of CLAUDE.md removes closed when a new topic starts"),
+        ("a new topic's start that keeps the closed topic's reminder and summary date",
+         "and remove `note_reminder_post` and `last_summary_date`, which were the closed topic's, but", "but",
+         "docs: section 3 of CLAUDE.md removes closed when a new topic starts"),
+        ("a new topic's start that clears closed first, which hands it the old heading's channel",
+         "but keep `closed` until step 3 has written TOPIC.md, so that your channel stays the one John named.", "and remove `closed` too.",
+         "docs: section 3 of CLAUDE.md removes closed when a new topic starts"),
+        ("a new topic's start with no reset of the closed topic's keys", " " + START_RESET_SENTENCE, "",
+         "docs: section 3 of CLAUDE.md removes closed when a new topic starts"),
+        ("step 4 that creates afresh the files a closed topic leaves", "and create or keep `DECISIONS.md`", "and create `DECISIONS.md`",
+         "docs: step 4 of section 3 of CLAUDE.md creates or keeps"),
+        ("a close that restarts the doorbell and the tick", "Restart neither the doorbell nor the tick, and rename", "Restart the doorbell and the tick, and rename",
+         "docs: step 4 of section 14 of CLAUDE.md"),
+        ("a close that restarts the tick alone", "Restart neither the doorbell nor the tick,", "Restart the tick but not the doorbell,",
+         "docs: step 4 of section 14 of CLAUDE.md"),
+        ("a wake after a close that runs a turn as before", "finds `closed`, writes nothing, and ends with one status line.", "runs a turn as before.",
+         "docs: step 4 of section 14 of CLAUDE.md"),
+        ("an example question line as long as the margin", "Q ingest-3: HF org for glm-5.3-fp8: A positron-internal, B positron-ai?",
+         "Q ingest-3: HF orgs for the glm-5.3-fp8: A positron-internal, B positron-ai?", "docs: section 9 of CLAUDE.md gives its example question line in under"),
+        ("an example question line of the cap's whole 80 characters", "Q ingest-3: HF org for glm-5.3-fp8: A positron-internal, B positron-ai?",
+         "Q ingest-3: HF orgs for glm-5.3-fp8 weights: A positron-internal, B positron-ai?",
+         "docs: section 9 of CLAUDE.md gives its example question line in under"))
     for i, (what, old, new, failure) in enumerate(regressions):
         failures = docs_checks(checkout_with(d, f"regression-{i}", "CLAUDE.md", old, new))
         ok(old in good and any(f.startswith(failure) for f in failures), f"docs: docs_checks catches {what} (got {without_question_marks(repr(failures))})")
@@ -5284,9 +5371,9 @@ def section_docs(d):
 # ---- main ----
 
 def help_description():
-    """The module docstring as the top-level --help prints it: the name EXCEPTION_LINES, which the docstring uses since it cannot be an f-string, given as
-    the number it holds, as the signals help gives it."""
-    return (__doc__ or "").replace("EXCEPTION_LINES", str(EXCEPTION_LINES))
+    """The module docstring as the top-level --help prints it: the names EXCEPTION_LINES and POLICY_KEYS, which the docstring uses since it cannot be an
+    f-string, given as what they hold: the number, as the signals help gives it, and the keys, in their order and joined by commas."""
+    return (__doc__ or "").replace("EXCEPTION_LINES", str(EXCEPTION_LINES)).replace("POLICY_KEYS", ", ".join(POLICY_KEYS))
 
 
 def build_parser():
