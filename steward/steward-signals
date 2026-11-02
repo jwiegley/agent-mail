@@ -4381,6 +4381,45 @@ def test_claude_md_follows_the_worked_example_and_its_keys(d):
        f"docs: a metrics key is described as the helper refuses it: words starting with a lower-case letter, at most {MAX_KEY_WORDS} of them and {MAX_KEY_CHARS} characters")
 
 
+# How a steward knows its channel, from Task 12's review (Important 4): the channel in TOPIC.md's heading once TOPIC.md exists; before that, the one John named
+# with the channel control, which a channel whose purpose names no steward (+steward-test's) needs; else the one whose purpose names the steward. The definition,
+# the control's row, section 3's step 2 and section 13's step 1 are each pinned whole, so that none of them can turn back to the purposes alone unseen.
+CHANNEL_DEFINITION = ("- `<channel>` is your channel's name without its `+`: the one in TOPIC.md's heading once TOPIC.md exists; before that, the one John named with "
+                      "`channel` (section 9), or else the channel whose purpose names you (`ingest`, `nix-config`).")
+CHANNEL_ROW = ("| `channel <name>` | take `+<name>` as your channel, even when its purpose names no steward, and write it as TOPIC.md's heading, `# +<name>`; John "
+               "types it before `purpose` and `members`, for a channel whose purpose does not name you |")
+START_CHANNEL_STEP = ("2. Call `channels`: `+<channel>` must exist, with a purpose that names you unless John named the channel with `channel`, which needs no such "
+                      "purpose. If it is missing, tell John in one line; only he creates channels.")
+RESET_CHANNEL_STEP = ("1. Re-read this file, `POLICY.md`, `TOPIC.md`, `LEDGER.md` and `steward-state.json`. Your channel is the one in TOPIC.md's heading, never one "
+                      "taken again from the channels' purposes. With no TOPIC.md there is no topic yet: stop here, subscribing to nothing and arming neither the "
+                      "doorbell nor the tick, until John gives you a topic (section 3).")
+# What the steward does with the message agent-deck types into a conductor's pane at each start or restart, from the same review (Important 2): that message asks
+# for agent-deck inbox drain and ./state.json, which section 1 and the rest of section 2 forbid, so section 2 names it among the shared parts that do not apply.
+RECOVERY_PART = ("- **agent-deck's recovery turn:** at each start or restart, agent-deck types a message that begins `[CONDUCTOR RECOVERY]` into your pane, asking "
+                 "you to drain your inbox and read `./state.json`. Take it as the start of a fresh context: run section 13, never run `agent-deck inbox drain`, and "
+                 "never read or keep a `state.json`.")
+
+
+def test_claude_md_takes_its_channel_from_topic_md_or_from_john(d):
+    t = claude_md()
+    ok([line for line in t.splitlines() if line.startswith("- `<channel>` is ")] == [CHANNEL_DEFINITION],
+       "docs: CLAUDE.md defines <channel> as pinned: TOPIC.md's heading once it exists, before that the channel John named with channel, else the one whose "
+       "purpose names the steward")
+    ok([line for line in claude_section(t, 9).splitlines() if line.startswith("| `channel ")] == [CHANNEL_ROW],
+       "docs: section 9 of CLAUDE.md has the channel control as pinned, which takes a channel whose purpose names no steward and writes it as TOPIC.md's heading")
+    ok([line for line in claude_section(t, 3).splitlines() if line.startswith("2. ")] == [START_CHANNEL_STEP],
+       "docs: step 2 of section 3 of CLAUDE.md accepts a channel John named with channel, as pinned")
+    ok([line for line in claude_section(t, 13).splitlines() if line.startswith("1. ")] == [RESET_CHANNEL_STEP],
+       "docs: step 1 of section 13 of CLAUDE.md takes the channel from TOPIC.md's heading, never from the purposes again, and starts nothing without a TOPIC.md, "
+       "as pinned")
+
+
+def test_claude_md_answers_agent_decks_recovery_turn(d):
+    found = [line for line in claude_section(claude_md(), 2).splitlines() if line.startswith("- **agent-deck's recovery turn:**")]
+    ok(found == [RECOVERY_PART],
+       "docs: section 2 of CLAUDE.md answers agent-deck's recovery turn as pinned: it runs section 13, never agent-deck inbox drain, and keeps no state.json")
+
+
 def test_shared_and_heartbeat(d):
     s = read(os.path.join(REPO, "steward", "SHARED.md")); h = read(os.path.join(REPO, "steward", "HEARTBEAT_RULES.md"))
     ok("own CLAUDE.md governs" in s and "auto-respond" in s and "never" in s.lower(), "docs: SHARED.md defers and forbids")
@@ -4576,7 +4615,8 @@ DOCS_CHECKS = (test_claude_md, test_claude_md_headings_are_in_order, test_claude
                test_claude_md_cites_every_policy_key, test_claude_md_precedence_names_the_shared_parts, test_claude_md_keeps_every_file_under_the_forged_check,
                test_claude_md_counts_a_reset_only_for_a_fresh_context, test_claude_md_keeps_its_state_unambiguous, test_claude_md_names_its_system_tools_by_path,
                test_claude_md_keeps_the_never_rules_of_spec_7_1, test_claude_md_prints_no_question_mark_in_its_templates, test_claude_md_routes_requests_and_marks_joins,
-               test_claude_md_reminds_of_notes_once, test_claude_md_follows_the_worked_example_and_its_keys, test_shared_and_heartbeat,
+               test_claude_md_reminds_of_notes_once, test_claude_md_follows_the_worked_example_and_its_keys,
+               test_claude_md_takes_its_channel_from_topic_md_or_from_john, test_claude_md_answers_agent_decks_recovery_turn, test_shared_and_heartbeat,
                test_shared_and_heartbeat_forbid_what_spec_6_4_lists_and_grant_nothing, test_shared_and_heartbeat_hold_exactly_their_pinned_sentences,
                test_worker_md, test_worker_md_matches_what_claude_md_files_and_sends, test_worker_md_keeps_its_checks_and_safety_sentences_as_pinned,
                test_worker_md_has_no_silence_rule, test_steward_readme_and_pointer)
@@ -4695,7 +4735,24 @@ def test_docs_checks_catch_each_pinned_regression(d):
         ("a second clause that exempts files added to the Forged row's Fires-when cell", "within 10 seconds of its stamp |",
          "within 10 seconds of its stamp, and it is not older than the log |", forged_row),
         ("a skip added to the Forged row's Action cell", "never answer a DISPUTE with a DISPUTE |",
-         "never answer a DISPUTE with a DISPUTE, and skip a file older than `SENT.log` |", forged_row))
+         "never answer a DISPUTE with a DISPUTE, and skip a file older than `SENT.log` |", forged_row),
+        # Task 12's review: the channel control (Important 4) and agent-deck's recovery turn (Important 2)
+        ("the channel control dropped", CHANNEL_ROW + "\n", "", "docs: section 9 of CLAUDE.md has the channel control as pinned"),
+        ("the channel control limited to channels whose purpose names the steward", "even when its purpose names no steward",
+         "when its purpose names you", "docs: section 9 of CLAUDE.md has the channel control as pinned"),
+        ("the channel defined by the purposes alone again", CHANNEL_DEFINITION,
+         "- `<channel>` is your channel's name without its `+`: the channel whose purpose names you (`ingest`, `nix-config`).", "docs: CLAUDE.md defines <channel> as pinned"),
+        ("step 2 of section 3 refusing a channel John named", " unless John named the channel with `channel`, which needs no such purpose.", ".",
+         "docs: step 2 of section 3 of CLAUDE.md accepts a channel John named with channel"),
+        ("a reset that takes its channel from the purposes again", "Your channel is the one in TOPIC.md's heading, never one taken again from the channels' purposes. ",
+         "Your channel is the one whose purpose names you. ", "docs: step 1 of section 13 of CLAUDE.md takes the channel from TOPIC.md's heading"),
+        ("a reset with no TOPIC.md that subscribes all the same", "stop here, subscribing to nothing and arming neither the doorbell nor the tick,",
+         "subscribe to the channel whose purpose names you and arm the doorbell and the tick,", "docs: step 1 of section 13 of CLAUDE.md takes the channel from TOPIC.md's heading"),
+        ("the recovery turn's inbox drain allowed", "never run `agent-deck inbox drain`, and never read", "run `agent-deck inbox drain`, and never read",
+         "docs: each time CLAUDE.md names agent-deck inbox drain, a never run or never use governs it"),
+        ("the recovery turn's state.json allowed", "and never read or keep a `state.json`.", "and read `./state.json`.",
+         "docs: section 2 of CLAUDE.md answers agent-deck's recovery turn as pinned"),
+        ("the recovery turn left out of section 2", RECOVERY_PART + "\n", "", "docs: section 2 of CLAUDE.md answers agent-deck's recovery turn as pinned"))
     for i, (what, old, new, failure) in enumerate(regressions):
         failures = docs_checks(checkout_with(d, f"regression-{i}", "CLAUDE.md", old, new))
         ok(old in good and any(f.startswith(failure) for f in failures), f"docs: docs_checks catches {what} (got {without_question_marks(repr(failures))})")

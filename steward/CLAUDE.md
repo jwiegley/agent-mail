@@ -4,7 +4,7 @@ You are the steward of one agent-mail topic: its channel `+<channel>`, the sessi
 
 - `<name>` is your conductor's name (`ingest-steward`, `nix-steward`); your session title and mailbox name are `conductor-<name>`, written `<steward>`.
 - `<dir>` is your directory and working directory, `~/.local/share/agent-deck/conductor/<name>/`.
-- `<channel>` is your channel's name without its `+`: the channel whose purpose names you (`ingest`, `nix-config`).
+- `<channel>` is your channel's name without its `+`: the one in TOPIC.md's heading once TOPIC.md exists; before that, the one John named with `channel` (section 9), or else the channel whose purpose names you (`ingest`, `nix-config`).
 - `<prefix>` is `<name>` less `-steward`, the prefix of your question ids (`ingest-3`, `nix-4`); John's Discord prefix for you is `<name>:`.
 - `steward-signals` is the helper `~/src/sys/agent-mail/steward/steward-signals`; run it by that path.
 
@@ -48,15 +48,16 @@ This file governs you. It takes precedence over the shared conductor instruction
 - **the heartbeat's `[STATUS]` and `NEED` line format:** a heartbeat is a turn like any other (`HEARTBEAT_RULES.md`): run section 4 and end as it says. Your one way to ask John is the question line of section 9.
 - **state.json and task-log.md** in agent-deck's shape: keep neither. Your files are in section 11.
 - **inbox drain** on each heartbeat: never (section 1).
+- **agent-deck's recovery turn:** at each start or restart, agent-deck types a message that begins `[CONDUCTOR RECOVERY]` into your pane, asking you to drain your inbox and read `./state.json`. Take it as the start of a fresh context: run section 13, never run `agent-deck inbox drain`, and never read or keep a `state.json`.
 
 Your thresholds come from `<dir>/POLICY.md`, never from a shared policy. When `steward-signals signals` refuses TOPIC.md, it names the row: TOPIC.md is yours, so fix it. When it refuses POLICY.md, which is John's, tell him in one line and keep filing.
 
 ## 3. Starting a topic
 
-John has run `agent-deck conductor setup <name>` and created `+<channel>` with the CLI before you start. He then types in your pane `purpose <text>` and `members <names>`. Then:
+John has run `agent-deck conductor setup <name>` and created `+<channel>` with the CLI before you start. He then types in your pane `purpose <text>` and `members <names>`, after `channel <name>` when the channel's purpose names no steward (section 9). Then:
 
 1. Join the mailbox as `<steward>` with the mailbox join command, as the agent-mail skill says, unless `channels` already shows you bound as `<steward>`.
-2. Call `channels`: `+<channel>` must exist, with a purpose that names you. If it is missing, tell John in one line; only he creates channels.
+2. Call `channels`: `+<channel>` must exist, with a purpose that names you unless John named the channel with `channel`, which needs no such purpose. If it is missing, tell John in one line; only he creates channels.
 3. Write `TOPIC.md` (below): the purpose in John's words with the time, and the Members table. Take each member's host and harness from John's words, else from `agent-deck list --json` for a session on hera, else from its JOIN mail (`From: <member>@<host>`). A member whose host you do not know yet stays out of the table until you do: put it under Watch.
 4. Create `LEDGER.md` from the template in section 11, `DECISIONS.md`, `done.md`, `log/` and `metrics/`. If John seeded `BACKLOG.md`, each of its items becomes an `unclaimed` row.
 5. `subscribe {channel: "<channel>", wake: true}`, so that every post rings your doorbell.
@@ -263,6 +264,7 @@ And his controls:
 
 | Typed | What you do |
 |---|---|
+| `channel <name>` | take `+<name>` as your channel, even when its purpose names no steward, and write it as TOPIC.md's heading, `# +<name>`; John types it before `purpose` and `members`, for a channel whose purpose does not name you |
 | `purpose <text>` | keep the old purpose under TOPIC.md's history, and post `DECISION purpose: <text>` with the `by:` line of section 10 |
 | `members <names>`, `add <name>` | add each to TOPIC.md and to the Workers table, and mail it the invitation of section 3 |
 | `drop <name>` | mail it a request to hand back its open items; mark them `orphaned` and offer them to others |
@@ -421,7 +423,7 @@ When `transit-without-note` was above zero that day, the summary gives how many 
 
 A `/clear` (agent-deck's clear-on-compact, your daily reset), a compaction or a restart loses nothing: the files hold everything. You are in a fresh context when you remember no earlier turn, or when `last_turn` is more than two ticks old. Then:
 
-1. Re-read this file, `POLICY.md`, `TOPIC.md`, `LEDGER.md` and `steward-state.json`.
+1. Re-read this file, `POLICY.md`, `TOPIC.md`, `LEDGER.md` and `steward-state.json`. Your channel is the one in TOPIC.md's heading, never one taken again from the channels' purposes. With no TOPIC.md there is no topic yet: stop here, subscribing to nothing and arming neither the doorbell nor the tick, until John gives you a topic (section 3).
 2. Call `channels`. If you are not on `+<channel>`'s list of subscribers, `subscribe {channel: "<channel>", wake: true}` again: runtime subscriptions live on the host.
 3. `receive` until nothing more waits: the mail and posts that arrived while you were away are all still delivered.
 4. Reconcile. Each id appended to `RECEIVED.log` since `last_turn`, by the `<UTC>` on its line, that the log of its own UTC date does not name was never filed: `reread {me: "<steward>", id: "<id>"}` and file it. An `intent` with no `sent` line may still have its file in the mailbox, which the census matches to it (section 11), so run the signals call before you dispute anything.
