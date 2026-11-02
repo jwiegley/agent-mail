@@ -4283,9 +4283,9 @@ def test_claude_md_keeps_every_file_under_the_forged_check(d):
        f"docs: CLAUDE.md exempts no file in the steward's name from the forged check for a stamp before SENT.log began, which its writer chooses (got {without_question_marks(repr(exempting))})")
     # The phrases above name the exemption that was refused. Other wordings of it (older than the log, stamped before the first send) pass a check on phrases, so
     # each sentence that names a file in the steward's name ("file" or "files", "in your name" or "of yours", in any case, or `unmatched-own`) and says disputed,
-    # exempt, skipped or ignored (those verbs in any form, in either case of their first letter; the post's name DISPUTE is none) is pinned whole, and the three in FORGED_CHECK_SENTENCES are all there may
-    # be. A sentence that names such a file in other words ("your files", "a file you sent") or says it with another verb is not selected, which this pin cannot
-    # rule out: review reads for those.
+    # exempt, skipped or ignored (those verbs in any form, in either case of their first letter; the post's name DISPUTE is none) is pinned whole, and the three
+    # in FORGED_CHECK_SENTENCES are all there may be. A sentence that names such a file in other words ("your files", "a file you sent") or says it with another
+    # verb is not selected, which this pin cannot rule out: review reads for those.
     deciding = [s for s in sentences(t) if re.search(r"\b[Dd]isput(?:e|es|ed|ing)\b|\b[Ee]xempt|\b[Ss]kip|\b[Ii]gnor", s)
                 and re.search(r"\bfiles? (?:in your name|of yours)\b|`unmatched-own`", s, re.I)]
     ok(tuple(deciding) == FORGED_CHECK_SENTENCES,
@@ -4478,18 +4478,20 @@ def test_worker_md_matches_what_claude_md_files_and_sends(d):
     ok("REQUEST" not in w, "docs: WORKER.md adds no REQUEST verb, which the steward routes like a QUESTION when it names no member (a ruling of Task 7)")
 
 
-# The sentences of WORKER.md that carry its safety rules, each pinned whole so that no clause can be added to one. From spec 6.7: the four checks that a worker applies
-# to a relay of John's answer before it acts on a protected action (each on a line of its own, with no other list item after them) and the sentence that says all four must
-# hold; what a checked relay
-# authorizes and overrides, and what the steward's mail is and is not; the answer that is a drop, a choice that is not protected, and a relay that is information only
-# or decides anything involving secrets, none of which needs the checks or draws a DISPUTE; the removal of the question's line before the action and the note of the
-# relay's ids; the re-receive that comes before any DISPUTE; the recovery after a relay that is disputed; and the protected list of rule 5. From spec 6.2: that every
-# body carries a slug and is never dropped for a duplicate, that a worker never sends the steward its whole message or asks it to relay one and posts a NOTE after
-# mailing a peer, that nothing waits for the steward and its liveness is John's, what closes a question, and the format of steward-questions.md; and the QUESTION row,
-# whose options the first check matches. What the pin leaves to review: the rest of the table, rules 1, 2, 3 and 8, rule 6's sentences on a NUDGE, the paragraph that
-# describes the two messages of a relay beyond the subject, order and fields that the companion check compares, and any new sentence, since no pin can read a grant in
-# words that it does not select. The brief's check reads the text between the first "protected action" and the second, so that phrase stands once, in the sentence
-# that introduces the checks.
+# The sentences of WORKER.md that carry its safety rules, each pinned whole so that no clause can be added to one. From spec 6.7: the four checks that a worker
+# applies to a relay of John's answer before it acts on a protected action (each on a line of its own, with no other list item after them) and the sentence that says
+# all four must hold; what a checked relay authorizes and overrides, and what the steward's mail is and is not; the answer that is a drop, a choice that is not
+# protected, and a relay that is information only or decides anything involving secrets, none of which needs the checks or draws a DISPUTE; the removal of the
+# question's line before the action and the note of the relay's ids; the re-receive that comes before any DISPUTE; the recovery after a relay that is disputed; and
+# the protected list of rule 5. From spec 6.2: that every body carries a slug and is never dropped for a duplicate, that a worker never sends the steward its whole
+# message or asks it to relay one and posts a NOTE after mailing a peer, that nothing waits for the steward and its liveness is John's, what closes a question, and
+# the format of steward-questions.md; and the QUESTION row, whose options the first check matches. What the pin leaves to review: the title and the four headings; the
+# opening paragraph; the first sentence under Posts; the rest of the table; rules 1, 2, 3 and 8; rule 5's first sentence, which sends what only John can decide to
+# John, in the worker's own session or by a protected QUESTION that the steward carries, and its last, which has the worker record each open protected question in
+# steward-questions.md; rule 6's sentences on a NUDGE; the example line of steward-questions.md, in a fenced block, which a read of sentences skips; the paragraph
+# that describes the two messages of a relay beyond the subject, order and fields that the companion check compares; the last sentence of the paragraph on a failed
+# check, that a DISPUTE of a relay suspends the steward's protected relays; and any new sentence, since no pin can read a grant in words that it does not select. The
+# brief's check reads the text between the first "protected action" and the second, so that phrase stands once, in the sentence that introduces the checks.
 QUESTION_ROW = ("| `QUESTION <slug>: <one line>` | `options: A <x>, B <y>` if known, and required with `protected: yes`; `protected: yes` when only John can answer and his answer "
                 "would authorize something on the protected list (rule 5) | For the topic. Peers answer with `ANSWER` and `In-Reply-To`; the steward carries a protected "
                 "question to John |")

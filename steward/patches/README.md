@@ -98,18 +98,25 @@ The copy, `cp -n`, `-N -F0` and the `&&` work as in the scanner's Apply. If the 
 
 ### Test
 
-With the bridge patch applied, whether or not the scanner's is, run the bridge tests alone (`-k Bridge`); the file still loads the scanner that STEWARD_PATCHED_MONITOR names, patched or not. With both patches applied, run the whole file. Then run John's own bridge tests, which are in `test_discord_qna.py` and load the `bridge.py` beside the director's directory:
+Each block below is one command, so paste one block at a time. With the bridge patch applied, whether or not the scanner's is, run the bridge tests alone (`-k Bridge`); the file still loads the scanner that STEWARD_PATCHED_MONITOR names, patched or not:
 
 ```sh
-# The bridge patch applied, with or without the scanner's: the bridge tests alone.
 STEWARD_PATCHED_MONITOR=$HOME/.local/share/agent-deck/conductor/director/monitor_sessions.py \
 STEWARD_PATCHED_BRIDGE=$HOME/.local/share/agent-deck/conductor/bridge.py \
     ~/.local/share/agent-deck/conductor/venv/bin/python -B -m unittest -k Bridge steward/patches/test_steward_patches.py
-# Both patches applied: the whole file.
+```
+
+With both patches applied, run the whole file instead:
+
+```sh
 STEWARD_PATCHED_MONITOR=$HOME/.local/share/agent-deck/conductor/director/monitor_sessions.py \
 STEWARD_PATCHED_BRIDGE=$HOME/.local/share/agent-deck/conductor/bridge.py \
     ~/.local/share/agent-deck/conductor/venv/bin/python -B -m unittest steward/patches/test_steward_patches.py
-# John's own bridge tests.
+```
+
+Then run John's own bridge tests, which are in `test_discord_qna.py` and load the `bridge.py` beside the director's directory:
+
+```sh
 (cd ~/.local/share/agent-deck/conductor/director && ~/.local/share/agent-deck/conductor/venv/bin/python -B -m unittest test_discord_qna.BridgeTests)
 ```
 
