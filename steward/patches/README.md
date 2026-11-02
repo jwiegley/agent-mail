@@ -7,7 +7,7 @@ Two patches to John's unversioned files, for him to apply, each on its own: the 
 - **The STATUS rule.** Each pass reads `~/.local/share/agent-deck/conductor/*-steward/STATUS`. When the file is older than twice the `tick=` it declares, and `open=` is above zero or the steward's channel holds a post stamped after `last-post=`, the pass pages Discord through the existing delivery, once per stale episode: `NEED(steward): conductor-<name> STATUS unchanged since <UTC> (tick <m>m, <n> open)`. A closed topic's `STATUS-final-<date>` never pages. The rule reads post file names in `~/Mailbox/+<channel>/` and never opens a message; a post agent-mail never delivers, such as one stamped more than a day ahead, does not count. A steward whose STATUS, TOPIC.md or channel cannot be read goes into the pass's errors, which page once like the scanner's other errors, and the other stewards are still checked.
 - **MCP tool calls.** A bullet of the form `⏺ <server> - <tool> (MCP)(...`, or `⏺ <server> - <tool> (MCP)` for a call with no arguments, counts as a tool call, so a peer's question inside an agent-mail `receive` result is no longer paged.
 
-The patch was made against the scanner of 2026-10-31 11:46 (73,768 bytes, sha256 `c636237a6d83ed310ff5693751a54f05578e3b1b09c771b93c505bd30eb3047b`). Run every command below from the root of the agent-mail checkout.
+The patch was made against the scanner of 2026-11-02 09:46 (74,199 bytes, sha256 `8d8d7ca67413040384f3b550f0912f8d6cc989721d5af5e9d6985c3d9d42a398`). Run every command below from the root of the agent-mail checkout.
 
 ## Apply
 
