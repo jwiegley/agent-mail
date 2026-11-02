@@ -2189,6 +2189,56 @@ def listing_as(change):
         os.scandir = scandir
 
 
+class Counted:
+    """A stand-in for the DirEntry ITEM that answers is_file and stat as it does, after calling COUNT with ("is_file", its path) or ("stat", its path), and
+    hands any other attribute on to ITEM uncounted. A DirEntry's own methods cannot be replaced on its type, so listing_counted lists these in its place."""
+
+    def __init__(self, item, count):
+        self.name, self.path, self.item, self.count = item.name, item.path, item, count
+
+    def is_file(self, follow_symlinks=True):
+        self.count(("is_file", self.path))
+        return self.item.is_file(follow_symlinks=follow_symlinks)
+
+    def stat(self, follow_symlinks=True):
+        self.count(("stat", self.path))
+        return self.item.stat(follow_symlinks=follow_symlinks)
+
+    def __getattr__(self, name):
+        return getattr(self.item, name)
+
+
+@contextlib.contextmanager
+def listing_counted():
+    """Within the block, the calls that list a directory or read an entry's metadata are counted in the Counter the block gets: ("scandir", the directory) for
+    os.scandir, whose entries are Counted stand-ins that count ("is_file", the path) and ("stat", the path), and ("stat", the path) for os.stat and os.lstat
+    too, so that a stat by path counts as the entry's own does. A second call under one key raises OSError at once, after it is counted, so that a listing whose
+    calls grow with the square of its entries stops at its first repeat instead of running for minutes."""
+    calls, real = collections.Counter(), {name: getattr(os, name) for name in ("scandir", "stat", "lstat")}
+
+    def count(key):
+        calls[key] += 1
+        if calls[key] > 1:
+            raise OSError(f"{key[0]} called again for {key[1]}")
+
+    def scandir(path="."):
+        count(("scandir", os.fspath(path)))
+        with real["scandir"](path) as found:
+            return contextlib.nullcontext(iter([Counted(item, count) for item in found]))
+
+    def by_path(name):
+        def stat(path, *args, **kwargs):
+            count(("stat", path if isinstance(path, int) else os.fspath(path)))
+            return real[name](path, *args, **kwargs)
+        return stat
+
+    os.scandir, os.stat, os.lstat = scandir, by_path("stat"), by_path("lstat")
+    try:
+        yield calls
+    finally:
+        os.scandir, os.stat, os.lstat = real["scandir"], real["stat"], real["lstat"]
+
+
 class Unreadable:
     """A stand-in for a DirEntry whose file can be seen but whose metadata cannot be read: it answers is_file as ITEM, the real
     entry, does, and its stat raises ERROR."""
@@ -2269,6 +2319,26 @@ def test_the_guard_refuses_every_way_to_open_a_file(d):
             ok(False, f"census: the guard let {name} open a file")
     ok(len(opened) == len(ways), "census: the guard refuses open, io.open, os.open, Path.open, Path.read_text and Path.read_bytes")
     ok(read(path) == "" and pathlib.Path(path).read_text() == "", "census: the guard puts every way to open a file back")
+
+
+def test_the_counter_counts_each_listing_and_each_stat(d):
+    name = f"pipeline_{stamp(1)}_from-nix_00000001.txt"
+    box = mailbox(d, top=[name])
+    path, real = os.path.join(box, name), (os.scandir, os.stat, os.lstat)
+    with listing_counted() as calls:
+        with os.scandir(box) as found:
+            items = list(found)
+        held = items[0].is_file(follow_symlinks=False), items[0].stat(follow_symlinks=False).st_ctime, items[0].inode(), os.lstat(box).st_ino
+        first = dict(calls)
+        again = [raises(OSError, way) for way in (lambda: os.scandir(box), lambda: items[0].is_file(), lambda: os.stat(path), lambda: os.lstat(box))]
+    ok(first == {("scandir", box): 1, ("is_file", path): 1, ("stat", path): 1, ("stat", box): 1} and held[0] is True and held[1] == os.lstat(path).st_ctime
+       and held[2] == os.lstat(path).st_ino, "census: the counter counts a listing, an entry's is_file and stat, and a stat by path, each by its directory or path, "
+       "and an entry answers as the real one does, other methods included")
+    ok(all(isinstance(e, OSError) for e in again) and calls["scandir", box] == calls["is_file", path] == 2 and calls["stat", path] == calls["stat", box] == 2,
+       "census: a second call under one key is counted and raises OSError at once, a stat by path counting as the entry's own")
+    with contextlib.suppress(OSError), listing_counted():
+        raise OSError("out of the block")
+    ok((os.scandir, os.stat, os.lstat) == real, "census: the counter puts os.scandir, os.stat and os.lstat back, after a block that raised too")
 
 
 def test_listing_opens_no_file(d):
@@ -2407,6 +2477,18 @@ def test_age_falls_back_to_ctime(d):
 
 def test_census_scales(d):
     box = mailbox(d, top=[f"glm-5.2_{stamp(i)}_from-lfm3_{i:08x}.txt" for i in range(500)], channel=("ingest", [f"ingest_{stamp(i)}_from-lfm3_{i:08x}.txt" for i in range(5000)]))
+    # First the calls, which no machine's speed or load changes: a listing whose calls grow with the square of its entries fails here at its first repeat, however
+    # cheap each call is, which the time bounds below, the second line, need not catch. A step that calls nothing, such as comparing names held in memory, is the
+    # time bounds' alone.
+    channel, listed = os.path.join(box, "+ingest"), None
+    with listing_counted() as calls, contextlib.suppress(OSError):  # a call made again raises; the checks below report it
+        listed = list_entries(box, "ingest")
+    repeated = sorted(key for key, n in calls.items() if n > 1)
+    ok(repeated == [], "census: listing 5,500 names lists a directory once and asks an entry for is_file or stat once, by the entry or by its path, so that its calls "
+                       f"do not grow with the square of its entries (got {without_question_marks(repr(repeated[:3]))})")
+    ok(sorted(path for what, path in calls if what == "scandir") == sorted([box, channel]), "census: and it lists the mailbox and the channel, and no other directory")
+    paths = [os.path.join(box if x.dir == "top" else channel, x.name) for x in listed or ()]
+    ok(len(paths) == 5500 and all(calls["is_file", path] == calls["stat", path] == 1 for path in paths), "census: and asks each of the 5,500 entries for is_file and stat")
     # CPU time, not wall time: the pin is the listing's own work, which another process's load does not change.
     e = c = posts = listing = counting = None
     with files_refused() as opened:
@@ -2438,6 +2520,7 @@ def section_census(d):
     test_listing_order_is_the_stamps_not_the_filesystems(d)
     test_list_entries_in_a_changing_mailbox(d)
     test_the_guard_refuses_every_way_to_open_a_file(d)
+    test_the_counter_counts_each_listing_and_each_stat(d)
     test_listing_opens_no_file(d)
     test_an_entry_that_cannot_be_read_is_an_error_not_a_gap(d)
     test_unmatched_own_files(d)
@@ -4265,8 +4348,8 @@ def test_claude_md_precedence_names_the_shared_parts(d):
 FORGED_CHECK_SENTENCES = (
     "Every file in your name that the helper lists as `unmatched-own` is disputed, or goes to John as one question when the exceptions end with `and N more`, "
     "whatever its stamp or age.",
-    "`and N more` means more than 40 files in your name are unaccounted for, more than your self-caps let you dispute: dispute none of them one by one, open the "
-    "flood question, one question for John whose detail gives the count, and suspend protected relays as for any forged file until John answers it (section 10).",
+    f"`and N more` means more than {EXCEPTION_LINES} files in your name are unaccounted for, more than your self-caps let you dispute: dispute none of them one by one, "
+    "open the flood question, one question for John whose detail gives the count, and suspend protected relays as for any forged file until John answers it (section 10).",
     "The one wait is on a fresh context: never dispute a file in your name before the census has matched your open intents (section 13).")
 # The Forged row of section 6's table, whole. Its Fires-when cell says which files the check takes, which is where a clause that exempts some of them would go,
 # and its Action cell says what is done for each.
@@ -4381,6 +4464,16 @@ def test_claude_md_follows_the_worked_example_and_its_keys(d):
        "docs: CLAUDE.md says once that question_min also bounds a wait cycle, since POLICY.md has no key for one")
     ok(f"at most {MAX_KEY_WORDS} words and {MAX_KEY_CHARS} characters" in t and "starting with a lower-case letter" in t,
        f"docs: a metrics key is described as the helper refuses it: words starting with a lower-case letter, at most {MAX_KEY_WORDS} of them and {MAX_KEY_CHARS} characters")
+
+
+def test_claude_md_states_the_helpers_cap_as_it_is(d):
+    # EXCEPTION_LINES is the helper's display cap, not a threshold of POLICY.md, so CLAUDE.md states its value, in the flood rule of section 6 and in the account
+    # of the exceptions in section 8. Both are checked against the constant (the final review, M-3), so that a change to it fails here until CLAUDE.md says the same.
+    t = claude_md()
+    ok(f"more than {EXCEPTION_LINES} files" in claude_section(t, 6),
+       f"docs: section 6 of CLAUDE.md gives the flood rule's count as the helper's cap, EXCEPTION_LINES: more than {EXCEPTION_LINES} files")
+    ok(f"the files in your name stop at {EXCEPTION_LINES} lines, then `and N more`" in claude_section(t, 8),
+       f"docs: section 8 of CLAUDE.md says that the files in the steward's name stop at the helper's cap, EXCEPTION_LINES: {EXCEPTION_LINES} lines")
 
 
 # How long the question line may be: spec decision 4 caps it at 80 characters, and the final review (I-3) added a margin, since Claude Code indents the later
@@ -4648,7 +4741,7 @@ DOCS_CHECKS = (test_claude_md, test_claude_md_headings_are_in_order, test_claude
                test_claude_md_cites_every_policy_key, test_claude_md_precedence_names_the_shared_parts, test_claude_md_keeps_every_file_under_the_forged_check,
                test_claude_md_counts_a_reset_only_for_a_fresh_context, test_claude_md_keeps_its_state_unambiguous, test_claude_md_names_its_system_tools_by_path,
                test_claude_md_keeps_the_never_rules_of_spec_7_1, test_claude_md_prints_no_question_mark_in_its_templates, test_claude_md_routes_requests_and_marks_joins,
-               test_claude_md_reminds_of_notes_once, test_claude_md_follows_the_worked_example_and_its_keys,
+               test_claude_md_reminds_of_notes_once, test_claude_md_follows_the_worked_example_and_its_keys, test_claude_md_states_the_helpers_cap_as_it_is,
                test_claude_md_keeps_the_question_line_inside_the_pane, test_claude_md_takes_its_channel_from_topic_md_or_from_john, test_claude_md_answers_agent_decks_recovery_turn, test_shared_and_heartbeat,
                test_shared_and_heartbeat_forbid_what_spec_6_4_lists_and_grant_nothing, test_shared_and_heartbeat_hold_exactly_their_pinned_sentences,
                test_worker_md, test_worker_md_matches_what_claude_md_files_and_sends, test_worker_md_keeps_its_checks_and_safety_sentences_as_pinned,
@@ -4813,7 +4906,12 @@ def test_docs_checks_catch_each_pinned_regression(d):
         ("the question line's margin for the pane dropped", ", and keep it under 76, since your final text is indented two columns in a pane that may be 80 wide", "",
          "docs: section 9 of CLAUDE.md caps the question line at 80 characters"),
         ("the 4-hour form allowed the whole 80 characters", "still under 76 characters", "still within 80 characters",
-         "docs: section 9 of CLAUDE.md caps the question line at 80 characters"))
+         "docs: section 9 of CLAUDE.md caps the question line at 80 characters"),
+        # the final review's M-3: CLAUDE.md's two copies of the helper's cap, EXCEPTION_LINES
+        ("the flood rule's count no longer the helper's cap", f"more than {EXCEPTION_LINES} files", f"more than {EXCEPTION_LINES + 10} files",
+         "docs: section 6 of CLAUDE.md gives the flood rule's count as the helper's cap"),
+        ("the exceptions' account no longer the helper's cap", f"stop at {EXCEPTION_LINES} lines", f"stop at {EXCEPTION_LINES + 10} lines",
+         "docs: section 8 of CLAUDE.md says that the files in the steward's name stop at the helper's cap"))
     for i, (what, old, new, failure) in enumerate(regressions):
         failures = docs_checks(checkout_with(d, f"regression-{i}", "CLAUDE.md", old, new))
         ok(old in good and any(f.startswith(failure) for f in failures), f"docs: docs_checks catches {what} (got {without_question_marks(repr(failures))})")
@@ -5041,6 +5139,85 @@ def test_docs_checks(d):
        "docs: in a checkout with no CLAUDE.md, each check function adds one failure that names it and the error, the next one still runs, and ok and REPO are put back")
 
 
+# agent-mail's name grammar and its bound on a post stamped ahead, which three files copy and nothing else ties together (the final review, M-4): agent-mail's
+# own NAME_PAT and FUTURE, this file's NAME_RE, from which MSG_RE is built, and the scanner patch's MAIL_NAME and MAIL_FUTURE. Each copy is read as text from a
+# checkout, the line that defines it found by a pattern whose group is the copy, so that a check can plant a copy that drifts in a scratch checkout. A bound is
+# a number, or numbers joined by *, as the patch writes 24 * 3600.
+GRAMMAR_COPIES = (  # (the file, its path in a checkout, the line that defines its name pattern, the line that defines its bound or None)
+    ("agent-mail", "agent-mail", r'^NAME_PAT = r"(.*)"$', r"^FUTURE = ([0-9.* ]+?) *(?:#.*)?$"),
+    ("steward-signals", os.path.join("steward", "steward-signals"), r'^NAME_RE = re\.compile\(r"(.*)"\)', None),
+    ("the scanner patch", os.path.join("steward", "patches", "monitor_sessions-steward.patch"), r'^\+MAIL_NAME = r"(.*)"$', r"^\+MAIL_FUTURE = ([0-9.* ]+?) *(?:#.*)?$"))
+
+
+def product_of(text):
+    """The value of TEXT, a number or numbers joined by *, such as 24 * 3600, as a float; None for anything else."""
+    parts = [part.strip() for part in text.split("*")]
+    if not all(NUMBER_RE.fullmatch(part) for part in parts):
+        return None
+    value = 1.0
+    for part in parts:
+        value *= float(part)
+    return value
+
+
+def grammar_disagreements(checkout):
+    """Why the copies of GRAMMAR_COPIES in the checkout CHECKOUT do not agree, one line for each reason, or [] when they agree: a copy whose defining line is
+    missing or not alone in its file, a bound that is not a number or a product of numbers, and a name pattern or a bound that differs from agent-mail's. It
+    reads the three files and nothing else, and what it says holds no question mark, since a pattern's are taken out."""
+    copies, wrong = {}, []
+    for what, path, *lines in GRAMMAR_COPIES:
+        text = read(os.path.join(checkout, path))
+        for kind, line in zip(("name pattern", "bound"), lines):
+            if line is None:
+                continue
+            found = re.findall(line, text, re.M)
+            if len(found) != 1:
+                wrong.append(f"{what} has {len(found)} lines that define its {kind}, not one")
+            elif kind == "bound" and product_of(found[0]) is None:
+                wrong.append(f"the bound of {what} is not a number or a product of numbers")
+            else:
+                copies[what, kind] = found[0] if kind == "name pattern" else product_of(found[0])
+    for (what, kind), copy in copies.items():
+        theirs = copies.get(("agent-mail", kind))
+        if what != "agent-mail" and theirs is not None and copy != theirs:
+            wrong.append(without_question_marks(f"the {kind} of {what}, {copy}, is not agent-mail's, {theirs}"))
+    return wrong
+
+
+def test_the_name_grammar_agrees_in_its_three_copies(d):
+    found = grammar_disagreements(REPO)
+    ok(found == [], "docs: agent-mail, this helper and the scanner patch copy agent-mail's name grammar alike, and agent-mail and the patch its 24-hour bound on a post "
+                    f"stamped ahead (got {without_question_marks(repr(found))})")
+    _, path, line, _ = GRAMMAR_COPIES[1]
+    ok(re.findall(line, read(os.path.join(REPO, path)), re.M) == [NAME_RE.pattern], "docs: the copy that the grammar check reads in this helper's text is the NAME_RE it runs with")
+
+
+def test_the_grammar_check_catches_each_copy_that_drifts(d):
+    files = {path: read(os.path.join(REPO, path)) for _, path, _, _ in GRAMMAR_COPIES}
+    helper, patch, pattern = GRAMMAR_COPIES[1][1], GRAMMAR_COPIES[2][1], NAME_RE.pattern
+    regressions = (  # (what, the file, the text it changes, its replacement, how a reason that grammar_disagreements must give starts)
+        ("agent-mail's pattern widened to underscores", "agent-mail", f'NAME_PAT = r"{pattern}"', 'NAME_PAT = r"[a-z0-9_](?:[a-z0-9._]|-(?!-))*"', "the name pattern of "),
+        ("this helper's pattern allowing a double hyphen", helper, f'NAME_RE = re.compile(r"{pattern}")', 'NAME_RE = re.compile(r"[a-z0-9](?:[a-z0-9.-])*")',
+         "the name pattern of steward-signals"),
+        ("the patch's pattern allowing capitals", patch, f'+MAIL_NAME = r"{pattern}"', '+MAIL_NAME = r"[a-zA-Z0-9](?:[a-zA-Z0-9.]|-(?!-))*"',
+         "the name pattern of the scanner patch"),
+        ("agent-mail's bound halved", "agent-mail", "FUTURE = 86400.0", "FUTURE = 43200.0", "the bound of the scanner patch, 86400.0, is not agent-mail's, 43200.0"),
+        ("the patch's bound halved", patch, "+MAIL_FUTURE = 24 * 3600", "+MAIL_FUTURE = 12 * 3600", "the bound of the scanner patch, 43200.0, is not agent-mail's, 86400.0"),
+        ("the patch's pattern line renamed", patch, "+MAIL_NAME = r", "+MAIL_NAME_PAT = r", "the scanner patch has 0 lines that define its name pattern"),
+        ("the patch's bound made a name", patch, "+MAIL_FUTURE = 24 * 3600", "+MAIL_FUTURE = ONE_DAY", "the scanner patch has 0 lines that define its bound"),
+        ("the patch's bound made a broken product", patch, "+MAIL_FUTURE = 24 * 3600", "+MAIL_FUTURE = 24 * * 3600",
+         "the bound of the scanner patch is not a number or a product of numbers"),
+        ("a second definition of agent-mail's pattern", "agent-mail", f'NAME_PAT = r"{pattern}"\n', f'NAME_PAT = r"{pattern}"\nNAME_PAT = r"[a-z]+"\n',
+         "agent-mail has 2 lines that define its name pattern"))
+    for i, (what, path, old, new, reason) in enumerate(regressions):
+        root = os.path.join(d, f"grammar-{i}")
+        for each, text in files.items():
+            os.makedirs(os.path.join(root, os.path.dirname(each)), exist_ok=True)
+            write(root, each, text.replace(old, new, 1) if each == path else text)
+        found = grammar_disagreements(root)
+        ok(old in files[path] and any(f.startswith(reason) for f in found), f"docs: the grammar check catches {what} (got {without_question_marks(repr(found))})")
+
+
 @section("docs")
 def section_docs(d):
     test_strip_code_and_template(d)  # first: the checks below read CLAUDE.md through these readers
@@ -5053,6 +5230,8 @@ def section_docs(d):
     test_docs_checks_catch_each_regression_in_worker_md(d)
     test_docs_checks_accept_the_never_clauses_they_describe(d)
     test_docs_checks_keeps_to_its_limits(d)
+    test_the_name_grammar_agrees_in_its_three_copies(d)
+    test_the_grammar_check_catches_each_copy_that_drifts(d)
 
 
 # ---- main ----
