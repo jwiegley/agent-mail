@@ -77,7 +77,7 @@ agent-deck conductor setup ingest-steward -agent claude \
   -instructions-md ~/src/sys/agent-mail/steward/CLAUDE.md \
   -policy-md ~/src/sys/agent-mail/steward/POLICY.md \
   -heartbeat-rules-md ~/src/sys/agent-mail/steward/HEARTBEAT_RULES.md \
-  -env AGENTDECK_CONTEXT_WINDOW=<window-in-tokens>
+  -env AGENTDECK_CONTEXT_WINDOW=200000
 ```
 
 For nix-config:
@@ -89,10 +89,10 @@ agent-deck conductor setup nix-steward -agent claude \
   -instructions-md ~/src/sys/agent-mail/steward/CLAUDE.md \
   -policy-md ~/src/sys/agent-mail/steward/POLICY.md \
   -heartbeat-rules-md ~/src/sys/agent-mail/steward/HEARTBEAT_RULES.md \
-  -env AGENTDECK_CONTEXT_WINDOW=<window-in-tokens>
+  -env AGENTDECK_CONTEXT_WINDOW=200000
 ```
 
-Replace `<window-in-tokens>` with the context window, in tokens, of the fleet's default model, which the stewards run (the design's decision 15). Left in place, it makes the command a parse error, and nothing runs. The variable arms agent-deck's clear-on-compact, the steward's daily context reset: agent-deck clears a Claude conductor's context when it fills, but only when it knows the conductor's window.
+The window, 200000 tokens, is John's decision of 2026-11-02. The variable arms agent-deck's clear-on-compact, the steward's daily context reset: agent-deck clears a Claude conductor's context when it fills, but only when it knows the conductor's window. With 200000, the clear comes no later than a window of 200K tokens fills. If the fleet's default model, which the stewards run (the design's decision 15), runs with a window of 1M tokens, agent-deck clears about five times more often than it needs to. Each clear is a fresh start, with the steward's state read from disk (CLAUDE.md section 13): agent-deck follows the clear with a heartbeat, which CLAUDE.md section 2 makes a turn like any other. Whether the clear fires without agent-deck's TUI open stays a day-zero check (row 21 of section 6).
 
 Setup creates `~/.local/share/agent-deck/conductor/<name>/` with its `meta.json`, links the conductor's CLAUDE.md, POLICY.md and HEARTBEAT_RULES.md to the checkout's files, links the shared `conductor/CLAUDE.md` to SHARED.md, and registers the session `conductor-<name>` without starting it. Its default heartbeat stays on. The heartbeat is inert until John groups hera sessions under the conductor's name, and nothing depends on it.
 

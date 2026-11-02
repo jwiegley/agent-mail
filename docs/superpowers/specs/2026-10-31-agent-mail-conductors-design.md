@@ -260,12 +260,12 @@ agent-deck conductor setup ingest-steward -agent claude \
   -instructions-md ~/src/sys/agent-mail/steward/CLAUDE.md \
   -policy-md ~/src/sys/agent-mail/steward/POLICY.md \
   -heartbeat-rules-md ~/src/sys/agent-mail/steward/HEARTBEAT_RULES.md \
-  -env AGENTDECK_CONTEXT_WINDOW=<the model's window in tokens>
+  -env AGENTDECK_CONTEXT_WINDOW=200000
 ```
 
 - `SHARED.md` is a steward-safe replacement for the shared conductor instructions (today the stewards are the only Claude conductors; `director` runs Codex); `CLAUDE.md` also states that it takes precedence over any shared conductor text and names the parts that do not apply (auto-respond, `/send`, session control, the heartbeat `NEED:` format, `state.json` and `task-log.md`) **[my call]**.
 - The four files live in the agent-mail repository under `steward/` and are landed on `main` before the pilot, so every host's checkout carries them **[John 14]**. Setup links `CLAUDE.md`, `SHARED.md` and `HEARTBEAT_RULES.md` into hera's checkout, so a revision reaches both stewards when the checkout is pulled; the conductor's `POLICY.md` is made a copy right after setup, because John edits thresholds there and must not dirty the checkout **[my call]**. nix packaging of `steward/` follows v2's Task 22 pattern after the pilot.
-- `AGENTDECK_CONTEXT_WINDOW` arms agent-deck's clear-on-compact, the design's daily context reset; whether it fires without a TUI, and what starts the next turn after a `/clear`, are day-zero checks (section 10) **[my call]**. The default heartbeat stays enabled; it is inert until John groups hera members under the conductor's name, and the design never depends on it **[my call]**.
+- `AGENTDECK_CONTEXT_WINDOW`, set to 200000 **[John 24]**, arms agent-deck's clear-on-compact, the design's daily context reset; whether it fires without a TUI, and what starts the next turn after a `/clear`, are day-zero checks (section 10) **[my call]**. The default heartbeat stays enabled; it is inert until John groups hera members under the conductor's name, and the design never depends on it **[my call]**.
 - The model and account are the fleet's defaults **[John 15]**.
 
 John then types the topic's purpose and the member list in the steward's pane (6.8), and in each member's own pane one line: "You are a member of +ingest; its steward is conductor-ingest-steward; read and follow `~/src/agent-mail/steward/WORKER.md`" (the path of that host's checkout; `~/src/sys/agent-mail/...` on hera and clio).
