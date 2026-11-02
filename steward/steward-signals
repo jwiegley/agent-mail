@@ -4599,9 +4599,12 @@ START_REOPEN_SENTENCE = "Then remove `closed` from steward-state.json if a close
 # decision 26 (2026-11-02) applies the correction: section 3's opening resets those keys before anything else, and step 4 creates or keeps those files. It
 # keeps closed until step 3 has written TOPIC.md: an existing TOPIC.md with no closed key is an open topic to the definition of <channel>, so a closed key
 # cleared first would hand the new topic the old heading's channel. Both are pinned whole, the reset as the first of section 3's two sentences on closed.
-START_RESET_SENTENCE = ("If steward-state.json holds `closed`, then before anything else set `next_q` to 1 and `relays_suspended` to false, and remove "
-                        "`note_reminder_post` and `last_summary_date`, which were the closed topic's, but keep `closed` until step 3 has written TOPIC.md, so "
-                        "that your channel stays the one John named.")  # section 3's opening, after START_NAMING_SENTENCE
+# The cycle's review (Important 2) widened the reset: the default deadlines go too, since questions are numbered from 1 per topic, so a closed topic's
+# deadline under an id the new topic reuses would have section 4 apply that default, mail DEFAULT <q-id> and record it in the DECISIONS.md that step 4 keeps;
+# and the nudges and offers per worker go, for a clean slate. nag, last_summary_post and last_digest stay.
+START_RESET_SENTENCE = ("If steward-state.json holds `closed`, then before anything else set `next_q` to 1 and `relays_suspended` to false, and remove the "
+                        "nudges and offers per worker, the default deadlines, `note_reminder_post` and `last_summary_date`, which were the closed topic's, but "
+                        "keep `closed` until step 3 has written TOPIC.md, so that your channel stays the one John named.")  # section 3's opening, after START_NAMING_SENTENCE
 START_FILES_STEP = ("4. Create `LEDGER.md` from the template in section 11, and create or keep `DECISIONS.md`, `done.md`, `log/` and `metrics/`, which a closed "
                     "topic leaves (section 14). If John seeded `BACKLOG.md`, each of its items becomes an `unclaimed` row.")
 # What a close leaves running, parked at the end of the run and pinned under the same decision: step 4 of section 14 restarts neither the doorbell nor the
@@ -5048,9 +5051,13 @@ def test_docs_checks_catch_each_pinned_regression(d):
          "docs: section 3 of CLAUDE.md removes closed when a new topic starts"),
         ("a new topic's start that keeps the closed topic's suspended relays", " and `relays_suspended` to false,", ",",
          "docs: section 3 of CLAUDE.md removes closed when a new topic starts"),
-        ("a new topic's start that keeps the closed topic's reminder and summary date",
-         "and remove `note_reminder_post` and `last_summary_date`, which were the closed topic's, but", "but",
+        ("a new topic's start that keeps the closed topic's reminder and summary date", ", `note_reminder_post` and `last_summary_date`, which", ", which",
          "docs: section 3 of CLAUDE.md removes closed when a new topic starts"),
+        # the cycle's review, Important 2: the default deadlines, and the nudges and offers per worker
+        ("a new topic's start that keeps the closed topic's default deadlines", "remove the nudges and offers per worker, the default deadlines,",
+         "remove the nudges and offers per worker,", "docs: section 3 of CLAUDE.md removes closed when a new topic starts"),
+        ("a new topic's start that keeps the closed topic's nudges and offers", "remove the nudges and offers per worker, the default deadlines,",
+         "remove the default deadlines,", "docs: section 3 of CLAUDE.md removes closed when a new topic starts"),
         ("a new topic's start that clears closed first, which hands it the old heading's channel",
          "but keep `closed` until step 3 has written TOPIC.md, so that your channel stays the one John named.", "and remove `closed` too.",
          "docs: section 3 of CLAUDE.md removes closed when a new topic starts"),
