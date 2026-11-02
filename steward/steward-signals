@@ -6,10 +6,13 @@ message file, never writes to the mailbox and never sends anything, and it reads
 It writes two things in the conductor directory: the steward's daily metrics file, and the time of each signals call in steward-state.json (both below).
 
 POLICY.md holds the steward's thresholds and self-caps as a Markdown table, | key | value | meaning |, with
-one row for each key in POLICY_KEYS. A missing, unknown or repeated key, or a value its key cannot use (a
-number above zero of at most 12 ASCII digits, a whole number for the six keys that count things; for
-summary_local_time a time of day, HH:MM; for summary_tz a tz database name), is refused with the key named;
-nothing falls back to a default.
+one row for each of these keys:
+
+POLICY_KEYS
+
+A missing, unknown or repeated key, or a value its key cannot use (a number above zero of at most 12 ASCII
+digits, a whole number for the six keys that count things; for summary_local_time a time of day, HH:MM; for
+summary_tz a tz database name), is refused with the key named; nothing falls back to a default.
 
 TOPIC.md lists the topic's members as one Markdown table, | name | host | harness |, under a "## Members" heading. A
 name that is not an agent-mail name or is listed twice, or a member with no host or with a host that is not lower-case
@@ -99,6 +102,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import zoneinfo
 
@@ -3977,19 +3981,38 @@ def test_the_help_gives_the_cap_as_its_number(d):
        f"signals: {phrase} written with the number in the docstring's phrase, or in the signals help's, outside the self-test, fails the second check")
 
 
+def keys_list_lines(help_text):
+    """The lines of HELP_TEXT that hold nothing but POLICY.md keys and the commas between them, under an indent of four: the top-level help's list of keys."""
+    return [line for line in help_text.splitlines() if re.fullmatch(r" {4}[a-z_]+(?:, [a-z_]+)*,?", line)]
+
+
+def keys_read_as_a_list(help_text):
+    """Whether HELP_TEXT gives the POLICY.md keys as a list: more than one line of them, each at most KEYS_HELP_WIDTH wide, that hold every key in order."""
+    lines = keys_list_lines(help_text)
+    return len(lines) > 1 and all(len(line) <= KEYS_HELP_WIDTH for line in lines) and " ".join(line.strip() for line in lines) == ", ".join(POLICY_KEYS)
+
+
 def test_the_help_gives_the_policy_keys_themselves(d):
     keys = ", ".join(POLICY_KEYS)
-    top = " ".join(capture(main, ["--help"])[0].split())
+    raw = capture(main, ["--help"])[0]
+    top = " ".join(raw.split())
     ok(keys in top and "POLICY_KEYS" not in top,
        "signals: the top-level help gives the keys of POLICY.md themselves, in their order and joined by commas, where the docstring names POLICY_KEYS")
-    # The regression, from John's decision 26 (2026-11-02): a copy of this file whose help leaves the name as it stands. As in the check above, the search
-    # string is built in two pieces, so that it never stands whole in these lines, and it is found exactly once.
+    ok(keys_read_as_a_list(raw),
+       f"signals: the top-level help gives the keys as a list, on lines indented four columns and at most {KEYS_HELP_WIDTH} wide, not as one long line")
+    # The regressions, from John's decision 26 (2026-11-02) and the fix round's Minor 8: a copy of this file whose help leaves the name as it stands, and one
+    # whose help gives the keys on one long line. As in the check above, each search string is built in two pieces, so that it never stands whole in these
+    # lines, and it is found exactly once.
     source = read(os.path.realpath(__file__))
-    old = '.replace("POLICY' + '_KEYS", ", ".join(POLICY_KEYS))'
-    status, out, _ = run_this_file("--help", script=write(tempfile.mkdtemp(dir=d), "steward-signals", source.replace(old, "")))
+    bare = '.replace("POLICY' + '_KEYS", keys)'
+    status, out, _ = run_this_file("--help", script=write(tempfile.mkdtemp(dir=d), "steward-signals", source.replace(bare, "")))
     shown = " ".join(out.split())
-    ok(source.count(old) == 1 and status == 0 and "POLICY_KEYS" in shown and keys not in shown,
+    ok(source.count(bare) == 1 and status == 0 and "POLICY_KEYS" in shown and keys not in shown,
        "signals: a copy of this file whose top-level help gives the bare name POLICY_KEYS fails the first check")
+    unwrapped = 'textwrap' + '.fill(", ".join(POLICY_KEYS), width=KEYS_HELP_WIDTH, initial_indent="    ", subsequent_indent="    ")'
+    status, out, _ = run_this_file("--help", script=write(tempfile.mkdtemp(dir=d), "steward-signals", source.replace(unwrapped, '", ".join(POLICY_KEYS)')))
+    ok(source.count(unwrapped) == 1 and status == 0 and keys in " ".join(out.split()) and not keys_read_as_a_list(out),
+       "signals: a copy of this file whose top-level help gives the keys on one long line fails the second check")
 
 
 def test_compact_ages(d):
@@ -5370,10 +5393,15 @@ def section_docs(d):
 
 # ---- main ----
 
+KEYS_HELP_WIDTH = 100  # the most columns of a line of the top-level help's list of POLICY.md keys, its indent of four included, inside the width of that paragraph
+
+
 def help_description():
     """The module docstring as the top-level --help prints it: the names EXCEPTION_LINES and POLICY_KEYS, which the docstring uses since it cannot be an
-    f-string, given as what they hold: the number, as the signals help gives it, and the keys, in their order and joined by commas."""
-    return (__doc__ or "").replace("EXCEPTION_LINES", str(EXCEPTION_LINES)).replace("POLICY_KEYS", ", ".join(POLICY_KEYS))
+    f-string, given as what they hold: the number, as the signals help gives it, and the keys, in their order and joined by commas, wrapped into lines
+    indented four columns and at most KEYS_HELP_WIDTH wide, so that the list reads as a list."""
+    keys = textwrap.fill(", ".join(POLICY_KEYS), width=KEYS_HELP_WIDTH, initial_indent="    ", subsequent_indent="    ")
+    return (__doc__ or "").replace("EXCEPTION_LINES", str(EXCEPTION_LINES)).replace("POLICY_KEYS", keys)
 
 
 def build_parser():
