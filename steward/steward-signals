@@ -4541,9 +4541,10 @@ def test_claude_md_states_the_helpers_cap_as_it_is(d):
 
 
 # How long the question line may be: spec decision 4 caps it at 80 characters, and the final review (I-3) added a margin, since Claude Code indents the later
-# lines of the final text by two columns, so that an 80-character line can wrap in a pane 80 wide, and the scanner would page the line's tail without the
-# question's id: the scanner patch's -J (John's decision 23) joins only the lines that tmux wrapped, and Claude Code breaks its own rows. These are the only
-# sentences of section 9 that name either number, each as pinned: the cap with its margin, and the 4-hour form inside the margin.
+# lines of the final text by two columns, so that an 80-character line can wrap in a pane 80 wide, and the scanner, which captures the pane without joining
+# wrapped lines, would page the line's tail without the question's id. John's decision 29 withdrew the -J of his decision 23 from the scanner patch, since
+# -J joins only the rows that tmux wrapped and Claude Code breaks its own. These are the only sentences of section 9 that name either number, each as
+# pinned: the cap with its margin, and the 4-hour form inside the margin.
 QUESTION_LENGTH_SENTENCES = (
     "It is at most 80 characters, and keep it under 76, since your final text is indented two columns in a pane that may be 80 wide.",
     "- After 4 hours unanswered, change its text once, still under 76 characters, so that the scanner pages it again:")

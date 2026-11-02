@@ -507,7 +507,11 @@ class MonitorPass(StewardFixture):
         second = m.monitor([], "Steward fixture pass")
         self.assertEqual(second["steward_alerts"], first["steward_alerts"])
         self.assertEqual(self.pages, ["NEED(steward): " + DETAIL])  # the receipt kept in state.json holds it back
-        self.assertEqual({args[0] for args in self.commands}, {"agent-deck", "indicator"})
+        # The pass listed the fleet with agent-deck and ran nothing else but John's indicator, which his scanner ran until
+        # 2026-11-02 15:43 and no longer runs ("per operator policy"); the recorder above refuses any other command.
+        ran = {args[0] for args in self.commands}
+        self.assertIn("agent-deck", ran)
+        self.assertLessEqual(ran, {"agent-deck", "indicator"})
         text = self.log.read_text()
         self.assertEqual(text.count("## Steward fixture pass "), 2)
         self.assertIn(DETAIL, text)
@@ -631,100 +635,6 @@ class QuestionLine(unittest.TestCase):
         # why the template forbids github: (steward/CLAUDE.md section 9).
         github = question.replace("nixpkgs", "github:nixpkgs")
         self.assertIsNone(m.visible_prompt_or_question(final_message(*detail, github)))
-
-
-def pane_rows(text, width):
-    """The rows that tmux holds for TEXT written into a pane WIDTH columns wide by a program that leaves the wrapping to tmux, as (row, wrapped) pairs:
-    each line of TEXT in rows of WIDTH characters, every row of a line but its last marked wrapped."""
-    rows = []
-    for line in text.splitlines():
-        pieces = [line[at:at + width] for at in range(0, len(line), width)] or [""]
-        rows += [(piece, at < len(pieces) - 1) for at, piece in enumerate(pieces)]
-    return rows
-
-
-def captured(rows, joined):
-    """What tmux capture-pane prints for ROWS, (row, wrapped) pairs: without -J each row on a line of its own, less its trailing spaces; with -J (JOINED)
-    a wrapped row joined to the next, and the spaces a program wrote at a row's end kept (tmux 3.8's manual: -J preserves trailing spaces and joins any
-    wrapped lines)."""
-    if not joined:
-        return "".join(row.rstrip(" ") + "\n" for row, _ in rows)
-    return "".join(row if wrapped else row + "\n" for row, wrapped in rows)
-
-
-@contextlib.contextmanager
-def fake_tmux(rows):
-    """The scanner's run and ssh replaced, so that its local and its remote capture-pane both print ROWS as tmux would, joined only when the command
-    asks for -J, and so that any other command fails the test."""
-    def run(args, timeout=20):
-        if args[:2] != ["tmux", "capture-pane"]:
-            raise AssertionError(f"the capture ran {args}")
-        return subprocess.CompletedProcess(args, 0, captured(rows, "-J" in args), "")
-
-    def ssh(host, command, timeout=20):
-        if "tmux capture-pane " not in command:
-            raise AssertionError(f"the capture ran {command}")
-        return subprocess.CompletedProcess([host, command], 0, captured(rows, "-J" in command.split()), "")
-
-    with patch.object(m, "run", run), patch.object(m, "ssh", ssh):
-        yield
-
-
-def both_captures(target="ingest-steward"):
-    """The text of TARGET's pane from the scanner's local capture, then from its remote one."""
-    return [m.capture_tmux(target), m.capture_remote_direct("andoria-08", target)[0]]
-
-
-class JoinedCapture(unittest.TestCase):
-    """John's decision 23 of 2026-11-02: both of the scanner's captures pass -J to tmux capture-pane, which joins the lines tmux wrapped at the pane's
-    edge, and the patch takes out the spaces that -J keeps at a line's end, so that every check reads what it read before, a wrapped line joined.
-    A line that the program in the pane broke itself has no wrapped rows, and -J leaves it as it is."""
-
-    QUESTION = "Q ingest-3: HF org for glm-5.3-fp8: A positron-internal, B positron-ai?"
-    DETAIL = ("ingest-3, from glm-5.2: which HF org gets the glm-5.3-fp8 weights. A keeps them internal for the",
-              "eval; B publishes them. I recommend A. The default, hold, applies at 21:00Z. It blocks glm53-fp8.",
-              "Send ingest-steward: ingest-3 A, as a new message.",
-              "")
-
-    def test_both_captures_ask_tmux_to_join_wrapped_lines(self):
-        local, remote = [], []
-        with patch.object(m, "run", side_effect=lambda args, timeout=20: local.append((args, timeout)) or subprocess.CompletedProcess(args, 0, "", "")):
-            m.capture_tmux("ingest-steward")
-        self.assertEqual(local, [(["tmux", "capture-pane", "-p", "-J", "-S", "-260", "-t", "ingest-steward"], 10)])
-        with patch.object(m, "ssh", side_effect=lambda host, command, timeout=20: remote.append((host, command, timeout))
-                          or subprocess.CompletedProcess([host, command], 0, "", "")):
-            m.capture_remote_direct("andoria-08", "glm-5.2", lines=40)
-        self.assertEqual(remote, [("andoria-08", m.remote_tmux_command("tmux capture-pane -p -J -S -40 -t glm-5.2"), 15)])
-
-    def test_a_question_line_wider_than_the_pane_pages_whole_when_tmux_wrapped_it(self):
-        rows = pane_rows(final_message(*self.DETAIL, self.QUESTION), width=60)
-        self.assertIn(("  " + self.QUESTION)[:60], [row for row, wrapped in rows if wrapped])  # the line is wider than the pane, and tmux wrapped it
-        # Captured without -J, the line's last row pages alone, without the question's id: what -J is for.
-        self.assertNotIn("ingest-3", m.visible_prompt_or_question(captured(rows, joined=False)))
-        with fake_tmux(rows):
-            for text in both_captures():
-                self.assertEqual(m.visible_prompt_or_question(text), self.QUESTION)
-
-    def test_the_spaces_that_j_keeps_at_a_lines_end_change_nothing(self):
-        # Rows that carry spaces to the pane's edge, as Claude Code's do: -J keeps them, and the patch takes them out.
-        pane = final_message(*self.DETAIL, self.QUESTION)
-        rows = [(row.ljust(60), wrapped) for row, wrapped in pane_rows(pane, width=60)]
-        self.assertIn(self.QUESTION + " ", captured(rows, joined=True))
-        with fake_tmux(rows):
-            for text in both_captures():
-                self.assertEqual(text, "".join(line.rstrip(" ") + "\n" for line in pane.splitlines()))  # each line whole, less its trailing spaces
-                self.assertEqual(m.visible_prompt_or_question(text), self.QUESTION)
-        # Only spaces go, as tmux drops only spaces from a capture without -J: a tab or a no-break space at a line's end stays.
-        self.assertEqual(m.trim_trailing_spaces("a  \nb\xa0\nc\t\n  \n"), "a\nb\xa0\nc\t\n\n")
-
-    def test_an_error_that_a_line_break_parts_is_still_known_with_the_spaces_that_j_keeps(self):
-        # Claude Code broke the error over two rows itself, so tmux marks no row wrapped and -J joins nothing; it keeps each row's spaces, which put more
-        # than the 20 spaces of SAFE_PATTERNS' 529 rule between 529 and Overloaded, so the patch takes them out.
-        rows = [("  ⎿  API Error: 529".ljust(80), False), ("     Overloaded. This is a server-side issue, usually temporary".ljust(80), False)]
-        with fake_tmux(rows):
-            for text in both_captures("worker"):
-                self.assertEqual(text, "  ⎿  API Error: 529\n     Overloaded. This is a server-side issue, usually temporary\n")
-                self.assertEqual(m.safe_signature(text), "API Error: 529 Overloaded. This is a server-side issue, usually temporary")
 
 
 @unittest.skipIf(b is None, BRIDGE_SKIP)
