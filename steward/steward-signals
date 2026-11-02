@@ -4500,14 +4500,18 @@ def test_claude_md_keeps_the_question_line_inside_the_pane(d):
 # a fresh context that finds closed starts and writes nothing; a new topic's start removes closed; and the control takes a channel once the topic is closed,
 # though the old TOPIC.md is still there. The definition, the control's row, section 3's step 2 and section 13's step 1 are each pinned whole, and section 3's
 # one sentence on closed is pinned as the only one there, so that none of them can turn back to the purposes alone, to a naming that never ends, or to a
-# closed topic that a restart opens again, unseen.
+# closed topic that a restart opens again, unseen. The fess audit of Task 12 (L4) found that section 3 and the control asked for channel only when the purpose
+# does not name the steward, while the README has John type it for +ingest and +nix-config too: both now say that he may type it for any channel and must
+# for one whose purpose does not name the steward, and section 3's sentence on it is pinned as the only one there that names the control.
 CHANNEL_DEFINITION = ("- `<channel>` is your channel's name without its `+`: the one in TOPIC.md's heading while a topic is open (TOPIC.md exists and steward-state.json "
                       "holds no `closed`); otherwise, the one John has named with `channel` since your last `close` (section 9), or else the channel whose purpose "
                       "names you (`ingest`, `nix-config`).")
 CHANNEL_ROW = ("| `channel <name>` | take `+<name>` as your channel, even when its purpose names no steward: hold the name until step 3 of section 3 writes TOPIC.md, "
-               "whose heading, `# +<name>`, then carries it, and write no TOPIC.md before then. John types it before `purpose` and `members`, for a channel whose "
-               "purpose does not name you. A later `channel` typed before section 3 writes TOPIC.md replaces the earlier one, and `close` ends the naming. While a "
-               "topic is open, refuse it in one line: \"close the topic first\"; once `close` has set `closed`, take it, though the old TOPIC.md is still there |")
+               "whose heading, `# +<name>`, then carries it, and write no TOPIC.md before then. John may type it, before `purpose` and `members`, for any channel, and "
+               "must for one whose purpose does not name you. A later `channel` typed before section 3 writes TOPIC.md replaces the earlier one, and `close` ends "
+               "the naming. While a topic is open, refuse it in one line: \"close the topic first\"; once `close` has set `closed`, take it, though the old TOPIC.md is still there |")
+START_NAMING_SENTENCE = ("He then types in your pane `purpose <text>` and `members <names>`, after `channel <name>`, which he may type for any channel and must for "
+                         "one whose purpose does not name you (section 9).")  # section 3's opening, after the sentence on setup
 START_CHANNEL_STEP = ("2. Call `channels`: `+<channel>` must exist, with a purpose that names you unless John named the channel with `channel`, which needs no such "
                       "purpose. If it is missing, tell John in one line; only he creates channels.")
 START_REOPEN_SENTENCE = "Then remove `closed` from steward-state.json if a closed topic left it there."  # the end of section 3's step 3, which writes TOPIC.md
@@ -4529,8 +4533,11 @@ def test_claude_md_takes_its_channel_from_topic_md_or_from_john(d):
        "docs: CLAUDE.md defines <channel> as pinned: TOPIC.md's heading while a topic is open, TOPIC.md there and no closed key, otherwise the channel John "
        "named with channel since the last close, else the one whose purpose names the steward")
     ok([line for line in claude_section(t, 9).splitlines() if line.startswith("| `channel ")] == [CHANNEL_ROW],
-       "docs: section 9 of CLAUDE.md has the channel control as pinned, which takes a channel whose purpose names no steward, holds it until TOPIC.md's heading "
-       "carries it, lets a later channel replace it and close end it, refuses it while a topic is open, and takes it once the topic is closed")
+       "docs: section 9 of CLAUDE.md has the channel control as pinned, which takes a channel whose purpose names no steward, which John may type for any channel "
+       "and must for one whose purpose does not name the steward, holds it until TOPIC.md's heading carries it, lets a later channel replace it and close end it, "
+       "refuses it while a topic is open, and takes it once the topic is closed")
+    ok([s for s in sentences(claude_section(t, 3)) if "`channel <name>`" in s] == [START_NAMING_SENTENCE],
+       "docs: section 3 of CLAUDE.md says that John may type channel for any channel and must for one whose purpose does not name the steward, as pinned")
     ok([line for line in claude_section(t, 3).splitlines() if line.startswith("2. ")] == [START_CHANNEL_STEP],
        "docs: step 2 of section 3 of CLAUDE.md accepts a channel John named with channel, as pinned")
     ok([s for s in sentences(claude_section(t, 3)) if "`closed`" in s] == [START_REOPEN_SENTENCE],
@@ -4733,7 +4740,7 @@ def test_steward_readme_and_pointer(d):
     ok("cannot authorize" in top, "docs: the README's rules are unchanged")
 
 
-# The check functions that read the instruction files in a checkout, which section docs runs on this one and docs_checks runs on any. Under docs_checks a
+# The check functions that read the instruction files and the two READMEs in a checkout, which section docs runs on this one and docs_checks runs on any. Under docs_checks a
 # function runs with ok and REPO rebound, and one that a later task adds here keeps to what that means: ok lists a failure instead of raising it, so the
 # function goes on after a check that fails, and raises, which reports through ok, returns None after a call that raised nothing; REPO is the checkout
 # given, so conductor_dir copies that checkout's POLICY.md; and each function receives None for its directory, so it must never write.
@@ -4911,7 +4918,15 @@ def test_docs_checks_catch_each_pinned_regression(d):
         ("the flood rule's count no longer the helper's cap", f"more than {EXCEPTION_LINES} files", f"more than {EXCEPTION_LINES + 10} files",
          "docs: section 6 of CLAUDE.md gives the flood rule's count as the helper's cap"),
         ("the exceptions' account no longer the helper's cap", f"stop at {EXCEPTION_LINES} lines", f"stop at {EXCEPTION_LINES + 10} lines",
-         "docs: section 8 of CLAUDE.md says that the files in the steward's name stop at the helper's cap"))
+         "docs: section 8 of CLAUDE.md says that the files in the steward's name stop at the helper's cap"),
+        # the fess audit of Task 12 (L4): John may type channel for any channel, and must for one whose purpose does not name the steward
+        ("the control typed again only for a channel whose purpose does not name the steward",
+         "John may type it, before `purpose` and `members`, for any channel, and must for one whose purpose does not name you.",
+         "John types it before `purpose` and `members`, for a channel whose purpose does not name you.", "docs: section 9 of CLAUDE.md has the channel control as pinned"),
+        ("section 3 asking for channel only when the purpose names no steward",
+         "after `channel <name>`, which he may type for any channel and must for one whose purpose does not name you (section 9).",
+         "after `channel <name>` when the channel's purpose names no steward (section 9).",
+         "docs: section 3 of CLAUDE.md says that John may type channel for any channel"))
     for i, (what, old, new, failure) in enumerate(regressions):
         failures = docs_checks(checkout_with(d, f"regression-{i}", "CLAUDE.md", old, new))
         ok(old in good and any(f.startswith(failure) for f in failures), f"docs: docs_checks catches {what} (got {without_question_marks(repr(failures))})")
