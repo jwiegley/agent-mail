@@ -183,6 +183,27 @@ What stays on its host: claims, archive copies, rejected files and temporary fil
 - `~/Products/mailbox` was the old default. If a command or note still names it, use `~/Mailbox` instead.
 - **Another shared directory.** Point every session at it with `--dir` or `$AGENT_MAIL_DIR`, and run `agent-mail --dir <it> init` there once.
 
+### Checking a channel across hosts
+
+A session A on one host and a session B on another, each with `channels` showing its own bound name, exchange two posts on a channel (`+fleet` here). Address the request to B by name in the body: every subscriber on every host reads the post, and a bare "reply with this nonce" draws answers from all of them.
+
+1. A subscribes with `wake`; B subscribes quietly (a harness that reads mail only at a turn's start cannot be woken).
+2. A sends `{to: "+fleet", subject: "agent-mail 2 check", body: "<B>: nonce <N1>; reply on +fleet with it and a new one"}`. T0 is the post's UTC stamp.
+3. On B's host, the post's file appears in `~/Mailbox/+fleet/`; its ctime there is T1 (Syncthing keeps the stamp as the mtime).
+4. B's `receive` shows the post inside a frame with `post +fleet` on the list line; B posts N1 and a new nonce N2. T2 is that post's stamp.
+5. A's doorbell rings and A's `receive` shows B's post with both nonces; the doorbell's time is T3.
+6. On both hosts: `pending <unsubscribed name>` lists no channel item; each reader's `.<name>-read/` holds its copies; `reread {last: true}` re-renders the last batch; the two files in `+fleet/` have the same sha256 on both hosts.
+
+Measured on 2026-11-02 between 05:23 and 05:25 UTC, A a Claude Code session on Hera (agent-mail 2.0.0 server, 2.1.0 on disk), B a Codex session on andoria-08 (agent-mail 2.1.0 through the MCP server, Hera reached over the tailnet):
+
+| Leg | From | To | Lag |
+| --- | --- | --- | --- |
+| Hera to andoria-08 | T0 05:23:33.64 | T1 05:23:43.53 | 9.9 s |
+| andoria-08 to Hera, file | T2 05:24:21.48 | ctime 05:24:23.65 | 2.2 s |
+| andoria-08 to Hera, doorbell | T2 05:24:21.48 | T3 05:24:25.88 | 4.4 s |
+
+Both files were byte-identical on the two hosts, `pending` for an unsubscribed name printed nothing with exit 0 on both, and four sessions on delphi-3bd4 that also subscribe to `+fleet` answered the nonce within 21 to 84 s of T0, so the star reached a third host in the same run. Posts stay until they expire; nothing is deleted by hand.
+
 ## 9. Command reference
 
 `agent-mail [--dir DIR] <command>`. `agent-mail <command> --help` describes each one.
