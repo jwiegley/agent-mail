@@ -715,7 +715,7 @@ class JoinedCapture(unittest.TestCase):
                 self.assertEqual(text, "".join(line.rstrip(" ") + "\n" for line in pane.splitlines()))  # each line whole, less its trailing spaces
                 self.assertEqual(m.visible_prompt_or_question(text), self.QUESTION)
         # Only spaces go, as tmux drops only spaces from a capture without -J: a tab or a no-break space at a line's end stays.
-        self.assertEqual(m.trim_trailing_spaces("a  \nb \nc\t\n  \n"), "a\nb \nc\t\n\n")
+        self.assertEqual(m.trim_trailing_spaces("a  \nb\xa0\nc\t\n  \n"), "a\nb\xa0\nc\t\n\n")
 
     def test_an_error_that_a_line_break_parts_is_still_known_with_the_spaces_that_j_keeps(self):
         # Claude Code broke the error over two rows itself, so tmux marks no row wrapped and -J joins nothing; it keeps each row's spaces, which put more

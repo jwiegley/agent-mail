@@ -40,7 +40,7 @@
 +    parts, so they go, as a capture without -J drops them: every check reads
 +    the lines it read before, a line that tmux wrapped joined.
 +    """
-+    return re.sub(r" +$", "", text, flags=re.M)
++    return "\n".join(line.rstrip(" ") for line in text.split("\n"))
  
  
  def tmux_exists(target: str) -> bool:
