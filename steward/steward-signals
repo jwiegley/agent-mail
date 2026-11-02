@@ -53,7 +53,7 @@ records, asks agent-deck once for each host, and prints one table: a row for eac
 substate and background work, the age of its last activity, its unread direct mail with the age of the oldest, and the age of its member record (never for a
 member with none). A member whose host could not be listed is unknown in each agent-deck column; one its host's listing does not hold is not in
 agent-deck, an archived one is archived, and a listed one with no status that can be read is unknown. Then come the exceptions (each NUDGE of the steward's
-still unread, then each file in the steward's name that SENT.log does not account for, 40 of those at most and then how many more), the counts (the posts to
+still unread, then each file in the steward's name that SENT.log does not account for, EXCEPTION_LINES of those at most and then how many more), the counts (the posts to
 +CHANNEL by others than the steward that arrived after the last call, by their ctimes, and the mail between members that no NOTE names) and, with
 --probe, the probe's word for one member; --json prints the same as one JSON object, with every exception. The steward's name is
 conductor- and the name of the conductor directory, and a TOPIC.md that lists the steward is refused. The mailbox is found as agent-mail finds its own:
@@ -3945,6 +3945,14 @@ def test_signals_options(d):
     ok(status == 0 and all(flag in out for flag in ("--dir", "--mailbox", "--json", "--probe")) and "run-fixture" not in out + err and "?" not in out + err,
        "signals: its help names --dir, --mailbox, --json and --probe, hides --run-fixture, and holds no question mark")
     ok("status 2" in own and "steward-state.json" in own and "signals_last" in own, "signals: its help says what is refused and what is written")
+    ok(f"{EXCEPTION_LINES} of those at most" in own, f"signals: its help gives the cap on the files in the steward's name from EXCEPTION_LINES, {EXCEPTION_LINES}")
+    source = read(os.path.realpath(__file__))
+    literal = re.compile(rf"\b{EXCEPTION_LINES} of those at most")  # the cap written as a number in the text, where only the constant may give it
+    planted = (source.replace("EXCEPTION_LINES of those at most", f"{EXCEPTION_LINES} of those at most", 1),  # in the docstring, which comes first
+               source.replace("{EXCEPTION_LINES} of those at most", f"{EXCEPTION_LINES} of those at most"))  # in the help, and wherever else it stands
+    ok(literal.search(source) is None and all(literal.search(text) for text in planted),
+       "signals: no text in this file writes the cap as a number, its docstring naming EXCEPTION_LINES and the help taking the value from it, and a number "
+       "written in the docstring or in the help is caught")
     top = " ".join(capture(main, ["--help"])[0].split())
     entry = top.split("signals CHANNEL --dir CONDUCTOR_DIR", 1)[-1].split("probe NAME --dir CONDUCTOR_DIR", 1)[0]  # the signals entry, which the probe's follows
     ok("signals CHANNEL --dir CONDUCTOR_DIR" in top and "status 2" in entry and "steward-state.json" in entry and "metrics" not in entry and "?" not in top,
@@ -5262,7 +5270,7 @@ def build_parser():
                         description="Print the signals of the topic whose steward keeps its files in CONDUCTOR_DIR: a row for each member of its TOPIC.md, in "
                                     "roster order (host, harness, agent-deck's status, substate and background work, the age of its last activity, its unread "
                                     "direct mail with the age of the oldest, and the age of its member record), then the exceptions (each NUDGE of the steward's "
-                                    "still unread, then each file in the steward's name that SENT.log does not account for, 40 of those at most and then how "
+                                    f"still unread, then each file in the steward's name that SENT.log does not account for, {EXCEPTION_LINES} of those at most and then how "
                                     "many more), then the counts (the posts to "
                                     "+CHANNEL by others than the steward that arrived since the last call, and the mail between members that no NOTE names) and, "
                                     "with --probe, the probe's word for "
