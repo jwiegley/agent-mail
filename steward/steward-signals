@@ -3945,20 +3945,36 @@ def test_signals_options(d):
     ok(status == 0 and all(flag in out for flag in ("--dir", "--mailbox", "--json", "--probe")) and "run-fixture" not in out + err and "?" not in out + err,
        "signals: its help names --dir, --mailbox, --json and --probe, hides --run-fixture, and holds no question mark")
     ok("status 2" in own and "steward-state.json" in own and "signals_last" in own, "signals: its help says what is refused and what is written")
-    ok(f"{EXCEPTION_LINES} of those at most" in own, f"signals: its help gives the cap on the files in the steward's name from EXCEPTION_LINES, {EXCEPTION_LINES}")
-    source = read(os.path.realpath(__file__))
-    literal = re.compile(rf"\b{EXCEPTION_LINES} of those at most")  # the cap written as a number in the text, where only the constant may give it
-    planted = (source.replace("EXCEPTION_LINES of those at most", f"{EXCEPTION_LINES} of those at most", 1),  # in the docstring, which comes first
-               source.replace("{EXCEPTION_LINES} of those at most", f"{EXCEPTION_LINES} of those at most"))  # in the help, and wherever else it stands
-    ok(literal.search(source) is None and all(literal.search(text) for text in planted),
-       "signals: no text in this file writes the cap as a number, its docstring naming EXCEPTION_LINES and the help taking the value from it, and a number "
-       "written in the docstring or in the help is caught")
     top = " ".join(capture(main, ["--help"])[0].split())
     entry = top.split("signals CHANNEL --dir CONDUCTOR_DIR", 1)[-1].split("probe NAME --dir CONDUCTOR_DIR", 1)[0]  # the signals entry, which the probe's follows
     ok("signals CHANNEL --dir CONDUCTOR_DIR" in top and "status 2" in entry and "steward-state.json" in entry and "metrics" not in entry and "?" not in top,
        "signals: the command is listed in the top-level help before probe, its entry saying what is refused and what is written")
     out, status, err = capture(main, ["signals", "ingest"])
     ok(out == "" and status == 2 and "required: --dir" in err, "signals: --dir is required, so no conductor's files are looked for in a default place")
+
+
+def test_the_help_gives_the_cap_as_its_number(d):
+    phrase = f"{EXCEPTION_LINES} of those at most"
+    top, own = (" ".join(capture(main, args)[0].split()) for args in (["--help"], ["signals", "--help"]))
+    ok(phrase in top and phrase in own, f"signals: the top-level help and the signals help both give the cap on the files in the steward's name as the number "
+                                        f"EXCEPTION_LINES holds: {phrase}")
+    source, marks = read(os.path.realpath(__file__)), ("\n# ---- self-test ----\n", "\n# ---- main ----\n")
+    outside = source.split(marks[0], 1)[0] + source.split(marks[1], 1)[-1]  # the helper's library and its main, less the self-test that lies between them
+    literal = re.compile(rf"\b{EXCEPTION_LINES} of those at most")
+    ok(all(source.count(mark) == 1 for mark in marks) and literal.search(outside) is None,
+       f"signals: outside the self-test, no text in this file writes {phrase} with the number itself")
+    # The regressions. Each copy below changes one line of this file. Its search string is built in two pieces, so that it never stands whole in these lines and
+    # the change cannot land here instead, and it is found exactly once.
+    where = tempfile.mkdtemp(dir=d)
+    for what, old, new, args in (("whose top-level help names the constant instead of its number", "description=" + "help_description()", "description=" + "__doc__",
+                                  ["--help"]),
+                                 ("whose signals help gives another number", "account for, {" + "EXCEPTION_LINES} of those", "account for, {" + "EXCEPTION_LINES + 1} of those",
+                                  ["signals", "--help"])):
+        status, out, _ = run_this_file(*args, script=write(where, "steward-signals", source.replace(old, new)))
+        ok(source.count(old) == 1 and status == 0 and phrase not in " ".join(out.split()), f"signals: a copy of this file {what} fails the first check")
+    plants = ("EXCEPTION_LINES of those at most", "{EXCEPTION_LINES} of those at most")  # the docstring's phrase, and the signals help's, which lie outside the self-test
+    ok(all(outside.count(plant) == 1 and literal.search(outside.replace(plant, phrase)) for plant in plants),
+       f"signals: {phrase} written with the number in the docstring's phrase, or in the signals help's, outside the self-test, fails the second check")
 
 
 def test_compact_ages(d):
@@ -4173,6 +4189,7 @@ def section_signals(d):
         test_signals_runs_agent_deck_without_a_fixture(d)
         test_signals_prints_no_question_mark_and_no_stray_line(d)
         test_signals_options(d)
+        test_the_help_gives_the_cap_as_its_number(d)
         test_compact_ages(d)
         test_member_records_are_read_as_agent_mail_reads_them(d)
         test_signals_prints_names_whole(d)
@@ -5259,8 +5276,14 @@ def section_docs(d):
 
 # ---- main ----
 
+def help_description():
+    """The module docstring as the top-level --help prints it: the name EXCEPTION_LINES, which the docstring uses since it cannot be an f-string, given as
+    the number it holds, as the signals help gives it."""
+    return (__doc__ or "").replace("EXCEPTION_LINES", str(EXCEPTION_LINES))
+
+
 def build_parser():
-    p = argparse.ArgumentParser(prog="steward-signals", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(prog="steward-signals", description=help_description(), formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True, metavar="COMMAND")
     st = sub.add_parser("self-test", help="run the built-in checks",
                         description="Run the built-in checks, every section or the named ones, each in a fresh temporary home "
