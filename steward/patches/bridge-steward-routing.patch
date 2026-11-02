@@ -40,7 +40,15 @@
  # ---------------------------------------------------------------------------
  # NEED-line retire (issue #971)
  # ---------------------------------------------------------------------------
-@@ -2290,6 +2310,30 @@
+@@ -2278,6 +2298,7 @@
+                     reference_id, e,
+                 )
+                 return False
++            reference.resolved = referenced  # conductor_replied_to reads it, not fetching it again
+ 
+         if not bot.user:
+             return False
+@@ -2290,6 +2311,32 @@
              return True
          return False
  
@@ -48,7 +56,9 @@
 +        """Return the conductor whose page MESSAGE replies to, or None.
 +
 +        A page is this bot's own message, since the director's scanner posts
-+        with the bridge's token; conductor_for_reply reads its text.
++        with the bridge's token; conductor_for_reply reads its text.  A
++        message should_ignore_reply_to_other fetched is read from the
++        reference, not fetched again.
 +        """
 +        reference = getattr(message, "reference", None)
 +        reference_id = getattr(reference, "message_id", None)
@@ -60,7 +70,7 @@
 +                referenced = await message.channel.fetch_message(reference_id)
 +            except Exception as e:
 +                log.warning(
-+                    "Failed to resolve Discord reply target %d: %s",
++                    "Failed to resolve Discord reply target %d for conductor routing: %s",
 +                    reference_id, e,
 +                )
 +                return None
@@ -71,18 +81,14 @@
      async def ensure_discord_channel(interaction: discord.Interaction) -> bool:
          """Restrict slash commands to the configured channel."""
          if interaction.channel_id != channel_id:
-@@ -2549,9 +2593,14 @@
-         conductor_names = get_conductor_names()
-         conductors = discover_conductors()
- 
-+        # A reply to the scanner's page for a conductor goes to that conductor,
-+        # unless the reply starts with a conductor prefix of its own.
-+        replied_to = await conductor_replied_to(message, conductor_names)
+@@ -2552,6 +2599,10 @@
          target_name, cleaned_msg = parse_conductor_prefix(
              text, conductor_names,
          )
++        # A reply with no conductor prefix to the scanner's page for a
++        # conductor goes to that conductor.
 +        if target_name is None:
-+            target_name = replied_to
++            target_name = await conductor_replied_to(message, conductor_names)
  
          target = None
          if target_name:

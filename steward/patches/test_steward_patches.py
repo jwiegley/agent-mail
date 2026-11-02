@@ -22,6 +22,7 @@ import asyncio
 import contextlib
 import errno
 import importlib.util
+import json
 import logging
 import os
 import re
@@ -716,21 +717,29 @@ class BridgeOnMessage(unittest.TestCase):
             self.sent.append((session, text))
             return True, "applied ingest-3 A at 20:40Z", False
 
-        # The empty directory holds no director/discord_qna.py, so no reply is offered to discord_qna.
+        # The empty directory holds no director/discord_qna.py, so no reply is offered to discord_qna unless a test
+        # puts one there.
         for name, value in (("CONDUCTOR_DIR", Path(empty.name)),
                             ("discover_conductors", lambda: [{"name": c, "profile": "default"} for c in self.names]),
                             ("ensure_conductor_running", AsyncMock(return_value=True)),
                             ("send_to_conductor", send_to_conductor),
                             ("send_discord_output", AsyncMock())):
             self.enterContext(patch.object(b, name, value))
+        self.bot = self.build()
+
+    def build(self, **options):
+        """A bot that create_discord_bot builds from a fixture config with OPTIONS in its discord section, as if
+        logged in."""
         config = {"discord": {"configured": True, "bot_token": "unused", "guild_id": 1, "channel_id": self.CHANNEL,
-                              "user_id": self.JOHN, "listen_mode": "all", "ignore_replies_to_others": False}}
+                              "user_id": self.JOHN, "listen_mode": "all", "ignore_replies_to_others": False,
+                              **options}}
         with self.assertLogs("conductor-bridge", "INFO"), warnings.catch_warnings():
             # discord.py 2.6 registers events through asyncio.iscoroutinefunction, deprecated in Python 3.14.
             warnings.filterwarnings("ignore", "'asyncio.iscoroutinefunction' is deprecated", DeprecationWarning)
-            self.bot, _ = b.create_discord_bot(config)
+            bot, _ = b.create_discord_bot(config)
         # As if logged in. The pages are the bot's own messages: the director posts them with the bridge's token.
-        self.enterContext(patch.object(type(self.bot), "user", types.SimpleNamespace(id=self.BOT)))
+        self.enterContext(patch.object(type(bot), "user", types.SimpleNamespace(id=self.BOT)))
+        return bot
 
     def page(self, content, author=None):
         """A message in the channel by the bot, or by AUTHOR, as discord.py resolves the message a reply names."""
@@ -739,21 +748,23 @@ class BridgeOnMessage(unittest.TestCase):
         message.author = types.SimpleNamespace(id=self.BOT if author is None else author)
         return message
 
-    def deliver(self, content, replied=None, sent_along=True, fetch=None):
-        """The (session, text) pairs sent for John's message CONTENT, a reply to REPLIED when given. Unless
-        SENT_ALONG, Discord leaves the replied message out and the bridge fetches it with FETCH, by default a
-        fetch that finds it."""
+    def deliver(self, content, replied=None, sent_along=True, fetch=None, author=None, channel=None, logged=True):
+        """The (session, text) pairs sent for the message CONTENT, a reply to REPLIED when given, from AUTHOR in
+        CHANNEL (John in the bridge's channel by default). Unless SENT_ALONG, Discord leaves the replied message
+        out and the bridge fetches it with FETCH, by default a fetch that finds it. The bridge must log at least
+        one line, or none when LOGGED is false."""
         self.channel = types.SimpleNamespace(
-            id=self.CHANNEL, send=AsyncMock(), typing=contextlib.nullcontext,
+            id=self.CHANNEL if channel is None else channel, send=AsyncMock(), typing=contextlib.nullcontext,
             fetch_message=AsyncMock(return_value=replied) if fetch is None else fetch)
         reference = None
         if replied is not None:
             reference = types.SimpleNamespace(message_id=replied.id, resolved=replied if sent_along else None)
-        message = types.SimpleNamespace(id=99, content=content, channel=self.channel, reference=reference,
-                                        mentions=[], author=types.SimpleNamespace(id=self.JOHN, bot=False))
+        self.message = types.SimpleNamespace(
+            id=99, content=content, channel=self.channel, reference=reference, mentions=[], reply=AsyncMock(),
+            author=types.SimpleNamespace(id=self.JOHN if author is None else author, bot=False))
         self.sent.clear()
-        with self.assertLogs("conductor-bridge", "INFO") as self.logs:
-            asyncio.run(self.bot.on_message(message))
+        with (self.assertLogs if logged else self.assertNoLogs)("conductor-bridge", "INFO") as self.logs:
+            asyncio.run(self.bot.on_message(self.message))
         return self.sent
 
     def test_a_reply_to_a_stewards_page_goes_to_that_steward(self):
@@ -767,13 +778,59 @@ class BridgeOnMessage(unittest.TestCase):
         self.channel.fetch_message.assert_awaited_once_with(page.id)
 
     def test_a_prefix_in_a_reply_names_the_conductor(self):
-        self.assertEqual(self.deliver("nix-steward: nix-4 B", self.page(self.PAGE)), [("conductor-nix-steward", "nix-4 B")])
+        page = self.page(self.PAGE)
+        self.assertEqual(self.deliver("nix-steward: nix-4 B", page), [("conductor-nix-steward", "nix-4 B")])
+        # The prefix decides before the page is looked at, so a page Discord left out is never fetched, and none
+        # that is gone logs a warning.
+        gone = AsyncMock(side_effect=RuntimeError("404 Not Found"))
+        self.assertEqual(self.deliver("nix-steward: nix-4 B", page, sent_along=False, fetch=gone),
+                         [("conductor-nix-steward", "nix-4 B")])
+        gone.assert_not_awaited()
 
     def test_a_reply_whose_page_cannot_be_fetched_goes_to_the_first_conductor(self):
         gone = AsyncMock(side_effect=RuntimeError("404 Not Found"))
         self.assertEqual(self.deliver("ingest-3 A", self.page(self.PAGE), sent_along=False, fetch=gone),
                          [("conductor-director", "ingest-3 A")])
-        self.assertIn("Failed to resolve Discord reply target 98: 404 Not Found", "\n".join(self.logs.output))
+        self.assertIn("Failed to resolve Discord reply target 98 for conductor routing: 404 Not Found",
+                      "\n".join(self.logs.output))
+
+    def test_another_users_reply_to_a_page_is_not_johns_answer(self):
+        self.assertEqual(self.deliver("ingest-3 A", self.page(self.PAGE), author=5), [])
+        self.assertIn("Unauthorized Discord message from user 5", "\n".join(self.logs.output))
+
+    def test_johns_reply_from_another_channel_is_dropped(self):
+        self.assertEqual(self.deliver("ingest-3 A", self.page(self.PAGE), channel=6, logged=False), [])
+
+    def test_with_replies_to_others_ignored_the_page_is_fetched_once(self):
+        # John's own check fetches a page Discord left out, and the routing reads the message it fetched.
+        self.bot = self.build(ignore_replies_to_others=True)
+        page = self.page(self.PAGE)
+        self.assertEqual(self.deliver("ingest-3 A", page, sent_along=False), [("conductor-ingest-steward", "ingest-3 A")])
+        self.channel.fetch_message.assert_awaited_once_with(page.id)
+        # A page that cannot be fetched fails both lookups, and each says so in its own words.
+        gone = AsyncMock(side_effect=RuntimeError("404 Not Found"))
+        self.assertEqual(self.deliver("ingest-3 A", page, sent_along=False, fetch=gone), [("conductor-director", "ingest-3 A")])
+        self.assertEqual([line for line in self.logs.output if "Failed to resolve" in line], [
+            "WARNING:conductor-bridge:Failed to resolve Discord reply target 98: 404 Not Found",
+            "WARNING:conductor-bridge:Failed to resolve Discord reply target 98 for conductor routing: 404 Not Found"])
+
+    def test_discord_qna_sees_a_reply_before_the_page_is_read(self):
+        # On hera director/discord_qna.py exists, so every reply goes to it first, and a steward's page reaches the
+        # routing only when discord_qna declines it.
+        router = b.CONDUCTOR_DIR / "director" / "discord_qna.py"
+        router.parent.mkdir()
+        router.write_text("")
+        events, answers = [], [{"handled": True, "response": "Q:0123456789ab: selected 2."}, {"handled": False}]
+
+        def run(argv, **kwargs):
+            events.append((argv[1:], json.loads(kwargs["input"])["reference"]))
+            return subprocess.CompletedProcess(argv, 0, json.dumps(answers.pop(0)), "")
+
+        self.enterContext(patch.object(b.subprocess, "run", side_effect=run))
+        self.assertEqual(self.deliver("2", self.page(self.PAGE), logged=False), [])
+        self.message.reply.assert_awaited_once()
+        self.assertEqual(self.deliver("ingest-3 A", self.page(self.PAGE)), [("conductor-ingest-steward", "ingest-3 A")])
+        self.assertEqual(events, [([str(router)], "98")] * 2)
 
     def test_a_bot_that_does_not_know_itself_reads_no_page(self):
         # Before it has logged in, the bot cannot tell its own pages, so a reply goes to the first conductor.
