@@ -4382,12 +4382,16 @@ def test_claude_md_follows_the_worked_example_and_its_keys(d):
 
 
 # How a steward knows its channel, from Task 12's review (Important 4): the channel in TOPIC.md's heading once TOPIC.md exists; before that, the one John named
-# with the channel control, which a channel whose purpose names no steward (+steward-test's) needs; else the one whose purpose names the steward. The definition,
-# the control's row, section 3's step 2 and section 13's step 1 are each pinned whole, so that none of them can turn back to the purposes alone unseen.
-CHANNEL_DEFINITION = ("- `<channel>` is your channel's name without its `+`: the one in TOPIC.md's heading once TOPIC.md exists; before that, the one John named with "
-                      "`channel` (section 9), or else the channel whose purpose names you (`ingest`, `nix-config`).")
-CHANNEL_ROW = ("| `channel <name>` | take `+<name>` as your channel, even when its purpose names no steward, and write it as TOPIC.md's heading, `# +<name>`; John "
-               "types it before `purpose` and `members`, for a channel whose purpose does not name you |")
+# with the channel control since the last close, which a channel whose purpose names no steward (+steward-test's) needs; else the one whose purpose names the
+# steward. The re-review of that fix (N1 and N4) added how the control's naming is held until TOPIC.md, replaced by a later one and ended by close, and that a
+# channel typed while a topic is open is refused, so that day zero's naming cannot outlive day zero. The definition, the control's row, section 3's step 2 and
+# section 13's step 1 are each pinned whole, so that none of them can turn back to the purposes alone, or to a naming that never ends, unseen.
+CHANNEL_DEFINITION = ("- `<channel>` is your channel's name without its `+`: the one in TOPIC.md's heading once TOPIC.md exists; before that, the one John has named with "
+                      "`channel` since your last `close` (section 9), or else the channel whose purpose names you (`ingest`, `nix-config`).")
+CHANNEL_ROW = ("| `channel <name>` | take `+<name>` as your channel, even when its purpose names no steward: hold the name until step 3 of section 3 writes TOPIC.md, "
+               "whose heading, `# +<name>`, then carries it, and write no TOPIC.md before then. John types it before `purpose` and `members`, for a channel whose "
+               "purpose does not name you. A later `channel` typed before TOPIC.md exists replaces the earlier one, and `close` ends the naming. While a topic is "
+               "open, refuse it in one line: \"close the topic first\" |")
 START_CHANNEL_STEP = ("2. Call `channels`: `+<channel>` must exist, with a purpose that names you unless John named the channel with `channel`, which needs no such "
                       "purpose. If it is missing, tell John in one line; only he creates channels.")
 RESET_CHANNEL_STEP = ("1. Re-read this file, `POLICY.md`, `TOPIC.md`, `LEDGER.md` and `steward-state.json`. Your channel is the one in TOPIC.md's heading, never one "
@@ -4403,10 +4407,11 @@ RECOVERY_PART = ("- **agent-deck's recovery turn:** at each start or restart, ag
 def test_claude_md_takes_its_channel_from_topic_md_or_from_john(d):
     t = claude_md()
     ok([line for line in t.splitlines() if line.startswith("- `<channel>` is ")] == [CHANNEL_DEFINITION],
-       "docs: CLAUDE.md defines <channel> as pinned: TOPIC.md's heading once it exists, before that the channel John named with channel, else the one whose "
-       "purpose names the steward")
+       "docs: CLAUDE.md defines <channel> as pinned: TOPIC.md's heading once it exists, before that the channel John named with channel since the last close, "
+       "else the one whose purpose names the steward")
     ok([line for line in claude_section(t, 9).splitlines() if line.startswith("| `channel ")] == [CHANNEL_ROW],
-       "docs: section 9 of CLAUDE.md has the channel control as pinned, which takes a channel whose purpose names no steward and writes it as TOPIC.md's heading")
+       "docs: section 9 of CLAUDE.md has the channel control as pinned, which takes a channel whose purpose names no steward, holds it until TOPIC.md's heading "
+       "carries it, lets a later channel replace it and close end it, and refuses it while a topic is open")
     ok([line for line in claude_section(t, 3).splitlines() if line.startswith("2. ")] == [START_CHANNEL_STEP],
        "docs: step 2 of section 3 of CLAUDE.md accepts a channel John named with channel, as pinned")
     ok([line for line in claude_section(t, 13).splitlines() if line.startswith("1. ")] == [RESET_CHANNEL_STEP],
@@ -4752,7 +4757,14 @@ def test_docs_checks_catch_each_pinned_regression(d):
          "docs: each time CLAUDE.md names agent-deck inbox drain, a never run or never use governs it"),
         ("the recovery turn's state.json allowed", "and never read or keep a `state.json`.", "and read `./state.json`.",
          "docs: section 2 of CLAUDE.md answers agent-deck's recovery turn as pinned"),
-        ("the recovery turn left out of section 2", RECOVERY_PART + "\n", "", "docs: section 2 of CLAUDE.md answers agent-deck's recovery turn as pinned"))
+        ("the recovery turn left out of section 2", RECOVERY_PART + "\n", "", "docs: section 2 of CLAUDE.md answers agent-deck's recovery turn as pinned"),
+        # the re-review of Task 12's fix: N1 (a naming that outlives day zero) and N4 (a heading-only TOPIC.md, a channel on an open topic)
+        ("a channel typed on an open topic no longer refused", " While a topic is open, refuse it in one line: \"close the topic first\"", "",
+         "docs: section 9 of CLAUDE.md has the channel control as pinned"),
+        ("close no longer ending the naming", ", and `close` ends the naming", "", "docs: section 9 of CLAUDE.md has the channel control as pinned"),
+        ("a TOPIC.md written for its heading alone", ", and write no TOPIC.md before then", ", and write TOPIC.md with that heading at once",
+         "docs: section 9 of CLAUDE.md has the channel control as pinned"),
+        ("a naming that no close ends, in the definition", " since your last `close`", "", "docs: CLAUDE.md defines <channel> as pinned"))
     for i, (what, old, new, failure) in enumerate(regressions):
         failures = docs_checks(checkout_with(d, f"regression-{i}", "CLAUDE.md", old, new))
         ok(old in good and any(f.startswith(failure) for f in failures), f"docs: docs_checks catches {what} (got {without_question_marks(repr(failures))})")
