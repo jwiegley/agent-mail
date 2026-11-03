@@ -285,7 +285,7 @@ t.ok(code == 0 and out.count("\n") == 2, "with targets the default channel is no
 Run: `python3 -I ./agent-mail self-test cli help`
 Expected: FAIL at "subscribe --write marks a target" (unrecognized argument).
 
-- [ ] **Step 3: Implement.** In `build_parser`: `--to` loses `required=True` and its help says `a session, a channel, or all; without it, NAME's write targets or the default channel`; `send` gains `--default-channel`; `subscribe` replaces `--wake` with `add_argument("--wake", action=argparse.BooleanOptionalAction, default=None, help=...)` and adds `--write` the same way. In `dispatch`, `cmd_subscribe(name, d, bare(a.channel), a.wake, a.backlog, s, write=a.write)` and `cmd_send(..., to=a.to ...)` with `a.to` possibly `None`. The module docstring's `send` and `subscribe` lines match the Interfaces block; add one line under `send`: `Without --to, posts go to NAME's write targets, or to the default channel.`
+- [ ] **Step 3: Implement.** In `build_parser`: `--to` loses `required=True` and its help says `a session, a channel, or all; without it, NAME's write targets or the default channel`; `send` gains `--default-channel`; `subscribe` replaces `--wake` with `add_argument("--wake", action=argparse.BooleanOptionalAction, default=None, help=...)` and adds `--write` the same way. In `dispatch`, `cmd_subscribe(name, d, bare(a.channel), a.wake, a.backlog, s, write_target=a.write)` and `cmd_send(..., to=a.to ...)` with `a.to` possibly `None`. The module docstring's `send` and `subscribe` lines match the Interfaces block; add one line under `send`: `Without --to, posts go to NAME's write targets, or to the default channel.`
 
 - [ ] **Step 4: Run the sections and the suite**
 
@@ -331,7 +331,7 @@ git commit -S -m "README: write targets, the default channel, send without to"
 
 - [ ] **Step 3: Audit.** A fresh sentinel probe (the parallelize skill's parent-history probe; the 18:58 one of 11-01 is spent), then a fresh `fess-auditor` in no-history mode over the branch's commits; fold real findings into the branch (amend or follow-up commits), re-audit a fix only when it is more than a fix.
 
-- [ ] **Step 4: Land.** Merge `work/v2.2` into main in the live checkout by fast-forward (`git merge --ff-only work/v2.2` after checking `git diff --cached --stat` is empty and the tree holds only known docs edits), verify `git ls-tree HEAD agent-mail` shows the new blob and `python3 -I ./agent-mail self-test` passes there, push to GitHub (decision 27), and record the new revision in the handoff; push main to the five fleet checkouts (decision 58's pattern; they run the installed nix package, not the checkout).
+- [ ] **Step 4: Land.** Rebase `work/v2.2` onto main first with re-signing (`git rebase --gpg-sign main`; main moves under docs commits while the branch is built, and `git range-diff` must show every patch identical), then merge it into main in the live checkout by fast-forward (`git merge --ff-only work/v2.2` after checking `git diff --cached --stat` is empty and the tree holds only known docs edits), verify `git ls-tree HEAD agent-mail` shows the new blob and `python3 -I ./agent-mail self-test` passes there, push to GitHub (decision 27), and record the new revision in the handoff; push main to the five fleet checkouts (decision 58's pattern; they run the installed nix package, not the checkout).
 
 ### Task 8: nix-config: the skills and the 2.2.0 pin
 

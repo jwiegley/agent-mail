@@ -82,7 +82,7 @@ The skill's step 8 ("Subscribe narrowly") becomes: call `channels`; unsubscribe 
 
 **unsubscribe.** Unchanged in form; dropping the subscription drops the target with it (the anti-goal: no target outlives its subscription). A pinned channel still cannot be unsubscribed; to stop writing to a pinned channel, subscribe to it again with `write: false`.
 
-**send.** `to` becomes optional in the tool schema and on the CLI (`--to`). With `to`, nothing changes. Without it:
+**send.** `to` becomes optional in the tool schema and on the CLI (`--to`). With `to`, nothing changes; an empty `to` counts as omitted on both surfaces (*builder's call*). Without it:
 
 - the targets are the session's effective subscriptions with `write` true, in channel-name order;
 - with no target, the single target is `+<default channel>` (see 5.3);
@@ -91,7 +91,7 @@ The skill's step 8 ("Subscribe narrowly") becomes: call `channels`; unsubscribe 
 - the per-target checks run for each target in turn: `no_such_channel`, the 20-posts-an-hour cap, the duplicate-body window;
 - a post already written stays written (posts cannot be unsent); a target refused later is reported, and the call fails only when no target took the post.
 
-The tool's result lists each outcome: `sent <id> to +A`, then `agent-mail: warning: not sent to +B: rate_limited: ...` for a refused target. The CLI prints the same lines and exits 0 when at least one post was written. The CLI reads the sender's write targets from the sender's state file on this host without taking the reader lock (a read, not a claim); a sender with no state on this host has no targets and posts to the default channel.
+The tool's result lists each outcome: `sent <id> to +A`, then `agent-mail: warning: not sent to +B: rate_limited: ...` for a refused target. The CLI prints the same lines, its refusal line carrying the code too, and exits 0 when at least one post was written. The CLI reads the sender's write targets from the sender's state file on this host without taking the reader lock (a read, not a claim); a sender with no state on this host has no targets and posts to the default channel.
 
 The MCP schema for `send` keeps `subject` and `body` required and describes `to` as: a session name, +channel, or all; omitted: your write targets, or the default channel when you have none.
 
