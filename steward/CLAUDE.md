@@ -105,8 +105,11 @@ The status line is yours to word, for example `+ingest 18:10Z: 3 active, 1 block
 
 Read the verb that starts the subject, update the ledger (one row, the message id under refs), run the checks the table names (section 6), and log the item with its id in the day's log, one that needs nothing included, so that a reset can tell what was filed (section 13). Never copy a body into the ledger or a reply: `reread {me: "<steward>", id: "<id>"}` brings it back for 7 days. Claims are ordered by the time you first saw them; two claims in one batch, by their files' ctime on hera (`/usr/bin/stat -f '%Fc %N' ~/Mailbox/+<channel>/<id>.txt ...`, metadata only), never by the stamp in the file name, which the writer chooses.
 
+The table files posts on `+<channel>` and mail to you by their subject. A post whose frame line names another channel, such as `post +fleet` (agent-mail 2.2's join subscribes you to `+fleet`), and a broadcast, whose frame line says `broadcast`, are peers' notices whatever their subject, filed by the table's first row alone.
+
 | Subject starts with | Ledger | Checks | Speak |
 |---|---|---|---|
+| any subject, on a post whose frame line names another channel or on a broadcast | nothing but one line in the day's log: its time, `notice`, its channel or `broadcast`, and its id (`18:02:11Z notice +fleet <id>`) | none | no: no reply, no question line, and never a post to its channel in answer |
 | `JOIN <channel>:`, mailed to you | a Workers row: name, host from the From line, harness from the subject; a member TOPIC.md lacks is added to it, and the digest's first mention of a member added by its JOIN alone says John did not name it | none | no: your invitation and WORKER.md carry the conventions |
 | `CLAIM <slug>:` | an Items row: owner, what, `writes:`, `holds:`, `active`, first-seen now; `until:` and `needs:` noted | overlap, duplicate, landed work, drift, needs John | only if a check fires |
 | `UPDATE <slug>:` | `updated`; `writes:` and `holds:` if they changed | overlap, if they changed | no |

@@ -330,6 +330,8 @@ Goal: "<John's words>" (John, in this pane, 2026-11-02T17:05Z)
 
 States: `unclaimed` (in BACKLOG), `active`, `blocked`, `waiting-john`, `done`, `dropped`, `orphaned`. Claims are ordered by the time the steward first saw them; two claims in one batch are ordered by their files' ctime on hera from the census listing (metadata only), never by the stamp in the file name, which the writer chooses **[my call]**. Thresholds live in the conductor's `POLICY.md` only; every number below is my starting value **[my call]**.
 
+**Other channels.** The steward files by their subject only the posts on its own channel and the mail sent to it. Under agent-mail 2.2 every join subscribes a session to `+fleet`, and each delivered post is framed with its channel (`post +fleet`), so a post on another channel, and a broadcast, is a peer's notice whatever its subject: one line with its id in the day's log, which the reconciliation after a reset counts as filed, and no ledger row, no check, no reply, no page, and never a post to that channel in answer **[John 32]**.
+
 **Exception checks**, run on each filed item:
 
 | Check | Fires when | Action, once |
