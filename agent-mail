@@ -983,23 +983,28 @@ def list_channels(d, now):
 
 
 def effective_subs(state, settings, now):
-    """The channels a reader receives, each with wake, pinned and since: the channels pinned
-    in settings, which no tool can remove, and the runtime subscriptions in its state."""
-    subs = {ch: {"wake": bool(info.get("wake")), "pinned": False, "since": info.get("since", now)}
+    """The channels a reader receives, each with wake, write, pinned and since: the channels
+    pinned in settings, which no tool can remove, and the runtime subscriptions in its state.
+    A record's write counts only when it is exactly true, and a pinned channel has no write
+    unless its record has one."""
+    subs = {ch: {"wake": bool(info.get("wake")), "write": info.get("write") is True, "pinned": False, "since": info.get("since", now)}
             for ch, info in state.get("subs", {}).items() if isinstance(info, dict)}
     for ch, wake in (settings.channels if settings is not None else {}).items():
-        entry = subs.setdefault(ch, {"wake": False, "pinned": False, "since": now - REPLAY})
+        entry = subs.setdefault(ch, {"wake": False, "write": False, "pinned": False, "since": now - REPLAY})
         entry["pinned"] = True
         entry["wake"] = entry["wake"] or wake
     return subs
 
 
-def subscribe(d, name, state, settings, ch, wake=False, backlog=0, now=None):
+def subscribe(d, name, state, settings, ch, wake=None, backlog=0, write=None, now=None):
     """Subscribe NAME to +CH at runtime and return the effective subscription.
 
     since is now; with a backlog of N, the N newest posts already there stay unread and
-    every other existing post enters the seen set. Subscribing again changes only wake,
-    and subscribing to a pinned channel records wake without touching its cursor.
+    every other existing post enters the seen set. A new subscription takes the wake and
+    write it is given, false when None. Subscribing again changes only the attributes the
+    call names: a None leaves the record's own value as it is, so a pin's wake is never
+    copied into the state. Subscribing to a pinned channel records them without touching
+    its cursor.
     """
     now = clock() if now is None else now
     if isinstance(backlog, bool) or not isinstance(backlog, int) or not 0 <= backlog <= MAX_BACKLOG:
@@ -1012,7 +1017,9 @@ def subscribe(d, name, state, settings, ch, wake=False, backlog=0, now=None):
     subs = state.setdefault("subs", {})
     current = effective_subs(state, settings, now)
     if ch in subs or ch in current:
-        subs[ch] = {"since": current[ch]["since"], "wake": bool(wake)}
+        own = effective_subs(state, None, now).get(ch, {})
+        subs[ch] = {"since": current[ch]["since"], "wake": own.get("wake", False) if wake is None else bool(wake),
+                    "write": own.get("write", False) if write is None else bool(write)}
         return effective_subs(state, settings, now)[ch]
     if len(current) >= MAX_SUBS:
         raise MailError("too_many_subscriptions", f"{name} already has {len(current)} subscriptions; at most {MAX_SUBS}")
@@ -1021,7 +1028,7 @@ def subscribe(d, name, state, settings, ch, wake=False, backlog=0, now=None):
     for _, pid in posts[:len(posts) - len(keep)]:
         if pid not in seen:
             seen.append(pid)
-    subs[ch] = {"since": min([now] + [stamp for stamp, _ in keep]), "wake": bool(wake)}
+    subs[ch] = {"since": min([now] + [stamp for stamp, _ in keep]), "wake": bool(wake), "write": bool(write)}
     return effective_subs(state, settings, now)[ch]
 
 
@@ -2427,7 +2434,8 @@ TOOLS_JSON = json.dumps({"tools": [
     _tool("pending", "Say in one line what mail waits for this session, without delivering any."),
     _tool("subscribe", "Subscribe this session to a channel, named without its +. Quiet by default: posts wait for the next receive. With wake, "
           "each new post rings the doorbell. backlog asks for up to 20 earlier posts.",
-          {"channel": {"type": "string"}, "wake": {"type": "boolean"}, "backlog": {"type": "integer", "minimum": 0, "maximum": 20}}, ("channel",)),
+          {"channel": {"type": "string"}, "wake": {"type": "boolean"}, "backlog": {"type": "integer", "minimum": 0, "maximum": 20},
+           "write": {"type": "boolean"}}, ("channel",)),
     _tool("unsubscribe", "Unsubscribe this session from a channel. A channel pinned in the settings cannot be unsubscribed.",
           {"channel": {"type": "string"}}, ("channel",)),
     _tool("channels", "List the channels with their purpose, recent posts and listed subscribers, then the known sessions, this session's bound "
@@ -2698,7 +2706,7 @@ class McpServer:
         self.reader()
         name, ch, now = self.identity.name, bare(args["channel"]), clock()
         state = load_state(d, name)
-        sub = subscribe(d, name, state, self.settings, ch, wake=args.get("wake", False), backlog=args.get("backlog", 0), now=now)
+        sub = subscribe(d, name, state, self.settings, ch, wake=args.get("wake"), backlog=args.get("backlog", 0), write=args.get("write"), now=now)
         save_subscriptions(d, name, state, self.settings, now)
         return self.head() + subscription_text(d, name, ch, sub), None, None
 
@@ -3009,16 +3017,18 @@ def cmd_watch(name, d, interval, forever, max_bytes, max_polls=None, parent=None
 
 def subscription_text(d, name, ch, sub):
     listed = sorted(n for n, record in members(d).items() if ch in record["subs"])
-    how = ("wake" if sub["wake"] else "quiet") + (", pinned" if sub["pinned"] else "")
+    how = ("wake" if sub["wake"] else "quiet") + (", write" if sub["write"] else "") + (", pinned" if sub["pinned"] else "")
     return f"+{ch}: {name} subscribes, {how}; subscribers listed: {', '.join(listed) or 'none'}"
 
 
-def cmd_subscribe(name, d, ch, wake, backlog, settings, write=None):
+def cmd_subscribe(name, d, ch, wake, backlog, settings, write=None, write_target=None):
+    """write is the output function, as in every cmd_*; write_target sets or clears the
+    channel's write flag, and None leaves it as it is."""
     lock = hold_reader(d, name)
     try:
         now = clock()
         state = load_state(d, name)
-        sub = subscribe(d, name, state, settings, ch, wake=wake, backlog=backlog, now=now)
+        sub = subscribe(d, name, state, settings, ch, wake=wake, backlog=backlog, write=write_target, now=now)
         save_subscriptions(d, name, state, settings, now)
         emit(write, subscription_text(d, name, ch, sub) + "\n")
     finally:
@@ -3908,9 +3918,27 @@ def section_channels(t):
     ids = [parse_msg(os.path.basename(t.post(d, "fleet", "nix", f"post {i}", stamp=now - 3600 + i * 60))).id for i in range(5)]
     subscribe(d, "pi", st, s, "fleet", backlog=2, now=now)
     t.ok(set(st["seen"]["+fleet"]) == set(ids[:3]), "backlog 2 leaves exactly the two newest of five earlier posts unread")
+    subscribe(d, "pi", st, s, "fleet", write=True, now=now)
+    t.ok(effective_subs(st, s, now)["fleet"]["write"] is True, "subscribe with write marks the channel a write target")
+    subscribe(d, "pi", st, s, "fleet", wake=True, now=now)
+    t.ok(effective_subs(st, s, now)["fleet"] == {**effective_subs(st, s, now)["fleet"], "wake": True, "write": True}, "subscribing again changes only the attributes named")
+    subscribe(d, "pi", st, s, "fleet", write=False, now=now)
+    t.ok(effective_subs(st, s, now)["fleet"]["write"] is False and effective_subs(st, s, now)["fleet"]["wake"] is True, "write false clears the target and leaves wake alone")
     pinned_ops = load_settings({"channels": ["ops:wake"]}, {}, "pi")
+    create_channel(d, "ops", "ops notices")
+    subscribe(d, "pi", st, pinned_ops, "ops", write=True, now=now)
+    t.ok(effective_subs(st, pinned_ops, now)["ops"] == {"wake": True, "write": True, "pinned": True, "since": now - 86400}, "a pinned channel takes write without touching its cursor")
+    t.ok(st["subs"]["ops"]["wake"] is False, "a pinned channel's wake is not copied into the state")
+    st["subs"]["fleet"] = {"since": now, "wake": False}
+    t.ok(effective_subs(st, s, now)["fleet"]["write"] is False, "a 2.1 subscription without write loads as not a target")
+    st["subs"]["fleet"] = {"since": now, "wake": False, "write": "yes"}
+    t.ok(effective_subs(st, s, now)["fleet"]["write"] is False, "write is a target only when it is exactly true")
+    subscribe(d, "pi", st, s, "c0", write=True, now=now)
+    subscribe(d, "pi", st, s, "c1", now=now)
+    t.ok(effective_subs(st, s, now)["c0"]["write"] is True and effective_subs(st, s, now)["c1"]["write"] is False,
+         "a new subscription takes write as given, false by default")
     t.ok(getattr(t.raises(unsubscribe, st, pinned_ops, "ops"), "code", None) == "pinned", "a pinned channel cannot be unsubscribed")
-    t.ok(effective_subs(load_state(d, "fresh"), pinned_ops, now) == {"ops": {"wake": True, "pinned": True, "since": now - 86400}},
+    t.ok(effective_subs(load_state(d, "fresh"), pinned_ops, now) == {"ops": {"wake": True, "write": False, "pinned": True, "since": now - 86400}},
          "a pinned channel with no state starts 24 hours back")
     touch_member(d, "pi", effective_subs(st, s, now), now)
     c = next(c for c in list_channels(d, now) if c["name"] == "fleet")
@@ -4872,6 +4900,8 @@ def section_tools(t):
     sub = tool(b, "subscribe", channel="fleet")
     t.ok("+fleet: b subscribes, quiet; subscribers listed: b" in text(sub) and "not_reader" in text(tool(b2, "subscribe", channel="fleet")),
          "subscribe answers with the subscription and needs the lock")
+    t.ok("+fleet: b subscribes, quiet, write; subscribers listed: b" in text(tool(b, "subscribe", channel="fleet", write=True)), "the subscribe tool takes write and says so")
+    t.ok("+fleet: b subscribes, wake, write;" in text(tool(b, "subscribe", channel="fleet", wake=True)), "the tool leaves write as it was when the call does not name it")
     tool(a, "send", to="+fleet", subject="post", body="A-POST-FOR-B")
 
     class Broken:
@@ -5458,6 +5488,9 @@ def section_cli(t):
     t.run(["--dir", d, "subscribe", "pi", "+ops", "--wake"])
     listing = t.run(["--dir", d, "channels", "pi"])[0]
     t.ok("+ops" in listing and "you, wake" in listing and "you, quiet" in listing, "channels NAME marks that session's subscriptions")
+    t.capture(cmd_subscribe, "pi", d, "ops", None, 0, load_settings({}, {}, "pi"), write_target=True)
+    t.ok(load_state(d, "pi")["subs"]["ops"] == {**load_state(d, "pi")["subs"]["ops"], "wake": True, "write": True},
+         "cmd_subscribe sets the write flag from write_target and leaves wake as it was")
     out = t.run(["--dir", d, "unsubscribe", "pi", "ops"])[0]
     t.ok("ops" not in load_state(d, "pi")["subs"] and "+ops" in out, "unsubscribe drops a subscription")
     # One subscription list from read, watch and pending: beside the runtime subscription to
