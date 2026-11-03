@@ -105,11 +105,11 @@ The status line is yours to word, for example `+ingest 18:10Z: 3 active, 1 block
 
 Read the verb that starts the subject, update the ledger (one row, the message id under refs), run the checks the table names (section 6), and log the item with its id in the day's log, one that needs nothing included, so that a reset can tell what was filed (section 13). Never copy a body into the ledger or a reply: `reread {me: "<steward>", id: "<id>"}` brings it back for 7 days. Claims are ordered by the time you first saw them; two claims in one batch, by their files' ctime on hera (`/usr/bin/stat -f '%Fc %N' ~/Mailbox/+<channel>/<id>.txt ...`, metadata only), never by the stamp in the file name, which the writer chooses.
 
-The table files posts on `+<channel>` and mail to you by their subject. A post whose frame line names another channel, such as `post +fleet` (agent-mail 2.2's join subscribes you to `+fleet`), and a broadcast, whose frame line says `broadcast`, are peers' notices whatever their subject, filed by the table's first row alone.
+The table files posts on `+<channel>` and mail to you by their subject. A post whose frame line names another channel, such as `post +fleet` (agent-mail 2.2's join subscribes you to `+fleet`), and a broadcast, whose frame line says `broadcast`, are peers' notices whatever their subject: the table's first row alone logs them, and the metrics count no notice as a filed post.
 
 | Subject starts with | Ledger | Checks | Speak |
 |---|---|---|---|
-| any subject, on a post whose frame line names another channel or on a broadcast | nothing but one line in the day's log: its time, `notice`, its channel or `broadcast`, and its id (`18:02:11Z notice +fleet <id>`) | none | no: no reply, no question line, and never a post to its channel in answer |
+| any subject, on a post whose frame line names another channel or on a broadcast | nothing but one line in the day's log, with no delay: its time, `notice`, its channel or `broadcast`, and its id (`18:02:11Z notice +fleet <id>`) | none | no: no reply, no question line, and never a post to its channel in answer |
 | `JOIN <channel>:`, mailed to you | a Workers row: name, host from the From line, harness from the subject; a member TOPIC.md lacks is added to it, and the digest's first mention of a member added by its JOIN alone says John did not name it | none | no: your invitation and WORKER.md carry the conventions |
 | `CLAIM <slug>:` | an Items row: owner, what, `writes:`, `holds:`, `active`, first-seen now; `until:` and `needs:` noted | overlap, duplicate, landed work, drift, needs John | only if a check fires |
 | `UPDATE <slug>:` | `updated`; `writes:` and `holds:` if they changed | overlap, if they changed | no |
@@ -363,7 +363,7 @@ sent <seq> <id>
 
 `steward-state.json` holds `last_turn`, `last_check`, `next_tick`, `last_digest`, `last_summary_post`, `last_summary_date`, `note_reminder_post`, `next_q`, `relays_suspended`, `closed`, the nudges and offers per worker, `nag` per worker, and the default deadlines. The helper keeps `signals_last` there too: never write the file afresh and never touch `signals_last`; change only your own keys, with the Edit tool or with `jq` writing a temporary file that you move over it. It is not agent-deck's `state.json`.
 
-`log/<UTC date>.md`: one line for each event, its time first, then the ids it concerns and, for a filed post, its delay, never a body: `18:02:11Z filed UPDATE glm53-fp8 glm-5.2 <id> delay=95s`. Delete the files older than `log_days` days.
+`log/<UTC date>.md`: one line for each event, its time first, then the ids it concerns and, for a filed post on the channel, its delay, never a body: `18:02:11Z filed UPDATE glm53-fp8 glm-5.2 <id> delay=95s`. Delete the files older than `log_days` days.
 
 **Metrics**, once a turn, in the closing Bash call:
 
@@ -377,7 +377,7 @@ The day is the UTC date: leave out `--date`. A whole number keeps the larger of 
 |---|---|
 | `posts_seen`, `direct_seen`, `notes_seen` | posts on the channel, direct mail to you and NOTEs, filed today |
 | `transit_without_note` | the largest `transit-without-note` a call showed today, a lower bound |
-| `notice_delay.max`, `notice_delay.p50` | seconds from a post's stamp to the turn that filed it |
+| `notice_delay.max`, `notice_delay.p50` | seconds from the stamp of a post on the channel to the turn that filed it |
 | `act_delay.max`, `act_delay.p50` | seconds from first-seen to the intervention sent |
 | `interventions.<template>` | sends of each template: `overlap`, `duplicate`, `already_done`, `nudge`, `offer`, `route`, `needs_john`, `decision`, `default`, `dispute`, `steward_back` |
 | `responses.acted`, `responses.disputed`, `responses.ignored` | how workers answered your interventions |

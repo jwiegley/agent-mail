@@ -4635,10 +4635,16 @@ RESET_OPENING = ("A `/clear` (typed by John, or sent with `agent-deck session co
 # reconciliation reads as filed, and nothing else. The paragraph before the table and the table's first row are pinned whole, the row as the first.
 NOTICE_RULE = ("The table files posts on `+<channel>` and mail to you by their subject. A post whose frame line names another channel, such as `post +fleet` "
                "(agent-mail 2.2's join subscribes you to `+fleet`), and a broadcast, whose frame line says `broadcast`, are peers' notices whatever their "
-               "subject, filed by the table's first row alone.")
-NOTICE_ROW = ("| any subject, on a post whose frame line names another channel or on a broadcast | nothing but one line in the day's log: its time, `notice`, "
-              "its channel or `broadcast`, and its id (`18:02:11Z notice +fleet <id>`) | none | no: no reply, no question line, and never a post to its channel "
-              "in answer |")
+               "subject: the table's first row alone logs them, and the metrics count no notice as a filed post.")
+NOTICE_ROW = ("| any subject, on a post whose frame line names another channel or on a broadcast | nothing but one line in the day's log, with no delay: "
+              "its time, `notice`, its channel or `broadcast`, and its id (`18:02:11Z notice +fleet <id>`) | none | no: no reply, no question line, and "
+              "never a post to its channel in answer |")
+# Fix round 2 of the third cycle (ruling R14): a notice is no filed post for the metrics, so the notice delay and the delay in a log line are those of a post
+# on the channel, as posts_seen counts it, and a quiet +fleet post read a tick late never stretches the digest's Notice delay. The paragraph above says so,
+# the row gives a notice no delay, and the metrics row and the log line's sentence are pinned whole.
+NOTICE_DELAY_ROW = "| `notice_delay.max`, `notice_delay.p50` | seconds from the stamp of a post on the channel to the turn that filed it |"
+LOG_LINE_SENTENCE = ("`log/<UTC date>.md`: one line for each event, its time first, then the ids it concerns and, for a filed post on the channel, its "
+                     "delay, never a body: `18:02:11Z filed UPDATE glm53-fp8 glm-5.2 <id> delay=95s`.")
 # Under the same decision, since agent-mail 2.2 sends a message that names no to to the sender's write targets, or to the default channel +fleet when it has
 # none: the steward names to on every send, said once in section 1's list of what it may do, with that reason. The sentence is pinned whole, as section 1's
 # only sentence that names `to`.
@@ -4746,6 +4752,17 @@ def test_claude_md_takes_other_channels_as_notices(d):
     ok(first == [NOTICE_ROW],
        "docs: the first row of section 5's table in CLAUDE.md files a notice as one line in the day's log and nothing else, never a reply, a question line or "
        f"a post to its channel, as pinned (got {without_question_marks(repr(first))})")
+
+
+def test_claude_md_times_only_posts_on_the_channel(d):
+    section = claude_section(claude_md(), 11)
+    rows = [line for line in section.splitlines() if line.startswith("| `notice_delay.max`")]
+    ok(rows == [NOTICE_DELAY_ROW],
+       "docs: section 11 of CLAUDE.md times the notice delay from the stamp of a post on the channel, never a notice's, as pinned "
+       f"(got {without_question_marks(repr(rows))})")
+    found = [s for s in sentences(section) if s.startswith("`log/<UTC date>.md`:")]
+    ok(found == [LOG_LINE_SENTENCE],
+       f"docs: section 11 of CLAUDE.md logs a delay only for a filed post on the channel, as pinned (got {without_question_marks(repr(found))})")
 
 
 def test_claude_md_names_to_on_every_send(d):
@@ -5006,7 +5023,8 @@ DOCS_CHECKS = (test_claude_md, test_claude_md_headings_are_in_order, test_claude
                test_claude_md_reminds_of_notes_once, test_claude_md_follows_the_worked_example_and_its_keys, test_claude_md_states_the_helpers_cap_as_it_is,
                test_claude_md_keeps_the_question_line_inside_the_pane, test_claude_md_takes_its_channel_from_topic_md_or_from_john, test_claude_md_answers_agent_decks_recovery_turn,
                test_claude_md_starts_a_new_topic_afresh_after_a_close, test_claude_md_wakes_nothing_after_a_close, test_claude_md_names_the_resets_that_lose_nothing,
-               test_claude_md_takes_other_channels_as_notices, test_claude_md_names_to_on_every_send, test_claude_md_keeps_its_channel_across_a_re_join,
+               test_claude_md_takes_other_channels_as_notices, test_claude_md_times_only_posts_on_the_channel, test_claude_md_names_to_on_every_send,
+               test_claude_md_keeps_its_channel_across_a_re_join,
                test_claude_md_invites_with_the_optional_write_target, test_claude_md_compares_posts_since_last_with_its_own_channel,
                test_claude_md_leaves_the_join_its_own_subscriptions,
                test_shared_and_heartbeat,
@@ -5231,8 +5249,8 @@ def test_docs_checks_catch_each_pinned_regression(d):
         ("a post on another channel filed by its subject again", NOTICE_RULE + "\n\n", "", "docs: section 5 of CLAUDE.md files by their subject only posts"),
         ("a broadcast left to be filed by its subject", " and a broadcast, whose frame line says `broadcast`,", "",
          "docs: section 5 of CLAUDE.md files by their subject only posts"),
-        ("a notice given a ledger row", "nothing but one line in the day's log:", "an Items row and one line in the day's log:",
-         "docs: the first row of section 5's table in CLAUDE.md files a notice"),
+        ("a notice given a ledger row", "nothing but one line in the day's log, with no delay:",
+         "an Items row and one line in the day's log, with no delay:", "docs: the first row of section 5's table in CLAUDE.md files a notice"),
         ("the notice row moved below the JOIN row", NOTICE_ROW + "\n" + join_row + "\n", join_row + "\n" + NOTICE_ROW + "\n",
          "docs: the first row of section 5's table in CLAUDE.md files a notice"),
         # the same decision: to named on every send
@@ -5268,7 +5286,16 @@ def test_docs_checks_catch_each_pinned_regression(d):
          "When it is above the posts you received", "docs: section 8 of CLAUDE.md compares posts-since-last"),
         # fix round 2 of the third cycle (ruling R13): the mailbox join's own subscriptions are not the steward's subscribe
         ("the join's own subscriptions left out of section 1", "`+<channel>` alone, apart from what the mailbox join does itself.",
-         "`+<channel>` alone.", "docs: section 1 of CLAUDE.md lets the steward subscribe and unsubscribe"))
+         "`+<channel>` alone.", "docs: section 1 of CLAUDE.md lets the steward subscribe and unsubscribe"),
+        # fix round 2 of the third cycle (ruling R14): a notice is no filed post for the metrics
+        ("a notice counted as a filed post", ", and the metrics count no notice as a filed post.", ".",
+         "docs: section 5 of CLAUDE.md files by their subject only posts"),
+        ("a notice logged with a delay", "nothing but one line in the day's log, with no delay:", "nothing but one line in the day's log, with its delay:",
+         "docs: the first row of section 5's table in CLAUDE.md files a notice"),
+        ("the notice delay timed from any post's stamp", "seconds from the stamp of a post on the channel to the turn that filed it",
+         "seconds from a post's stamp to the turn that filed it", "docs: section 11 of CLAUDE.md times the notice delay"),
+        ("a delay logged for any filed post", "for a filed post on the channel, its delay", "for a filed post, its delay",
+         "docs: section 11 of CLAUDE.md logs a delay only for a filed post on the channel"))
     for i, (what, old, new, failure) in enumerate(regressions):
         failures = docs_checks(checkout_with(d, f"regression-{i}", "CLAUDE.md", old, new))
         ok(old in good and any(f.startswith(failure) for f in failures), f"docs: docs_checks catches {what} (got {without_question_marks(repr(failures))})")
