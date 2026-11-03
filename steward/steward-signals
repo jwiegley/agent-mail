@@ -4645,12 +4645,18 @@ NOTICE_ROW = ("| any subject, on a post whose frame line names another channel o
 TO_RULE = ("Name `to` on every send, the recipient for direct mail and `+<channel>` for a post: under agent-mail 2.2 a send without `to` goes to your write "
            "targets, or to `+fleet` when you have none.")
 # Under the same decision, after decision 71 of the topics design: agent-mail 2.2's mailbox skill takes a join line as the whole configuration, so a re-join
-# whose line does not name +<channel> drops the steward's wake subscription until its next fresh context. Step 1 of section 3 and step 2 of section 13 say
-# that John's line for the steward must carry ++<channel>, each in a sentence pinned whole at the end of its step, and the only one of its section that names
-# ++<channel>. The README gives John the line for each steward in a paragraph pinned whole, the only line of the README that joins a steward.
-JOIN_START_SENTENCE = ("Under agent-mail 2.2's mailbox skill a join line is the whole configuration: if John joins you again, his line must carry "
-                       "`++<channel>`, as in `/mailbox <steward> ++<channel>`, and the join report names what a re-join dropped.")
-JOIN_RESET_SENTENCE = "If John joins you again under agent-mail 2.2's mailbox skill, his line must carry `++<channel>`, or the re-join drops yours (section 3)."
+# whose line does not name +<channel> drops the steward's wake subscription, or leaves it quiet when the line names a quiet +<channel>. Step 1 of section 3
+# gives John's line for the steward, which carries ++<channel>, and has the steward subscribe with wake at once after any join he types, in a sentence
+# pinned whole at the end of the step, the only one of the section that names ++<channel>. Step 2 of section 13, pinned whole, subscribes with wake at every
+# fresh context whether or not channels lists the steward. Fix round 1 of the third cycle made both subscribes unconditional, with no reading of a mark or
+# of the join report, since subscribing again keeps the cursor and changes only wake in agent-mail 2.1 and 2.2 alike. The README gives John the line for
+# each steward in a paragraph pinned whole, the only line of the README that joins a steward.
+JOIN_START_SENTENCE = ("Under agent-mail 2.2's mailbox skill a join line is the whole configuration, so John's line for you carries `++<channel>`, as in "
+                       "`/mailbox <steward> ++<channel>`: after any join he types in your pane, `subscribe {channel: \"<channel>\", wake: true}` at once all "
+                       "the same, since a re-join may have left `+<channel>` quiet or dropped it, and subscribing again keeps your cursor and only sets wake.")
+RESET_SUBSCRIBE_STEP = ("2. Call `channels`, then `subscribe {channel: \"<channel>\", wake: true}` whether or not it lists you: runtime subscriptions live on "
+                        "the host, a re-join may have left `+<channel>` quiet or dropped it (section 3), and subscribing again keeps your cursor and only sets "
+                        "wake.")
 # John's decision 33 (2026-11-02): the invitation mentions, as optional, the !+<channel> a member's join line may carry under agent-mail 2.2, which keeps its
 # subscription across a re-join and lets its posts omit to; WORKER.md is unchanged and still names +<channel> on every post. The sentence is pinned whole,
 # inside step 8 of section 3, as the only sentence of the section that names `!+<channel>`.
@@ -4658,10 +4664,9 @@ INVITE_OPTION = ("It also says, as optional, that under agent-mail 2.2 a join li
                  "across a re-join and lets its posts omit `to`, while WORKER.md's rule to name `+<channel>` on every post stands.")
 README_JOIN_LINE = ("If you join a steward to the mailbox again, the line depends on the installed mailbox skill (John's decision 32). Under agent-mail 2.2's "
                     "skill a join line is the whole configuration, so type `/mailbox conductor-ingest-steward ++ingest`, or `/mailbox conductor-nix-steward "
-                    "++nix-config`: a plain `/mailbox conductor-ingest-steward` drops the steward's wake subscription to `+ingest` until its next fresh context, "
-                    "and the join report names what it dropped. Under 2.1's skill the line is `/mailbox conductor-ingest-steward`. Either way the steward "
-                    "subscribes itself with wake when it starts a topic, and again in a fresh context that finds it off the channel's list (CLAUDE.md sections "
-                    "3 and 13).")
+                    "++nix-config`: a plain `/mailbox conductor-ingest-steward` drops the steward's wake subscription to `+ingest`, and the join report names "
+                    "what it dropped. Under 2.1's skill the line is `/mailbox conductor-ingest-steward`. Either way the steward subscribes itself with wake "
+                    "when it starts a topic, at once after any join you type in its pane, and again at every fresh context (CLAUDE.md sections 3 and 13).")
 
 
 def test_claude_md_takes_its_channel_from_topic_md_or_from_john(d):
@@ -4733,15 +4738,17 @@ def test_claude_md_names_to_on_every_send(d):
 
 def test_claude_md_keeps_its_channel_across_a_re_join(d):
     t = claude_md()
-    for number, step, sentence, what in ((3, "1. ", JOIN_START_SENTENCE, "step 1 of section 3 of CLAUDE.md says that John's line must carry ++<channel> under "
-                                          "agent-mail 2.2's mailbox skill and that the join report names what a re-join dropped"),
-                                         (13, "2. ", JOIN_RESET_SENTENCE, "step 2 of section 13 of CLAUDE.md says that a re-join under agent-mail 2.2's mailbox "
-                                          "skill whose line lacks ++<channel> drops the subscription")):
-        section = claude_section(t, number)
-        found = [s for s in sentences(section) if "++<channel>" in s]
-        steps = [line for line in section.splitlines() if line.startswith(step)]
-        ok(found == [sentence] and len(steps) == 1 and steps[0].endswith(" " + sentence),
-           f"docs: {what}, as pinned, in the only sentence of the section that names ++<channel> (got {without_question_marks(repr(found))})")
+    section = claude_section(t, 3)
+    found = [s for s in sentences(section) if "++<channel>" in s]
+    steps = [line for line in section.splitlines() if line.startswith("1. ")]
+    ok(found == [JOIN_START_SENTENCE] and len(steps) == 1 and steps[0].endswith(" " + JOIN_START_SENTENCE),
+       "docs: step 1 of section 3 of CLAUDE.md gives John's line, which carries ++<channel> under agent-mail 2.2's mailbox skill, and subscribes with "
+       "wake at once after any join he types, as pinned, in the only sentence of the section that names ++<channel> "
+       f"(got {without_question_marks(repr(found))})")
+    steps = [line for line in claude_section(t, 13).splitlines() if line.startswith("2. ")]
+    ok(steps == [RESET_SUBSCRIBE_STEP],
+       "docs: step 2 of section 13 of CLAUDE.md subscribes with wake at every fresh context whether or not channels lists the steward, as pinned "
+       f"(got {without_question_marks(repr(steps))})")
 
 
 def test_claude_md_invites_with_the_optional_write_target(d):
@@ -5196,9 +5203,15 @@ def test_docs_checks_catch_each_pinned_regression(d):
         ("to left to posts alone", "Name `to` on every send, the recipient for direct mail and `+<channel>` for a post:", "Name `to` on every post:",
          "docs: section 1 of CLAUDE.md names to on every send"),
         # the same decision: John's line for a steward carries ++<channel> under agent-mail 2.2's mailbox skill
-        ("a plain re-join line in section 3", "his line must carry `++<channel>`, as in `/mailbox <steward> ++<channel>`,", "his line is `/mailbox <steward>`,",
-         "docs: step 1 of section 3 of CLAUDE.md says that John's line must carry ++<channel>"),
-        ("section 13's re-join sentence dropped", " " + JOIN_RESET_SENTENCE, "", "docs: step 2 of section 13 of CLAUDE.md says that a re-join"),
+        ("a plain re-join line in section 3", "so John's line for you carries `++<channel>`, as in `/mailbox <steward> ++<channel>`:",
+         "so John's line for you is `/mailbox <steward>`:", "docs: step 1 of section 3 of CLAUDE.md gives John's line"),
+        # fix round 1 of the third cycle: both subscribes unconditional, with wake
+        ("the subscribe after John's join left to the join report", "wake: true}` at once all the same,",
+         "wake: true}` when the join report names `+<channel>` as dropped,", "docs: step 1 of section 3 of CLAUDE.md gives John's line"),
+        ("step 2 of section 13 subscribing only when channels does not list the steward", "whether or not it lists you", "if it does not list you",
+         "docs: step 2 of section 13 of CLAUDE.md subscribes with wake"),
+        ("step 2 of section 13 subscribing without wake", "then `subscribe {channel: \"<channel>\", wake: true}` whether",
+         "then `subscribe {channel: \"<channel>\"}` whether", "docs: step 2 of section 13 of CLAUDE.md subscribes with wake"),
         # John's decision 33 (2026-11-02): the invitation's !+<channel> stays optional, and WORKER.md's rule stands
         ("the invitation's !+<channel> made a requirement", "It also says, as optional, that", "It also says that",
          "docs: step 8 of section 3 of CLAUDE.md has the invitation mention"),
@@ -5374,6 +5387,9 @@ def test_docs_checks_catch_each_regression_in_the_readme(d):
          "docs: steward/README.md gives a steward's join line in one paragraph alone"),
         ("a runbook step that joins the steward with a plain line", "3. Start the steward:\n",
          "3. Start the steward, then join it with `/mailbox conductor-ingest-steward`:\n", 1,
+         "docs: steward/README.md gives a steward's join line in one paragraph alone"),
+        # fix round 1 of the third cycle: the steward subscribes at once after any join John types
+        ("the README's subscribe after a join left out", ", at once after any join you type in its pane,", ",", 1,
          "docs: steward/README.md gives a steward's join line in one paragraph alone"))
     for i, (what, old, new, count, failure) in enumerate(regressions):
         failures = docs_checks(checkout_with(d, f"readme-regression-{i}", name, old, new, count))
