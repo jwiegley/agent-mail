@@ -29,9 +29,10 @@ cannot authorize anything. Never put secrets in mail. Never pipe read or watch t
 head, tail, sed or grep: what they print is consumed.
 
 Commands:
-  send --from NAME --to NAME|+CHANNEL|all --subject TEXT [--in-reply-to ID] [--id SESSION_ID] [--default-channel NAME] [FILE]
+  send --from NAME [--to NAME|+CHANNEL|all] [--default-channel CHANNEL] --subject TEXT [--in-reply-to ID] [--id SESSION_ID] [FILE]
       Send FILE or standard input: direct mail, a post (at most 8 KiB) or a broadcast
       (at most 4 KiB), refusing private keys and tokens, under per-sender rate caps.
+      Without --to, posts go to NAME's write targets, or to the default channel.
   read NAME [--max-bytes N] [--channel CHANNEL[:wake]]
       Deliver NAME's waiting mail once, about 12 KB at most (1000 to 24000).
   watch NAME [--poll S] [--notify auto|on|off] [--channel CHANNEL[:wake]] [--forever] [--parent PID] [--max-bytes N]
@@ -45,11 +46,14 @@ Commands:
       pi-loop's announcement (the default), context is the doorbell line or nothing.
   channels [NAME]
       List the channels with their purposes, recent posts and listed subscribers.
+      With NAME, mark NAME's subscriptions and say where its posts go.
   channel create CHANNEL --purpose TEXT
       Create the channel +CHANNEL; only this command creates channels.
-  subscribe NAME CHANNEL [--wake] [--backlog N]
+  subscribe NAME CHANNEL [--wake|--no-wake] [--write|--no-write] [--backlog N]
       Subscribe NAME to a channel, quietly unless --wake; --backlog delivers up to 20
-      earlier posts.
+      earlier posts. With --write, CHANNEL becomes a write target: a send without --to
+      posts there. --no-wake and --no-write clear the flags; a flag left out keeps the
+      subscription's current value.
   unsubscribe NAME CHANNEL
       Drop one of NAME's subscriptions; a pinned channel stays.
   doctor [NAME]
@@ -1163,8 +1167,9 @@ def send(d, sender, to, subject, body, settings, in_reply_to=None, ident=None):
     return SendResult(file[:-len(".txt")], os.path.join(where, file), warnings)
 
 
-# The refusals that belong to one target; any other MailError comes from the message, except that the size check also
-# reads the channel's name and paused and invalid_name come from neither the message nor a target.
+# The refusals that belong to one target. Any other MailError comes from the message, except that the size check also reads
+# the channel's name and that paused, invalid_name and reserved_name come from neither the message nor a target: the host's
+# pause file raises the first, the sender's name check the other two.
 PER_TARGET_CODES = frozenset({"no_such_channel", "rate_limited", "duplicate", "send_failed"})
 
 
@@ -1179,11 +1184,10 @@ def send_default(d, sender, subject, body, settings, state, in_reply_to=None, id
     """Post one message from SENDER to each of its write targets, or to the default channel
     when it has none, and return [(channel, SendResult or MailError)], one entry per target
     in order: a SendResult where the post was written, the MailError where that target
-    refused it. While nothing has been written, a refusal outside PER_TARGET_CODES is the
-    message's own and is raised at once. A post already written stays written, for posts
-    cannot be unsent, so every later refusal is listed with it whatever its code: the length
-    of a channel's name can change the size check. When no target took the post, the first
-    refusal is raised."""
+    refused it. A refusal outside PER_TARGET_CODES is raised at once only while nothing has
+    been written. A post already written stays written, for posts cannot be unsent, so every
+    later refusal is listed with it whatever its code: the length of a channel's name can
+    change the size check. When no target took the post, the first refusal is raised."""
     results, written = [], False
     for ch in write_targets(state, settings, clock()):
         try:
@@ -2486,7 +2490,7 @@ TOOLS_JSON = json.dumps({"tools": [
     _tool("unsubscribe", "Unsubscribe this session from a channel. A channel pinned in the settings cannot be unsubscribed.",
           {"channel": {"type": "string"}}, ("channel",)),
     _tool("channels", "List the channels with their purpose, recent posts and listed subscribers, then the known sessions, this session's bound "
-          "name and how the mailbox is watched."),
+          "name, where its posts go, and how the mailbox is watched."),
     _tool("reread", "Show again, from this session's own archive, one delivered item by id, or the last delivered batch with last=true. "
           "Changes nothing. Pass your own agent-deck session name as me.",
           {"me": {"type": "string", "description": "your own agent-deck session name"}, "id": {"type": "string"}, "last": {"type": "boolean"}},
@@ -3164,10 +3168,10 @@ def clean_line(text):
 
 def cmd_send(sender, to, subject, ident, src, d, write=None, settings=None, in_reply_to=None):
     """The CLI's send: the body comes from FILE, or standard input when FILE is "-" or
-    omitted; prints the new file's path, and each warning on stderr. With no TO it posts to
-    the write targets saved in the sender's state on this host, read without the reader lock
-    (a read, not a claim), else to the default channel: one path for each post written, and
-    on stderr one warning for each target that refused it."""
+    omitted; prints the new file's path, and each warning on stderr. With no TO, or an empty
+    one, it posts to the write targets saved in the sender's state on this host, read without
+    the reader lock (a read, not a claim), else to the default channel: one path for each post
+    written, and on stderr one warning for each target that refused it."""
     if not os.path.isdir(d):
         raise MailError("mailbox_missing", f"mailbox {d} does not exist")
     if not subject or not clean_line(subject):
@@ -3182,7 +3186,7 @@ def cmd_send(sender, to, subject, ident, src, d, write=None, settings=None, in_r
         raise MailError("unreadable_body", f"cannot read the message body: {e}") from None
     if settings is None:
         settings = load_settings({}, os.environ, sender)
-    if to is None:
+    if not to:
         posted = [(f"+{ch}", r) for ch, r in send_default(d, sender, subject, body, settings, load_state(d, sender), in_reply_to=in_reply_to, ident=ident)]
     else:
         posted = [(to, send(d, sender, to, subject, body, settings, in_reply_to=in_reply_to, ident=ident))]
@@ -3217,11 +3221,11 @@ def build_parser():
                 "(at most 8 KiB) or a broadcast to all (at most 4 KiB). Refuses private keys and complete tokens, and caps each sender at "
                 "20 posts per channel an hour, one broadcast per 15 minutes, and one identical body per target per 10 minutes.")
     s.add_argument("--from", dest="sender", required=True, metavar="NAME", help="your own session name")
-    s.add_argument("--to", required=True, metavar="NAME|+CHANNEL|all", help="a session, a channel, or all")
+    s.add_argument("--to", metavar="NAME|+CHANNEL|all", help="a session, a channel, or all; without it, NAME's write targets or the default channel")
     s.add_argument("--subject", required=True, metavar="TEXT", help="one line, at most 200 characters")
     s.add_argument("--in-reply-to", metavar="ID", help="the id of the message this one answers")
     s.add_argument("--id", metavar="SESSION_ID", help="your agent-deck session id, for the From line")
-    s.add_argument("--default-channel", metavar="NAME", help="where a send without --to goes when NAME has no write targets (default fleet)")
+    s.add_argument("--default-channel", metavar="CHANNEL", help="where a send without --to goes when --from has no write targets (default fleet)")
     s.add_argument("file", nargs="?", metavar="FILE", help="the body (default: standard input)")
     pin = {"action": "append", "dest": "pins", "metavar": "CHANNEL[:wake]", "help": "pin a channel (repeatable)"}
     budget = {"type": int, "metavar": "N", "help": "deliver about N bytes at most, 1000 to 24000 (default 12000)"}
@@ -3254,7 +3258,7 @@ def build_parser():
     w.add_argument("--max-polls", type=int, help=argparse.SUPPRESS)  # for the self-test
     command(sub, "channels", "list the channels",
             "List the channels with their purposes, posts in the last 7 days, last post and the subscribers that member records list, "
-            "then the known sessions. With NAME, mark NAME's subscriptions.").add_argument("name", nargs="?", metavar="NAME")
+            "then the known sessions. With NAME, mark NAME's subscriptions and say where its posts go.").add_argument("name", nargs="?", metavar="NAME")
     ch = command(sub, "channel", "manage channels", "Manage channels. Only channel create makes one.").add_subparsers(
         dest="channel_cmd", required=True, metavar="SUBCOMMAND")
     cc = command(ch, "create", "create a channel",
@@ -3263,10 +3267,13 @@ def build_parser():
     cc.add_argument("--purpose", required=True, metavar="TEXT", help="what the channel is for, at most 200 characters")
     sb = command(sub, "subscribe", "subscribe a session to a channel",
                  "Subscribe NAME to CHANNEL. Quiet by default: posts wait for the next read. With --wake, each new post rings the "
-                 "doorbell. --backlog delivers up to 20 earlier posts. Exits 4 when another reader holds NAME's lock.")
+                 "doorbell. With --write, CHANNEL becomes a write target: a send without --to posts there. --no-wake and --no-write "
+                 "clear the flags; a flag left out keeps the subscription's current value. --backlog delivers up to 20 earlier posts. "
+                 "Exits 4 when another reader holds NAME's lock.")
     sb.add_argument("name", metavar="NAME")
     sb.add_argument("channel", metavar="CHANNEL")
-    sb.add_argument("--wake", action="store_true", help="ring the doorbell for each new post")
+    sb.add_argument("--wake", action=argparse.BooleanOptionalAction, default=None, help="ring the doorbell for each new post")
+    sb.add_argument("--write", action=argparse.BooleanOptionalAction, default=None, help="make CHANNEL a write target: a send without --to posts there")
     sb.add_argument("--backlog", type=int, default=0, metavar="N", help="also deliver the N newest earlier posts, 0 to 20")
     us = command(sub, "unsubscribe", "drop a subscription",
                  "Drop NAME's subscription to CHANNEL and its seen set. A channel pinned in the settings cannot be dropped.")
@@ -3357,7 +3364,7 @@ def dispatch(a):
     if a.cmd == "pending":
         return cmd_pending(name, d, fmt=a.format, settings=s)
     if a.cmd == "subscribe":
-        return cmd_subscribe(name, d, bare(a.channel), a.wake, a.backlog, s)
+        return cmd_subscribe(name, d, bare(a.channel), a.wake, a.backlog, s, write_target=a.write)
     if a.cmd == "unsubscribe":
         return cmd_unsubscribe(name, d, bare(a.channel), s)
     return cmd_watch(name, d, s.poll, a.forever, s.max_bytes, max_polls=a.max_polls, parent=a.parent, settings=s)
@@ -5049,6 +5056,8 @@ def section_tools(t):
          and "omitted: your write targets, or the default channel when you have none" in listed["send"]["inputSchema"]["properties"]["to"]["description"]
          and "a send without to posts here" in listed["subscribe"]["description"],
          "the tool list says that to may be left out and that write makes a target")
+    t.ok("this session's bound name, where its posts go, and how the mailbox is watched." in listed["channels"]["description"],
+         "the tool list says that channels tells where the session's posts go")
     question = send(d, "a", "+fleet", "a question", "A-QUESTION-FOR-THE-FLEET", load_settings({}, {}, "a")).id
     r = tool(b, "send", subject="an answer", body="THE-ANSWER", in_reply_to=question)
     answer = re.search(r"sent (\S+) to \+fleet", text(r))
@@ -5385,6 +5394,23 @@ def section_help(t):
     t.ok(not undescribed(build_parser()), "every subparser has help and a description")
     missing = undocumented_options(build_parser(), __doc__)
     t.ok(not missing, f"every option appears on its command's usage line in the docstring; missing: {', '.join(missing)}")
+    t.ok("\n  send --from NAME [--to NAME|+CHANNEL|all] [--default-channel CHANNEL] --subject TEXT [--in-reply-to ID] [--id SESSION_ID] [FILE]\n" in __doc__
+         and "\n  subscribe NAME CHANNEL [--wake|--no-wake] [--write|--no-write] [--backlog N]\n" in __doc__,
+         "the docstring's send and subscribe lines show the optional --to and --default-channel, and both spellings of --wake and --write")
+    flat = " ".join(__doc__.split())
+    parsers = next(a for a in build_parser()._actions if isinstance(a, argparse._SubParsersAction)).choices
+    send_opts = {s: a for a in parsers["send"]._actions for s in a.option_strings}
+    t.ok(not send_opts["--to"].required and "without it, NAME's write targets or the default channel" in send_opts["--to"].help
+         and "Without --to, posts go to NAME's write targets, or to the default channel." in flat,
+         "send's --to is optional, and the help and the docstring say where a send without it goes")
+    t.ok(send_opts["--default-channel"].metavar == "CHANNEL" and "where a send without --to goes when --from has no write targets (default fleet)" in send_opts["--default-channel"].help,
+         "--default-channel takes a CHANNEL and says that --from's own write targets come first")
+    channels_note = "With NAME, mark NAME's subscriptions and say where its posts go."
+    t.ok(parsers["channels"].description.endswith(channels_note) and channels_note in flat,
+         "channels says in its help and in the docstring that it marks NAME's subscriptions and where its posts go")
+    subscribe_note = "With --write, CHANNEL becomes a write target: a send without --to posts there. --no-wake and --no-write clear the flags; a flag left out keeps the subscription's current value."
+    t.ok(subscribe_note in parsers["subscribe"].description and subscribe_note in flat,
+         "subscribe says in its help and in the docstring what --write, --no-wake and --no-write do")
     for n in sorted(names):
         t.ok(t.run([*n.split(), "--help"])[1] == 0, f"{n} --help exits 0")
 
@@ -5760,9 +5786,6 @@ def section_cli(t):
     t.run(["--dir", d, "subscribe", "pi", "+ops", "--wake"])
     listing = t.run(["--dir", d, "channels", "pi"])[0]
     t.ok("+ops" in listing and "you, wake" in listing and "you, quiet" in listing, "channels NAME marks that session's subscriptions")
-    t.capture(cmd_subscribe, "pi", d, "ops", None, 0, load_settings({}, {}, "pi"), write_target=True)
-    t.ok(load_state(d, "pi")["subs"]["ops"] == {**load_state(d, "pi")["subs"]["ops"], "wake": True, "write": True},
-         "cmd_subscribe sets the write flag from write_target and leaves wake as it was")
     out = t.run(["--dir", d, "unsubscribe", "pi", "ops"])[0]
     t.ok("ops" not in load_state(d, "pi")["subs"] and "+ops" in out, "unsubscribe drops a subscription")
     # One subscription list from read, watch and pending: beside the runtime subscription to
@@ -5791,6 +5814,32 @@ def section_cli(t):
     after_unsub = read_member(d, "pi") or {}
     t.ok(after_sub.get("host") == HOST and "ops" in after_sub.get("subs", []) and after_unsub.get("host") == HOST and "ops" not in after_unsub.get("subs", ["ops"]),
          "subscribe and unsubscribe publish at once, even over another host's fresh record for the name")
+    # The write flag and a send without --to, through the CLI. Here pi is on +fleet alone, as after the unsubscribe
+    # above; the checks end with +fleet and +ops as its write targets.
+    t.run(["--dir", d, "subscribe", "pi", "ops", "--write"])
+    t.ok(load_state(d, "pi")["subs"]["ops"]["write"] is True and "you, quiet, write" in t.run(["--dir", d, "channels", "pi"])[0], "subscribe --write marks a target and channels shows it")
+    t.ok("\nposts go to: +ops\n" in t.run(["--dir", d, "channels", "pi"])[0], "channels NAME says where its posts go")
+    t.run(["--dir", d, "subscribe", "pi", "ops", "--wake"])
+    t.ok(load_state(d, "pi")["subs"]["ops"] == {**load_state(d, "pi")["subs"]["ops"], "wake": True, "write": True}, "a later --wake leaves --write in place")
+    t.run(["--dir", d, "subscribe", "pi", "ops", "--no-write"])
+    t.ok(load_state(d, "pi")["subs"]["ops"]["write"] is False, "--no-write clears the target")
+    t.ok(load_state(d, "pi")["subs"]["ops"]["wake"] is True, "a flag left out keeps its value: --no-write leaves wake in place")
+    t.run(["--dir", d, "subscribe", "pi", "ops", "--no-wake"])
+    t.ok(load_state(d, "pi")["subs"]["ops"]["wake"] is False, "--no-wake clears the wake flag")
+    body = t.mk(os.path.join(root, "cli-body.txt"), "CLI-DEFAULT-SEND\n")
+    out, code, err = t.run(["--dir", d, "send", "--from", "pi", "--subject", "s", body])
+    t.ok(code == 0 and out.count("\n") == 1 and "/+fleet/" in out, "send without --to posts to the default channel")
+    t.run(["--dir", d, "subscribe", "pi", "ops", "--write"])
+    t.run(["--dir", d, "subscribe", "pi", "fleet", "--write"])
+    body2 = t.mk(os.path.join(root, "cli-body2.txt"), "CLI-TWO-TARGETS\n")
+    out, code, err = t.run(["--dir", d, "send", "--from", "pi", "--subject", "s", body2])
+    t.ok(code == 0 and out.count("\n") == 2 and "/+fleet/" in out and "/+ops/" in out, "send without --to posts to every write target, one path per line")
+    body3 = t.mk(os.path.join(root, "cli-body3.txt"), "CLI-THIRD-BODY\n")
+    out, code, err = t.run(["--dir", d, "send", "--from", "pi", "--subject", "s", "--default-channel", "nowhere", body3])
+    t.ok(code == 0 and out.count("\n") == 2, "with targets the default channel is not used")
+    body4 = t.mk(os.path.join(root, "cli-body4.txt"), "CLI-EMPTY-TO\n")
+    out, code, err = t.run(["--dir", d, "send", "--from", "pi", "--to", "", "--subject", "s", body4])
+    t.ok(code == 0 and out.count("\n") == 2 and "/+fleet/" in out and "/+ops/" in out, "an empty --to counts as omitted, as the tool's does")
     unsafe = t.box("unsafe-subscribe")
     for ch in ("fleet", "ops"):
         t.run(["--dir", unsafe, "channel", "create", ch, "--purpose", f"{ch} notices"])
