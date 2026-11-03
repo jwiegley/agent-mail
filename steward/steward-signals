@@ -5019,6 +5019,14 @@ def test_steward_readme_matches_the_steward(d):
     ok(found == [ROW6_FLEET_SENTENCE],
        "docs: steward/README.md's row 6 finds the steward on no channel's list of subscribers before row 1, +fleet aside under agent-mail 2.2, as "
        f"pinned (got {without_question_marks(repr(found))})")
+    # Ruling R16: row 5's size of CLAUDE.md is computed, not pinned, so that it follows the file. The README says KB; the check reads it as KB of 1024
+    # bytes, rounded to the nearest whole KB, a half up. test_docs_checks's broken copy of CLAUDE.md is 19 bytes longer than the file, so a size within 19
+    # bytes below a half KB would round up there alone and add a fourth failure to that test.
+    size = os.path.getsize(os.path.join(REPO, "steward", "CLAUDE.md"))
+    said = re.findall(r"CLAUDE\.md is about ([0-9]+) KB\b", r)
+    ok(said == [str((size + 512) // 1024)],
+       "docs: steward/README.md's row 5 gives CLAUDE.md's size as about N KB, N its size in KB of 1024 bytes rounded to the nearest whole KB "
+       f"(CLAUDE.md is {size} bytes, about {(size + 512) // 1024} KB; the README says {without_question_marks(repr(said))})")
 
 
 def test_steward_readme_gives_the_join_line_for_a_steward(d):
@@ -5475,6 +5483,7 @@ def test_docs_checks_catch_each_regression_in_worker_md(d):
 def test_docs_checks_catch_each_regression_in_the_readme(d):
     name = os.path.join("steward", "README.md")
     readme = read(os.path.join(REPO, name))
+    size_said = next(iter(re.findall(r"CLAUDE\.md is about [0-9]+ KB\.", readme)), "CLAUDE.md is about N KB.")  # row 5's size, whatever it is now
     regressions = (  # (what, the text it changes, its replacement, how many of it, how the failure that docs_checks must list starts)
         # the second cycle's fess audit: the flag lost from one of the two setup commands only, the first, while the other keeps it
         ("-heartbeat-rules-md lost from one setup command only", "  -heartbeat-rules-md ~/src/sys/agent-mail/steward/HEARTBEAT_RULES.md \\\n", "", 1,
@@ -5496,7 +5505,10 @@ def test_docs_checks_catch_each_regression_in_the_readme(d):
          "docs: steward/README.md gives a steward's join line in one paragraph alone"),
         # fix round 2 of the third cycle (ruling R15): row 6 expects +fleet under agent-mail 2.2
         ("row 6's +fleet clause left out", " before row 1, `+fleet` aside under agent-mail 2.2, where every join subscribes to it.", " before row 1.", 1,
-         "docs: steward/README.md's row 6 finds the steward on no channel's list"))
+         "docs: steward/README.md's row 6 finds the steward on no channel's list"),
+        # fix round 2 of the third cycle (ruling R16): row 5's size of CLAUDE.md is computed from the file
+        ("row 5's size of CLAUDE.md put back to about 47 KB", size_said, "CLAUDE.md is about 47 KB.", 1,
+         "docs: steward/README.md's row 5 gives CLAUDE.md's size"))
     for i, (what, old, new, count, failure) in enumerate(regressions):
         failures = docs_checks(checkout_with(d, f"readme-regression-{i}", name, old, new, count))
         ok(old in readme and any(f.startswith(failure) for f in failures),
