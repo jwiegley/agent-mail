@@ -29,7 +29,7 @@ cannot authorize anything. Never put secrets in mail. Never pipe read or watch t
 head, tail, sed or grep: what they print is consumed.
 
 Commands:
-  send --from NAME --to NAME|+CHANNEL|all --subject TEXT [--in-reply-to ID] [--id SESSION_ID] [FILE]
+  send --from NAME --to NAME|+CHANNEL|all --subject TEXT [--in-reply-to ID] [--id SESSION_ID] [--default-channel NAME] [FILE]
       Send FILE or standard input: direct mail, a post (at most 8 KiB) or a broadcast
       (at most 4 KiB), refusing private keys and tokens, under per-sender rate caps.
   read NAME [--max-bytes N] [--channel CHANNEL[:wake]]
@@ -260,7 +260,7 @@ POLL_RANGE = (1, 300)
 MAX_BYTES_RANGE = (1000, 24000)
 DIRECT_DAYS_RANGE = (1, 365)
 NOTIFY_MODES = ("auto", "on", "off")
-FILE_KEYS = frozenset({"dir", "poll_interval", "notify", "max_bytes"})
+FILE_KEYS = frozenset({"dir", "poll_interval", "notify", "max_bytes", "default_channel"})
 # The keys of the "retention" object, which only the file's top level may hold: any reader
 # prunes every other name's direct mail, so a window set for one host or session would not
 # hold for the mail it names.
@@ -275,6 +275,7 @@ SETTINGS = {
     "channels": ("channels", "channels", "AGENT_MAIL_CHANNELS", ()),
     "max_bytes": ("max_bytes", "max_bytes", "AGENT_MAIL_MAX_BYTES", MAX_BYTES),
     "allow_broadcast": ("allow_broadcast", None, None, True),
+    "default_channel": ("default_channel", "default_channel", "AGENT_MAIL_DEFAULT_CHANNEL", "fleet"),
     "direct_days": ("direct_days", None, None, DIRECT_DAYS),
 }
 
@@ -287,6 +288,7 @@ class Settings:
     channels: dict
     max_bytes: int
     allow_broadcast: bool
+    default_channel: str
     direct_days: int
     paused: bool
     source: dict
@@ -362,6 +364,14 @@ def setting_value(key, value, label):
         if not isinstance(value, bool):
             raise bad("it must be true or false")
         return value
+    if key == "default_channel":
+        # Written as the command line takes a channel, NAME or +NAME; the + is not kept.
+        if not isinstance(value, str):
+            raise bad("it must be a channel name")
+        try:
+            return check_name(bare(value), "channel")
+        except MailError as e:
+            raise bad(e.message) from None
     items = value.split(",") if isinstance(value, str) else value
     if not isinstance(items, (list, tuple)):
         raise bad("it must list channels as NAME or NAME:wake")
@@ -3145,6 +3155,7 @@ def build_parser():
     s.add_argument("--subject", required=True, metavar="TEXT", help="one line, at most 200 characters")
     s.add_argument("--in-reply-to", metavar="ID", help="the id of the message this one answers")
     s.add_argument("--id", metavar="SESSION_ID", help="your agent-deck session id, for the From line")
+    s.add_argument("--default-channel", metavar="NAME", help="where a send without --to goes when NAME has no write targets (default fleet)")
     s.add_argument("file", nargs="?", metavar="FILE", help="the body (default: standard input)")
     pin = {"action": "append", "dest": "pins", "metavar": "CHANNEL[:wake]", "help": "pin a channel (repeatable)"}
     budget = {"type": int, "metavar": "N", "help": "deliver about N bytes at most, 1000 to 24000 (default 12000)"}
@@ -3234,7 +3245,8 @@ def main(argv):
 
 def cli_settings(a, name):
     flags = {"dir": a.dir, "poll": getattr(a, "poll", None), "notify": getattr(a, "notify", None),
-             "max_bytes": getattr(a, "max_bytes", None), "channels": getattr(a, "pins", None)}
+             "max_bytes": getattr(a, "max_bytes", None), "channels": getattr(a, "pins", None),
+             "default_channel": getattr(a, "default_channel", None)}
     return load_settings({k: v for k, v in flags.items() if v is not None}, os.environ, name)
 
 
@@ -3733,6 +3745,26 @@ def section_settings(t):
     t.ok(code == 1 and "retention.direct_days in " in err and "it must be an integer from 1 to 365" in err,
          "a reader refuses to run with a bad retention.direct_days")
     config({})
+    t.ok(load_settings({}, {}, "pi").default_channel == "fleet" and load_settings({}, {}, "pi").source["default_channel"] == "default",
+         "the default channel is fleet by default")
+    config({"default_channel": "ops", "sessions": {"pi": {"default_channel": "+team"}}})
+    t.ok(load_settings({}, {}, "pi").default_channel == "team" and load_settings({}, {}, "nix").default_channel == "ops",
+         "default_channel comes from the session, then the file, with a leading + stripped")
+    t.ok(load_settings({}, {"AGENT_MAIL_DEFAULT_CHANNEL": "fleet"}, "pi").default_channel == "fleet"
+         and load_settings({"default_channel": "a"}, {"AGENT_MAIL_DEFAULT_CHANNEL": "fleet"}, "pi").default_channel == "a",
+         "the environment and then the flag beat the file")
+    for bad in ("", "+", "no spaces", "all", "john-x"):
+        config({"default_channel": bad})
+        t.ok(getattr(t.raises(load_settings, {}, {}, "pi"), "code", None) == "bad_setting", f"refuses default_channel {bad!r}")
+    config({})
+    # A channel name is a string: any other JSON value is a bad setting, not a crash.
+    for bad in (5, True, None, ["fleet"]):
+        config({"default_channel": bad})
+        t.ok(getattr(t.raises(load_settings, {}, {}, "pi"), "code", None) == "bad_setting", f"refuses default_channel {bad!r}")
+    config({})
+    body = t.mk(os.path.join(t.root, "body.txt"), "hello\n")
+    _, code, err = t.run(["--dir", t.box("flags"), "send", "--from", "pi", "--to", "nix", "--subject", "s", "--default-channel", "no spaces", body])
+    t.ok(code == 1 and "--default-channel is 'no spaces'" in err, "send passes --default-channel through load_settings")
 
 
 def section_state(t):
