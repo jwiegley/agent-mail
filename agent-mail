@@ -3833,6 +3833,9 @@ def section_settings(t):
     t.ok(load_settings({}, {"AGENT_MAIL_DEFAULT_CHANNEL": "fleet"}, "pi").default_channel == "fleet"
          and load_settings({"default_channel": "a"}, {"AGENT_MAIL_DEFAULT_CHANNEL": "fleet"}, "pi").default_channel == "a",
          "the environment and then the flag beat the file")
+    config({"hosts": {HOST: {"default_channel": "ops"}}})
+    t.ok(load_settings({}, {}, "nix").default_channel == "ops" and load_settings({}, {}, "nix").source["default_channel"] == "host",
+         "default_channel comes from hosts.<host> for a session that has no entry of its own")
     for bad in ("", "+", "no spaces", "all", "john-x"):
         config({"default_channel": bad})
         t.ok(getattr(t.raises(load_settings, {}, {}, "pi"), "code", None) == "bad_setting", f"refuses default_channel {bad!r}")
@@ -5657,6 +5660,12 @@ def section_send(t):
     posted = [read_file(x[1].path)[0] for x in r]
     t.ok(len(posted) == 2 and all(f"\nIn-Reply-To: {reply.id}\n" in p and "(agent-deck 34f513aa-1793309640)" in p for p in posted),
          "each post carries the same in_reply_to and agent-deck id")
+    t.ok(len(posted) == 2 and all("\nSubject: re: ping\n" in p.split("\n\n", 1)[0] and p.split("\n\n", 1)[1] == "REPLYING-TO-BOTH\n" for p in posted),
+         "every post of one send without to carries the same Subject line and the same body")
+    kept = {ch: sorted(os.listdir(os.path.join(d, f"+{ch}"))) for ch in ("a", "b")}
+    refused = [getattr(t.raises(send_default, d, "pi", subject, "NO-SUBJECT", s, st), "code", None) for subject in ("", " \t ")]
+    t.ok(refused == ["no_subject", "no_subject"] and {ch: sorted(os.listdir(os.path.join(d, f"+{ch}"))) for ch in ("a", "b")} == kept,
+         "a send without to and without a subject is refused as no_subject and writes to neither write target")
     os.rename(os.path.join(d, "+b"), os.path.join(root, "gone-b"))
     r = send_default(d, "pi", "s", "A-STAYS", s, st)
     t.ok(isinstance(r[0][1], SendResult) and isinstance(r[1][1], MailError) and r[1][1].code == "no_such_channel",
