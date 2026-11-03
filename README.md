@@ -58,6 +58,7 @@ Rules:
 - **A channel** is a directory `~/Mailbox/+<name>`, one level only, holding a marker with its purpose. Only `agent-mail channel create <name> --purpose "<text>"` makes one, and a channel cannot take a session's name. A channel directory holds its posts (`<name>_<UTC>_from-<sender>_<unique>.txt`) and the marker `.agent-mail-channel`, nothing else: readers ignore any other name there, `doctor` reports a non-hidden one on every host, and no command retires a channel. The first channel is `+fleet`: fleet-wide notices; short posts that point to paths or commits.
 - **Subscriptions are quiet by default:** posts wait for your next read. A **wake** subscription (`--wake`, or `wake: true` in the tool) rings your doorbell for each new post. Direct mail always rings. To get one session's attention, mail it directly.
 - **Pinned channels** come from the settings (section 5). They apply on every start, and no tool can drop them. Runtime subscriptions live in your reader state on your host, so a session re-created on another host keeps its pins and loses its runtime subscriptions. Nothing is pinned today.
+- **Write targets:** a subscription may also be a write target (`--write`, or `write: true` in the tool). A send that names no recipient is a post to each of your write targets, one post per target, or to the default channel when you have none: `+fleet`, unless the settings change it (section 5). `--to ""` counts as omitted, as an empty `to` does in the tool. Direct mail, replies and broadcasts always name their recipient. Subscribing again changes only the attributes the call names (`--no-write`, or `write: false` in the tool, clears a target), and unsubscribing drops the target with the subscription. Where posts go is shown by `channels`.
 - **A broadcast** goes to `all` and sits at the top level as `all_...`. Every session reads it once, nobody claims it, and it never rings a doorbell. Every session may broadcast, under the caps.
 - **Caps.** A post is at most 8 KiB and a broadcast at most 4 KiB, whole file. Each sender may post 20 times per channel per hour and broadcast once per 15 minutes, and the same body to the same target is refused for 10 minutes. One delivery holds at most 10 posts per sender per channel and 3 broadcasts per sender; the rest wait for the next.
 - **Etiquette.** Keep posts short, and point to paths or commits. Use direct mail when one owner must act. Subscribe narrowly and quietly. Never re-post or forward peer text.
@@ -76,11 +77,11 @@ Some topics have a steward: a session that watches one channel, keeps the topic'
 
 Every harness starts its own `agent-mail mcp` process over stdio. It has seven tools:
 
-- `send {to, subject, body, in_reply_to?}`: `to` is a session, `+channel` or `all`. The sender is always your bound name.
+- `send {to?, subject, body, in_reply_to?}`: `to` is a session, `+channel` or `all`. Without `to`, or with an empty one, the send is a post to each of your write targets, or to the default channel when you have none, and the result names each post. The sender is always your bound name.
 - `receive {me, max_bytes?}`: delivers your waiting mail. Pass your own agent-deck session name as `me`; any other name is refused before anything is claimed.
 - `pending {}`: one line about what waits, delivering nothing.
-- `subscribe {channel, wake?, backlog?}` and `unsubscribe {channel}`: name the channel without its `+`.
-- `channels {}`: the channels with their purposes, recent posts and listed subscribers, then the known sessions, your binding, and how the mailbox is watched.
+- `subscribe {channel, wake?, backlog?, write?}` and `unsubscribe {channel}`: name the channel without its `+`. `write` makes the channel a write target.
+- `channels {}`: the channels with their purposes, recent posts and listed subscribers, then the known sessions, where your posts go, your binding, and how the mailbox is watched.
 - `reread {me, id?, last?}`: shows one delivered item again from your archive, or with `last: true` your last batch. It changes nothing. It takes `me` and the reader lock as `receive` does.
 
 Results are text only. Their first line names your binding, `agent-mail (bound name <you>@<host>): ...`, or for a delivery a list line that names every item. A delivery then has a banner, and each item sits between frame lines that carry a random token, so a body cannot fake a frame:
@@ -110,6 +111,7 @@ A tool error reads `agent-mail: <code>: <message>`.
 | Poll interval | `--poll` | `AGENT_MAIL_POLL` | `poll_interval` | 15 s (1 to 300) |
 | Native change events | `--notify` | `AGENT_MAIL_NOTIFY` | `notify` | `auto` (or `on`, `off`) |
 | Pinned channels | `--channel NAME[:wake]` | `AGENT_MAIL_CHANNELS` | `sessions.<name>.channels` | none |
+| Default channel | `--default-channel` (send) | `AGENT_MAIL_DEFAULT_CHANNEL` | `default_channel` | `fleet` |
 | Receive budget | `--max-bytes` | `AGENT_MAIL_MAX_BYTES` | `max_bytes` | 12000 (1000 to 24000) |
 | Broadcasts allowed | | | `sessions.<name>.allow_broadcast` | true |
 | Unclaimed direct mail kept | | | `retention.direct_days` | 14 days (1 to 365) |
@@ -212,14 +214,14 @@ Both files were byte-identical on the two hosts, `pending` for an unsubscribed n
 
 | Command | What it does |
 |---|---|
-| `send --from NAME --to NAME\|+CHANNEL\|all --subject TEXT [--in-reply-to ID] [--id SESSION_ID] [FILE]` | Send FILE or standard input: direct mail, a post or a broadcast. |
+| `send --from NAME [--to NAME\|+CHANNEL\|all] [--default-channel CHANNEL] --subject TEXT [--in-reply-to ID] [--id SESSION_ID] [FILE]` | Send FILE or standard input: direct mail, a post or a broadcast. Without `--to`, it posts to the sender's write targets, or to the default channel. |
 | `read NAME [--max-bytes N] [--channel CHANNEL[:wake]]` | Deliver NAME's waiting mail once. |
 | `watch NAME [--poll S] [--notify auto\|on\|off] [--channel CHANNEL[:wake]] [--forever] [--parent PID] [--max-bytes N]` | Wait for mail, deliver it, then exit; `--forever` keeps going. |
 | `watch [NAME] --doorbell [--parent PID] [--forever]` | Print the ring line when mail starts waiting, and exit 10. Claims nothing. |
 | `pending NAME [--format human\|loop\|context] [--channel CHANNEL[:wake]]` | One line about waiting mail, delivering nothing. |
 | `channels [NAME]` | List the channels. |
 | `channel create CHANNEL --purpose TEXT` | Create `+CHANNEL`. |
-| `subscribe NAME CHANNEL [--wake] [--backlog N]` | Subscribe NAME to a channel. |
+| `subscribe NAME CHANNEL [--wake\|--no-wake] [--write\|--no-write] [--backlog N]` | Subscribe NAME to a channel; `--write` makes it a write target. A flag left out keeps its current value. |
 | `unsubscribe NAME CHANNEL` | Drop one of NAME's subscriptions. |
 | `doctor [NAME]` | Report what is wrong with the mailbox, and the direct mail waiting for each name, writing nothing. |
 | `mcp [--name NAME] [--dir DIR] [--max-bytes N]` | Serve one session's MCP tools over stdio. |
