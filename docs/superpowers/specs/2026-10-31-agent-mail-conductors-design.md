@@ -634,6 +634,7 @@ Checked daily during the pilots (6.10), then weekly.
 | 14 Repo file | revisions reach members too slowly | the section in Task 22's nix skill |
 | 15 Default model | the stewards crowd the workers out of the 5-hour window, as John sees it in agent-deck limits | a separate account slot; a smaller model |
 | 32 Own channel only | `+fleet` traffic crowds the steward's turns or its day's log | the steward leaves `+fleet` after each join, amending decision 72 |
+| 32 Re-join loss | a plain re-join (`/mailbox <steward>` without `++<channel>`) drops the steward's channel and loses the posts not yet received | the steward's two subscribe calls add `backlog: 20`, with a rule that an id `RECEIVED.log` already holds is filed once (candidate decision 34, parked in the handoff) |
 | tick cadence, doorbell delay | a late 07:30 post, a missed starvation, or notices too slow | shorter cadence, no delay |
 | thresholds | false flags on duplicates or stuck workers | `POLICY.md` edits, no design change |
 
