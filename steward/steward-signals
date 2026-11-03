@@ -4686,11 +4686,14 @@ MAY_SUBSCRIBE = ("agent-mail: `receive`, `reread`, `pending`, `channels`, `send`
 # the README that speaks of a list of subscribers.
 ROW6_FLEET_SENTENCE = ("If it did more, note what it did, and check in `agent-mail channels` that conductor-ingest-steward is on no channel's list of "
                        "subscribers before row 1, `+fleet` aside under agent-mail 2.2, where every join subscribes to it.")
-# John's decision 33 (2026-11-02): the invitation mentions, as optional, the !+<channel> a member's join line may carry under agent-mail 2.2, which keeps its
-# subscription across a re-join and lets its posts omit to; WORKER.md is unchanged and still names +<channel> on every post. The sentence is pinned whole,
-# inside step 8 of section 3, as the only sentence of the section that names `!+<channel>`.
-INVITE_OPTION = ("It also says, as optional, that under agent-mail 2.2 a join line carrying `!+<channel>`, which John types, keeps the member's subscription "
-                 "across a re-join and lets its posts omit `to`, while WORKER.md's rule to name `+<channel>` on every post stands.")
+# John's decision 33 (2026-11-02): the invitation mentions, as optional, the !+<channel> a member's join line may carry under agent-mail 2.2, which makes
+# +<channel> its write target, so that its posts need no to; WORKER.md is unchanged and still names +<channel> on every post. Fix round 2 (ruling R18)
+# took back the claim that such a line keeps the subscription across a re-join: under decision 71 of the topics design a later join line that does not
+# name the topic drops it, so the subscription lasts as long as each of John's join lines names the topic. The sentence is pinned whole, inside step 8
+# of section 3, as the only sentence of the section that names `!+<channel>`.
+INVITE_OPTION = ("It also says, as optional, that under agent-mail 2.2 a join line carrying `!+<channel>`, which John types, makes `+<channel>` the "
+                 "member's write target, so its posts need no `to`, and that the subscription lasts as long as each of John's join lines names the "
+                 "topic, while WORKER.md's rule to name `+<channel>` on every post stands.")
 README_JOIN_LINE = ("If you join a steward to the mailbox again, the line depends on the installed mailbox skill (John's decision 32). Under agent-mail 2.2's "
                     "skill a join line is the whole configuration, so type `/mailbox conductor-ingest-steward ++ingest`, or `/mailbox conductor-nix-steward "
                     "++nix-config`: a plain `/mailbox conductor-ingest-steward` drops the steward's subscription to `+ingest`, so that the posts it had not "
@@ -5294,6 +5297,10 @@ def test_docs_checks_catch_each_pinned_regression(d):
         ("the invitation's !+<channel> made a requirement", "It also says, as optional, that", "It also says that",
          "docs: step 8 of section 3 of CLAUDE.md has the invitation mention"),
         ("WORKER.md's rule dropped from the invitation's option", ", while WORKER.md's rule to name `+<channel>` on every post stands.", ".",
+         "docs: step 8 of section 3 of CLAUDE.md has the invitation mention"),
+        # fix round 2 of the third cycle (ruling R18): a !+<channel> line keeps the subscription only while each join line names the topic
+        ("the invitation claiming again that !+<channel> keeps the subscription across any re-join",
+         "and that the subscription lasts as long as each of John's join lines names the topic,", "and that it keeps the subscription across a re-join,",
          "docs: step 8 of section 3 of CLAUDE.md has the invitation mention"),
         # fix round 2 of the third cycle (ruling R12): posts-since-last compared with the steward's own channel's posts
         ("posts-since-last compared with every post received again", "When it is above the posts on `+<channel>` you received",
