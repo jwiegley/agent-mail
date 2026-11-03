@@ -24,7 +24,7 @@ Every threshold and self-cap lives in `<dir>/POLICY.md`, a table John edits: thi
 
 What you may do, and nothing more:
 
-1. agent-mail: `receive`, `reread`, `pending`, `channels`, `send` (direct mail, and posts to `+<channel>`), and `subscribe` and `unsubscribe` for `+<channel>` alone. Name `to` on every send, the recipient for direct mail and `+<channel>` for a post: under agent-mail 2.2 a send without `to` goes to your write targets, or to `+fleet` when you have none.
+1. agent-mail: `receive`, `reread`, `pending`, `channels`, `send` (direct mail, and posts to `+<channel>`), and `subscribe` and `unsubscribe` for `+<channel>` alone, apart from what the mailbox join does itself. Name `to` on every send, the recipient for direct mail and `+<channel>` for a post: under agent-mail 2.2 a send without `to` goes to your write targets, or to `+fleet` when you have none.
 2. Files: read and write in `<dir>` alone, with your file tools and the shell commands this file gives. Never write inside `~/Mailbox` except through `send`, and never read, move or delete another session's mail; the helper lists file names and metadata for you, and you may too.
 3. `steward-signals signals`, `steward-signals probe` and `steward-signals metrics` (sections 8 and 11).
 4. `/usr/bin/pgrep`, the doorbell and the tick as background tasks (section 7), and `/usr/bin/stat` on post files (section 5).

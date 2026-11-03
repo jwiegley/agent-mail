@@ -4670,6 +4670,11 @@ RESET_RECEIVE_STEP = ("3. `receive` until nothing more waits: the mail that arri
 # (ruling R12) pins the sentence whole, as the only one of section 8 that says the subscription may be gone.
 COUNTS_SENTENCE = ("When it is above the posts on `+<channel>` you received since the last call, your subscription may be gone: call `channels`, and "
                    "subscribe again with `wake: true` if you are not on the list.")
+# Fix round 2 of the third cycle (ruling R13): section 1 limits subscribe and unsubscribe to +<channel>, apart from what the mailbox join does itself,
+# since under agent-mail 2.2 the join the steward runs subscribes it to +fleet (the topics design's 5.1). The sentence is pinned whole, as the only one
+# of section 1 that names unsubscribe.
+MAY_SUBSCRIBE = ("agent-mail: `receive`, `reread`, `pending`, `channels`, `send` (direct mail, and posts to `+<channel>`), and `subscribe` and "
+                 "`unsubscribe` for `+<channel>` alone, apart from what the mailbox join does itself.")
 # John's decision 33 (2026-11-02): the invitation mentions, as optional, the !+<channel> a member's join line may carry under agent-mail 2.2, which keeps its
 # subscription across a re-join and lets its posts omit to; WORKER.md is unchanged and still names +<channel> on every post. The sentence is pinned whole,
 # inside step 8 of section 3, as the only sentence of the section that names `!+<channel>`.
@@ -4771,6 +4776,13 @@ def test_claude_md_compares_posts_since_last_with_its_own_channel(d):
     found = [s for s in sentences(claude_section(claude_md(), 8)) if "subscription may be gone" in s]
     ok(found == [COUNTS_SENTENCE],
        "docs: section 8 of CLAUDE.md compares posts-since-last with the posts on +<channel> the steward received, never with every post it received, as "
+       f"pinned (got {without_question_marks(repr(found))})")
+
+
+def test_claude_md_leaves_the_join_its_own_subscriptions(d):
+    found = [s for s in sentences(claude_section(claude_md(), 1)) if "`unsubscribe`" in s]
+    ok(found == [MAY_SUBSCRIBE],
+       "docs: section 1 of CLAUDE.md lets the steward subscribe and unsubscribe for +<channel> alone, apart from what the mailbox join does itself, as "
        f"pinned (got {without_question_marks(repr(found))})")
 
 
@@ -4996,6 +5008,7 @@ DOCS_CHECKS = (test_claude_md, test_claude_md_headings_are_in_order, test_claude
                test_claude_md_starts_a_new_topic_afresh_after_a_close, test_claude_md_wakes_nothing_after_a_close, test_claude_md_names_the_resets_that_lose_nothing,
                test_claude_md_takes_other_channels_as_notices, test_claude_md_names_to_on_every_send, test_claude_md_keeps_its_channel_across_a_re_join,
                test_claude_md_invites_with_the_optional_write_target, test_claude_md_compares_posts_since_last_with_its_own_channel,
+               test_claude_md_leaves_the_join_its_own_subscriptions,
                test_shared_and_heartbeat,
                test_shared_and_heartbeat_forbid_what_spec_6_4_lists_and_grant_nothing, test_shared_and_heartbeat_hold_exactly_their_pinned_sentences,
                test_worker_md, test_worker_md_matches_what_claude_md_files_and_sends, test_worker_md_keeps_its_checks_and_safety_sentences_as_pinned,
@@ -5252,7 +5265,10 @@ def test_docs_checks_catch_each_pinned_regression(d):
          "docs: step 8 of section 3 of CLAUDE.md has the invitation mention"),
         # fix round 2 of the third cycle (ruling R12): posts-since-last compared with the steward's own channel's posts
         ("posts-since-last compared with every post received again", "When it is above the posts on `+<channel>` you received",
-         "When it is above the posts you received", "docs: section 8 of CLAUDE.md compares posts-since-last"))
+         "When it is above the posts you received", "docs: section 8 of CLAUDE.md compares posts-since-last"),
+        # fix round 2 of the third cycle (ruling R13): the mailbox join's own subscriptions are not the steward's subscribe
+        ("the join's own subscriptions left out of section 1", "`+<channel>` alone, apart from what the mailbox join does itself.",
+         "`+<channel>` alone.", "docs: section 1 of CLAUDE.md lets the steward subscribe and unsubscribe"))
     for i, (what, old, new, failure) in enumerate(regressions):
         failures = docs_checks(checkout_with(d, f"regression-{i}", "CLAUDE.md", old, new))
         ok(old in good and any(f.startswith(failure) for f in failures), f"docs: docs_checks catches {what} (got {without_question_marks(repr(failures))})")
