@@ -80,7 +80,7 @@ The skill's step 8 ("Subscribe narrowly") becomes: call `channels`; unsubscribe 
 
 **subscribe.** The tool and the CLI gain `write` (`--write`, and `--no-write` to clear it): `subscribe {channel, wake?, backlog?, write?}`. A new subscription takes the values given, false by default. For a subscription that already exists, a call changes only the attributes it names: `wake` or `write` left out stays as it was, and `wake: false` or `write: false` clears it. This is a change from 2.1, where subscribing again reset `wake` to the value given or false; it is made so that a plain `subscribe {channel}`, which the steward's WORKER.md asks of every member, can never clear a write target or a wake that John's join line set (*builder's call*). The reply says the level: `+A: nix subscribes, quiet, write; subscribers listed: ...`. Subscribing to a pinned channel records `wake` and `write` without touching its cursor.
 
-**unsubscribe.** Unchanged in form; dropping the subscription drops the target with it (the anti-goal: no target outlives its subscription). A pinned channel still cannot be unsubscribed; to stop writing to a pinned channel, subscribe to it again without `write`.
+**unsubscribe.** Unchanged in form; dropping the subscription drops the target with it (the anti-goal: no target outlives its subscription). A pinned channel still cannot be unsubscribed; to stop writing to a pinned channel, subscribe to it again with `write: false`.
 
 **send.** `to` becomes optional in the tool schema and on the CLI (`--to`). With `to`, nothing changes. Without it:
 
@@ -132,7 +132,7 @@ The mailbox layout, the naming standard, claims, archives, retention, the doorbe
 
 The self-test gains checks for each new behaviour, in the sections where the related checks live:
 
-- subscriptions: `subscribe(write=True)` is carried by `effective_subs`; subscribing again with no `write` clears it; a pinned channel takes `write` without a cursor change; `unsubscribe` drops it; a state file without `write` loads with `write` false, and a 2.1-shaped state round-trips unchanged apart from the keys written.
+- subscriptions: `subscribe(write=True)` is carried by `effective_subs`; subscribing again with no `write` leaves it, and `write: false` clears it; a pinned channel takes `write` without a cursor change; `unsubscribe` drops it; a state file without `write` loads with `write` false, and a 2.1-shaped state round-trips unchanged apart from the keys written.
 - send: no `to` and no targets posts to `+fleet`; no `to` with targets `+a` and `+b` writes one post in each, both files under the standard with the same subject and body; a refused second target (rate cap or a missing channel) leaves the first post written, lists the refusal, and the call succeeds; no target writable at all fails with the first refusal; the pre-write checks (secret, size, subject) write nothing; `to` given behaves exactly as before.
 - CLI: `send --from NAME` without `--to` reads NAME's targets from this host's state and posts to them; with no state, to the default channel; `subscribe NAME CH --write` and `channels NAME` show the marks and the `posts go to` line.
 - settings: `default_channel` from the flag, the environment and the three config levels, validated as a channel name, default `fleet`.
