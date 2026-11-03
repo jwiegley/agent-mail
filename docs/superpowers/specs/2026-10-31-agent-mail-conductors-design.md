@@ -2,7 +2,7 @@
 
 Written 2026-10-31 on hera, on branch `work/conductor`, from John's request of that morning, the decisions he made in the `mail-conductor` session between 11:30 and 12:40 PDT, and five more he made after the builder check at about 13:30 PDT. Status: **approved by John on 2026-10-31, as written (decision 16).** The implementation plan comes next, through superpowers:writing-plans; building follows the plan.
 
-Amended 2026-11-02 for John's decisions 22 to 25 and 28 to 31 (23, 24 and 28 withdrawn); the amendments carry their markers.
+Amended 2026-11-02 for John's decisions 22 to 25 and 28 to 33 (23, 24 and 28 withdrawn); the amendments carry their markers.
 
 Marks. **[John n]** is John's decision, numbered in section 11. **[my call]** is a choice I made; every one is listed in section 11 for John to check. **Verified** means run or read on hera on 2026-10-31; **Unverified** means documented but not checked here. Placeholders: `<channel>` is a topic's channel name (`nix-config`, `ingest`), `<steward>` its steward's session and mailbox name (`conductor-nix-steward`, `conductor-ingest-steward`), `<prefix>` its question-id prefix (`nix`, `ingest`). Section 5.1 gives the mapping once.
 
@@ -604,6 +604,11 @@ After the merge, the same day:
 30. **The reset is compaction:** decisions 24 and 28 are withdrawn; a steward's context reset is Claude Code's own compaction, a restart or a `/clear`, since agent-deck's clear-on-compact decides only for the session its TUI previews with analytics on, in the seconds after John selects its row.
 31. **GitHub push of main:** John tells mail-dev himself.
 
+The same night, after agent-mail 2.2.0 landed on main (3069307):
+
+32. **Decision 72 of the mailbox topics design carried into the steward text, now, before day zero:** a steward files by their subject only the posts on its own channel and the mail sent to it, and takes a post on another channel, such as `+fleet`, or a broadcast as a peer's notice; it names `to` on every send; and John's line for joining a steward again under agent-mail 2.2's mailbox skill is `/mailbox <steward> ++<channel>`.
+33. **`!+<channel>` mentioned as optional:** the invitation says that under agent-mail 2.2 a join line carrying `!+<channel>`, which John types, keeps a member's subscription across a re-join and lets its posts omit `to`; WORKER.md is unchanged and still names `+<channel>` on every post.
+
 My calls, each marked in the text, for John to check while reading: channel `+nix-config`, conductor names `nix-steward` and `ingest-steward`, question-id prefixes `nix` and `ingest`; a steward-safe `SHARED.md` passed as the shared conductor instructions, and `CLAUDE.md` stating its precedence; `POLICY.md` as a copy in the conductor directory, the other files as links into hera's checkout; the default heartbeat left on and inert; the doorbell restart delay of 5 minutes while items are active; the tick cadence (15 minutes active, 60 otherwise, always armed, scheduled to the next 07:30); first-seen ordering by hera ctime; every threshold and self-cap in `POLICY.md` as a starting value (stale 45 min, idle 20 min, question 30 min, nudge gap 30 min, busy-stuck 2 h, deaf 15 min, three offers every 2 h, 6 sends per turn and 20 per hour, 8 KB ledger, 14-day logs, `STEWARD back` after 30 min); the nudge limits beyond twice a day; the question-line template and character set, the single text change at 4 hours, no quiet hours; the answer grammar as the only pane input taken as an answer, conditions that only narrow, and relays that never carry words outside the options; decisions involving secrets never relayed as authorization; the STATUS rule's second clause (posts newer than STATUS while stale); the daily review of section 12's signals, same-day suspension of protected relays on the first failed check or forged file, the halved nudge budget on a nag report; no pinning for the pilot; the day-zero checks on `+steward-test`; the nix steward watches and never gates `nix`'s publication queue or `pi`'s activations (it files their posts like any other and intervenes only on the exceptions in 6.5); John's trigger kept with no CLI-only early path.
 
 ## 12. Revisit after the pilot
@@ -628,6 +633,7 @@ Checked daily during the pilots (6.10), then weekly.
 | 13 Fork fix | the fix takes longer than the pilot's other preconditions | backup-and-restore around setup, once |
 | 14 Repo file | revisions reach members too slowly | the section in Task 22's nix skill |
 | 15 Default model | the stewards crowd the workers out of the 5-hour window, as John sees it in agent-deck limits | a separate account slot; a smaller model |
+| 32 Own channel only | `+fleet` traffic crowds the steward's turns or its day's log | the steward leaves `+fleet` after each join, amending decision 72 |
 | tick cadence, doorbell delay | a late 07:30 post, a missed starvation, or notices too slow | shorter cadence, no delay |
 | thresholds | false flags on duplicates or stuck workers | `POLICY.md` edits, no design change |
 
