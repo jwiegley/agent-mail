@@ -32,7 +32,7 @@ Commands:
   send --from NAME [--to NAME|+CHANNEL|all] [--default-channel CHANNEL] --subject TEXT [--in-reply-to ID] [--id SESSION_ID] [FILE]
       Send FILE or standard input: direct mail, a post (at most 8 KiB) or a broadcast
       (at most 4 KiB), refusing private keys and tokens, under per-sender rate caps.
-      Without --to, posts go to NAME's write targets, or to the default channel.
+      Without --to, posts go to the sender's write targets, or to the default channel.
   read NAME [--max-bytes N] [--channel CHANNEL[:wake]]
       Deliver NAME's waiting mail once, about 12 KB at most (1000 to 24000).
   watch NAME [--poll S] [--notify auto|on|off] [--channel CHANNEL[:wake]] [--forever] [--parent PID] [--max-bytes N]
@@ -3221,11 +3221,11 @@ def build_parser():
                 "(at most 8 KiB) or a broadcast to all (at most 4 KiB). Refuses private keys and complete tokens, and caps each sender at "
                 "20 posts per channel an hour, one broadcast per 15 minutes, and one identical body per target per 10 minutes.")
     s.add_argument("--from", dest="sender", required=True, metavar="NAME", help="your own session name")
-    s.add_argument("--to", metavar="NAME|+CHANNEL|all", help="a session, a channel, or all; without it, NAME's write targets or the default channel")
+    s.add_argument("--to", metavar="NAME|+CHANNEL|all", help="a session, a channel, or all; without it, the sender's write targets or the default channel")
+    s.add_argument("--default-channel", metavar="CHANNEL", help="where a send without --to goes when --from has no write targets (default fleet)")
     s.add_argument("--subject", required=True, metavar="TEXT", help="one line, at most 200 characters")
     s.add_argument("--in-reply-to", metavar="ID", help="the id of the message this one answers")
     s.add_argument("--id", metavar="SESSION_ID", help="your agent-deck session id, for the From line")
-    s.add_argument("--default-channel", metavar="CHANNEL", help="where a send without --to goes when --from has no write targets (default fleet)")
     s.add_argument("file", nargs="?", metavar="FILE", help="the body (default: standard input)")
     pin = {"action": "append", "dest": "pins", "metavar": "CHANNEL[:wake]", "help": "pin a channel (repeatable)"}
     budget = {"type": int, "metavar": "N", "help": "deliver about N bytes at most, 1000 to 24000 (default 12000)"}
@@ -5400,11 +5400,15 @@ def section_help(t):
     flat = " ".join(__doc__.split())
     parsers = next(a for a in build_parser()._actions if isinstance(a, argparse._SubParsersAction)).choices
     send_opts = {s: a for a in parsers["send"]._actions for s in a.option_strings}
-    t.ok(not send_opts["--to"].required and "without it, NAME's write targets or the default channel" in send_opts["--to"].help
-         and "Without --to, posts go to NAME's write targets, or to the default channel." in flat,
+    t.ok(not send_opts["--to"].required and "without it, the sender's write targets or the default channel" in send_opts["--to"].help
+         and "Without --to, posts go to the sender's write targets, or to the default channel." in flat,
          "send's --to is optional, and the help and the docstring say where a send without it goes")
     t.ok(send_opts["--default-channel"].metavar == "CHANNEL" and "where a send without --to goes when --from has no write targets (default fleet)" in send_opts["--default-channel"].help,
          "--default-channel takes a CHANNEL and says that --from's own write targets come first")
+    send_usage = next(line for line in __doc__.splitlines() if line.startswith("  send "))
+    registered = [s for a in parsers["send"]._actions for s in a.option_strings if s.startswith("--") and s != "--help"]
+    t.ok(registered == re.findall(r"--[a-z-]+", send_usage),
+         "send registers its options in the order its usage line lists them, so send --help follows that line")
     channels_note = "With NAME, mark NAME's subscriptions and say where its posts go."
     t.ok(parsers["channels"].description.endswith(channels_note) and channels_note in flat,
          "channels says in its help and in the docstring that it marks NAME's subscriptions and where its posts go")
@@ -5837,6 +5841,10 @@ def section_cli(t):
     body3 = t.mk(os.path.join(root, "cli-body3.txt"), "CLI-THIRD-BODY\n")
     out, code, err = t.run(["--dir", d, "send", "--from", "pi", "--subject", "s", "--default-channel", "nowhere", body3])
     t.ok(code == 0 and out.count("\n") == 2, "with targets the default channel is not used")
+    # The converse: a sender with no write targets and no saved subscriptions posts where --default-channel says.
+    flagged = t.mk(os.path.join(root, "cli-flagged.txt"), "CLI-FLAGGED-DEFAULT\n")
+    out, code, err = t.run(["--dir", d, "send", "--from", "fresh", "--subject", "s", "--default-channel", "ops", flagged])
+    t.ok(code == 0 and out.count("\n") == 1 and "/+ops/" in out, "--default-channel names where a send goes when its sender has no write targets")
     body4 = t.mk(os.path.join(root, "cli-body4.txt"), "CLI-EMPTY-TO\n")
     out, code, err = t.run(["--dir", d, "send", "--from", "pi", "--to", "", "--subject", "s", body4])
     t.ok(code == 0 and out.count("\n") == 2 and "/+fleet/" in out and "/+ops/" in out, "an empty --to counts as omitted, as the tool's does")
