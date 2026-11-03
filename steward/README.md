@@ -130,6 +130,8 @@ members omlx syncthing mail-dev mail-conductor audio8-tts mcp-servers wiggum nix
 
 The steward joins the mailbox under its title, subscribes to its channel with wake, starts its doorbell and its tick, posts `STEWARD conductor-ingest-steward is on +ingest`, mails each member `TOPIC +ingest: John named you a member`, and prints its first status line (CLAUDE.md section 3). The invitations count against `sends_per_turn`, so the rest go at its next turns. To send them sooner, type `digest` in the steward's pane, which starts its next turn, or wait for its tick. It takes each member's host and harness from John's words, from agent-deck's listing on hera, or from the member's JOIN; a member it cannot place waits under Watch until it can. Tell it, too, which worker hosts run agent-deck 1.16.30 or later (section 2).
 
+If you join a steward to the mailbox again, the line depends on the installed mailbox skill (John's decision 32). Under agent-mail 2.2's skill a join line is the whole configuration, so type `/mailbox conductor-ingest-steward ++ingest`, or `/mailbox conductor-nix-steward ++nix-config`: a plain `/mailbox conductor-ingest-steward` drops the steward's wake subscription to `+ingest` until its next fresh context, and the join report names what it dropped. Under 2.1's skill the line is `/mailbox conductor-ingest-steward`. Either way the steward subscribes itself with wake when it starts a topic, and again in a fresh context that finds it off the channel's list (CLAUDE.md sections 3 and 13).
+
 **5. Tell each member,** in the member's own pane, one line:
 
 ```text
