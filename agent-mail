@@ -5122,6 +5122,16 @@ def section_tools(t):
     with open(os.path.join(d, "+fleet", f"{answer.group(1)}.txt") if answer else os.devnull) as f:
         header = f.read().split("\n\n", 1)[0]
     t.ok(answer is not None and f"\nIn-Reply-To: {question}\n" in header, "the send tool without to puts in_reply_to in the posts it writes")
+    os.environ["AGENTDECK_INSTANCE_ID"] = "34f513aa-1793309640"
+    try:
+        r = tool(b, "send", subject="from agent-deck", body="DEFAULT-POST-WITH-INSTANCE-ID")
+    finally:
+        del os.environ["AGENTDECK_INSTANCE_ID"]
+    deck_post = re.search(r"sent (\S+) to \+fleet", text(r))
+    with open(os.path.join(d, "+fleet", f"{deck_post.group(1)}.txt") if deck_post else os.devnull) as f:
+        deck_from = f.readline()
+    t.ok(deck_post is not None and deck_from.startswith("From: b@") and deck_from.endswith(" (agent-deck 34f513aa-1793309640)\n"),
+         "the send tool without to puts AGENTDECK_INSTANCE_ID in the From line of the posts it writes")
     shown = text(tool(b, "channels"))
     t.ok("+fleet (you, wake, write):" in shown and "\nposts go to: +fleet\n" in shown, "the channels tool shows the marks and where posts go")
     tool(a, "send", to="+fleet", subject="post", body="A-POST-FOR-B")
