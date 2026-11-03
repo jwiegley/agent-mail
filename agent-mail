@@ -2484,7 +2484,7 @@ TOOLS_JSON = json.dumps({"tools": [
     _tool("pending", "Say in one line what mail waits for this session, without delivering any."),
     _tool("subscribe", "Subscribe this session to a channel, named without its +. Quiet by default: posts wait for the next receive. With wake, "
           "each new post rings the doorbell. backlog asks for up to 20 earlier posts. With write, this channel becomes a write target: "
-          "a send without to posts here.",
+          "a send without to posts here. A flag left out keeps the subscription's current value.",
           {"channel": {"type": "string"}, "wake": {"type": "boolean"}, "backlog": {"type": "integer", "minimum": 0, "maximum": 20},
            "write": {"type": "boolean"}}, ("channel",)),
     _tool("unsubscribe", "Unsubscribe this session from a channel. A channel pinned in the settings cannot be unsubscribed.",
@@ -2559,7 +2559,9 @@ def channels_text(d, name, settings, now):
     purpose, recent posts and listed subscribers, NAME's marks (wake or quiet, write, pinned),
     the known sessions (from peer-written member records, so approximate), where NAME's posts
     go, then the binding, the host, the watch backend and whether the mailbox is on NFS. At
-    most 8 KB."""
+    most 8 KB: a peer can make the channels and the known sessions long, so when the text would
+    pass that, they are cut at a line and a marker says so, and NAME's own lines, where its
+    posts go and its binding, follow the marker whole."""
     state = load_state(d, name) if name else None
     subs = effective_subs(state, settings, now) if name else {}
     chans = list_channels(d, now)
@@ -2574,17 +2576,20 @@ def channels_text(d, name, settings, now):
     known = members(d)
     lines.append("known sessions (approximate; member records are written by peers): "
                  + ("; ".join(f"{n} on {escape(r['host'])}, checked {clean_line(r['checked'])}" for n, r in sorted(known.items())) or "none"))
+    own = []
     if name:
         has_targets = any(sub["write"] for sub in subs.values())
-        lines.append("posts go to: " + ", ".join(f"+{ch}" for ch in write_targets(state, settings, now))
-                     + ("" if has_targets else " (the default channel; no write targets)"))
+        own.append("posts go to: " + ", ".join(f"+{ch}" for ch in write_targets(state, settings, now))
+                   + ("" if has_targets else " (the default channel; no write targets)"))
     kind = fs_type(d)
     nfs = "not checked" if kind is None else f"{'yes' if kind.startswith('nfs') else 'no'} ({escape(kind)})"
-    lines.append(f"bound name {name or 'none'}; host {HOST}; watch backend {probe_backend('auto')}; mailbox on NFS: {nfs}")
-    text = "\n".join(lines)
-    if len(text.encode()) > CHANNELS_MAX:
-        text = text.encode()[:CHANNELS_MAX - 40].decode("utf-8", "ignore").rsplit("\n", 1)[0] + "\n[... the rest is cut at 8 KB]"
-    return text
+    own.append(f"bound name {name or 'none'}; host {HOST}; watch backend {probe_backend('auto')}; mailbox on NFS: {nfs}")
+    text, tail = "\n".join(lines), "\n".join(own)
+    if len(text.encode()) + 1 + len(tail.encode()) > CHANNELS_MAX:
+        cut = "\n[... the rest is cut at 8 KB]"
+        room = max(CHANNELS_MAX - len(cut.encode()) - 1 - len(tail.encode()), 0)
+        text = text.encode()[:room].decode("utf-8", "ignore").rsplit("\n", 1)[0] + cut
+    return text + "\n" + tail
 
 
 def archived_item(d, name, ident, max_bytes):
@@ -2744,7 +2749,8 @@ class McpServer:
                 lines.append(f"agent-mail: warning: not sent to {target}: {r.code}: {r.message}")
             else:
                 lines += [f"sent {r.id} to {target}"] + [f"agent-mail: warning: {w}" for w in r.warnings]
-        return self.head() + "\n".join(lines), None, None
+        # The head says "agent-mail", so a first line that is a refusal drops its own prefix, as pending's line does.
+        return self.head() + "\n".join(lines).removeprefix("agent-mail: "), None, None
 
     def tool_receive(self, args, mid):
         d = self.ready()
@@ -3192,7 +3198,7 @@ def cmd_send(sender, to, subject, ident, src, d, write=None, settings=None, in_r
         posted = [(to, send(d, sender, to, subject, body, settings, in_reply_to=in_reply_to, ident=ident))]
     for target, r in posted:
         if isinstance(r, MailError):
-            print(f"agent-mail: warning: not sent to {target}: {r.message}", file=sys.stderr)
+            print(f"agent-mail: warning: not sent to {target}: {r.code}: {r.message}", file=sys.stderr)
             continue
         emit(write, f"{r.path}\n")
         for warning in r.warnings:
@@ -3783,7 +3789,8 @@ def section_settings(t):
     t.ok(load_settings({}, {}, "pi").paused, "the pause file pauses the host")
     _, code, err = t.run(["--dir", t.box(), "read", "pi", "--max-bytes", "999"])
     t.ok(code == 1 and "--max-bytes is 999" in err, "the CLI passes its flags through load_settings")
-    blank = {"AGENT_MAIL_DIR": "", "AGENT_MAIL_POLL": "", "AGENT_MAIL_NOTIFY": "", "AGENT_MAIL_CHANNELS": "", "AGENT_MAIL_MAX_BYTES": ""}
+    blank = {"AGENT_MAIL_DIR": "", "AGENT_MAIL_POLL": "", "AGENT_MAIL_NOTIFY": "", "AGENT_MAIL_CHANNELS": "", "AGENT_MAIL_MAX_BYTES": "",
+             "AGENT_MAIL_DEFAULT_CHANNEL": ""}
     t.ok(t.raises(load_settings, {}, blank, "pi") is None and load_settings({}, blank, "pi").source == load_settings({}, {}, "pi").source,
          "an empty environment variable counts as unset")
     config({"retention": {"direct_days": 30}})
@@ -4051,6 +4058,17 @@ def section_channels(t):
     t.ok(c["last_post"] == parse_msg(f"{ids[-1]}.txt").utc, "the last post is shown as the newest post's own stamp")
     unsubscribe(st, s, "fleet")
     t.ok("fleet" not in st["subs"] and "+fleet" not in st["seen"], "unsubscribe drops the channel and its seen set")
+    lone = load_state(d, "lone")
+    subscribe(d, "lone", lone, s, "c0", write=True, now=now)
+    t.ok(write_targets(lone, s, now) == ["c0"], "a write subscription is the sender's one target")
+    unsubscribe(lone, s, "c0")
+    t.ok(write_targets(lone, s, now) == ["fleet"], "unsubscribe drops a write target with its subscription, and the default channel takes over")
+    old = load_state(d, "old")
+    old["subs"]["fleet"] = {"since": now, "wake": False}  # as 2.1 wrote it, with no write key
+    save_state(d, "old", old)
+    kept = load_state(d, "old")
+    t.ok(kept["subs"]["fleet"].get("write", False) is False and effective_subs(kept, s, now)["fleet"]["write"] is False,
+         "a 2.1 subscription record survives a save and a load without gaining write")
     st2 = load_state(d, "pi2")
     subscribe(d, "pi2", st2, s, "fleet", write=True, now=now)
     subscribe(d, "pi2", st2, s, "c1", wake=True, now=now)
@@ -4089,6 +4107,44 @@ def section_channels(t):
     answer = t.serve_lines(t.server(late, "pi"), [json.dumps(request)])[0]
     t.ok("error" not in answer and "; last post 99991231T235959.999999Z; " in answer["result"]["content"][0]["text"],
          "the MCP channels tool answers it normally, not with -32603")
+
+    # A peer's member record may be 64 KiB and its host is shown, so one record can fill the 8 KB. The cut takes lines of the
+    # channels and the known sessions; the two lines that are the session's own, where its posts go and its binding, follow it.
+    crowded = t.box("crowded")
+    create_channel(crowded, "fleet", "fleet-wide notices")
+    touch_member(crowded, "nix", [], now)
+    t.mk(member_path(crowded, "far"), json.dumps({"v": 2, "name": "far", "host": "h" * 9000, "checked": utc(now), "subs": []}))
+    mine = load_state(crowded, "pi")
+    subscribe(crowded, "pi", mine, s, "fleet", write=True, now=now)
+    save_state(crowded, "pi", mine)
+    cut = channels_text(crowded, "pi", s, now)
+    rows = cut.splitlines()
+    t.ok(rows[-2] == "posts go to: +fleet" and rows[-1].startswith("bound name pi; "),
+         "a peer's very long host does not hide the session's own lines: where its posts go, then its binding")
+    t.ok("\n[... the rest is cut at 8 KB]\n" in cut and "h" * 100 not in cut and len(cut.encode()) <= CHANNELS_MAX
+         and rows[0].startswith("agent-mail (bound name pi@") and rows[1].startswith("+fleet (you, quiet, write):"),
+         "the cut takes the known sessions, says so before the session's own lines, keeps the channels above it and stays within 8 KB")
+    bare = channels_text(crowded, None, s, now).splitlines()
+    t.ok(bare[-2] == "[... the rest is cut at 8 KB]" and bare[-1].startswith("bound name none; ") and not any(r.startswith("posts go to") for r in bare),
+         "without a name the binding line is still last after the cut, and there is no posts line")
+    # Forty channels of 270 bytes each, so that the cut falls between channel lines, at limits from one that is under the session's
+    # own lines up to nearly 9000. A listing's size depends on the host's name, so no limit here may depend on where a line ends.
+    forty = t.box("forty")
+    for i in range(40):
+        create_channel(forty, f"t{i:02d}", "x" * 200)
+    real_max, marker = CHANNELS_MAX, "[... the rest is cut at 8 KB]"
+    own = "\n".join(channels_text(forty, "pi", s, now).splitlines()[-2:])
+    cuts = {}
+    for limit in range(100, 9000, 700):
+        t.patch("CHANNELS_MAX", limit)
+        cuts[limit] = channels_text(forty, "pi", s, now)
+    t.patch("CHANNELS_MAX", real_max)
+    floor = len(f"\n{marker}\n{own}".encode())
+    t.ok(cuts[100] == f"\n{marker}\n{own}" and 100 < floor,
+         "a limit smaller than the session's own lines leaves the marker and those lines, nothing else")
+    t.ok(all(len(out.encode()) <= limit and out.endswith(f"\n{marker}\n{own}") and all(r.endswith("subscribers listed: none") for r in out.splitlines()[1:-3])
+             for limit, out in cuts.items() if limit >= floor),
+         "whatever the limit, the text fits in it when the marker and the session's own lines do, and the cut leaves whole channel lines")
 
 
 def section_receive(t):
@@ -5038,6 +5094,8 @@ def section_tools(t):
     r = tool(b, "send", subject="both targets", body="PARTIAL-POST")
     t.ok(not r["isError"] and re.search(r"warning: not sent to \+fleet: duplicate: ", text(r)) and re.search(r"(^|\n)sent \S+ to \+ops(\n|$)", text(r)),
          "a target that refuses is a warning line, and the target that took the post still gets its line")
+    t.ok(re.fullmatch(r"agent-mail \(bound name b@\S+\): warning: not sent to \+fleet: duplicate: .*", text(r).split("\n")[0]) is not None,
+         "when the first target refuses, its line follows the binding head without a second agent-mail: prefix")
     tool(b, "subscribe", channel="fleet", write=False)
     tool(b, "subscribe", channel="ops", write=False)
     t.ok("wake;" in text(tool(b, "subscribe", channel="fleet")), "write false through the tool clears the target and leaves wake")
@@ -5054,8 +5112,8 @@ def section_tools(t):
     listed = {x["name"]: x for x in t.call(b, "tools/list", {})["result"]["tools"]}
     t.ok(listed["send"]["inputSchema"]["required"] == ["subject", "body"]
          and "omitted: your write targets, or the default channel when you have none" in listed["send"]["inputSchema"]["properties"]["to"]["description"]
-         and "a send without to posts here" in listed["subscribe"]["description"],
-         "the tool list says that to may be left out and that write makes a target")
+         and "a send without to posts here. A flag left out keeps the subscription's current value." in listed["subscribe"]["description"],
+         "the tool list says that to may be left out, that write makes a target and that a flag left out keeps its value")
     t.ok("this session's bound name, where its posts go, and how the mailbox is watched." in listed["channels"]["description"],
          "the tool list says that channels tells where the session's posts go")
     question = send(d, "a", "+fleet", "a question", "A-QUESTION-FOR-THE-FLEET", load_settings({}, {}, "a")).id
@@ -5617,7 +5675,7 @@ def section_send(t):
     asked = parse_msg(os.path.basename(t.post(d, "b", "nix", "A-QUESTION-IN-B"))).id
     out, code, err = t.capture(cmd_send, "pi", None, "s", "34f513aa-1793309640", from_cli, d, settings=s, in_reply_to=asked)
     t.ok(code == 0 and [os.path.dirname(p) for p in out.splitlines()] == [os.path.join(d, "+b")]
-         and "agent-mail: warning: not sent to +a: there is no channel +a" in err and "not sent to +b" not in err
+         and "agent-mail: warning: not sent to +a: no_such_channel: there is no channel +a" in err and "not sent to +b" not in err
          and "agent-mail: warning: nobody lists +b yet" in err,
          "cmd_send without a recipient posts to the saved write targets, prints each path, and reports a refused target and a post's warnings on stderr")
     cli_post = read_file(out.splitlines()[0])[0]
