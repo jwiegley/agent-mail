@@ -4651,6 +4651,11 @@ TO_RULE = ("Name `to` on every send, the recipient for direct mail and `+<channe
 JOIN_START_SENTENCE = ("Under agent-mail 2.2's mailbox skill a join line is the whole configuration: if John joins you again, his line must carry "
                        "`++<channel>`, as in `/mailbox <steward> ++<channel>`, and the join report names what a re-join dropped.")
 JOIN_RESET_SENTENCE = "If John joins you again under agent-mail 2.2's mailbox skill, his line must carry `++<channel>`, or the re-join drops yours (section 3)."
+# John's decision 33 (2026-11-02): the invitation mentions, as optional, the !+<channel> a member's join line may carry under agent-mail 2.2, which keeps its
+# subscription across a re-join and lets its posts omit to; WORKER.md is unchanged and still names +<channel> on every post. The sentence is pinned whole,
+# inside step 8 of section 3, as the only sentence of the section that names `!+<channel>`.
+INVITE_OPTION = ("It also says, as optional, that under agent-mail 2.2 a join line carrying `!+<channel>`, which John types, keeps the member's subscription "
+                 "across a re-join and lets its posts omit `to`, while WORKER.md's rule to name `+<channel>` on every post stands.")
 README_JOIN_LINE = ("If you join a steward to the mailbox again, the line depends on the installed mailbox skill (John's decision 32). Under agent-mail 2.2's "
                     "skill a join line is the whole configuration, so type `/mailbox conductor-ingest-steward ++ingest`, or `/mailbox conductor-nix-steward "
                     "++nix-config`: a plain `/mailbox conductor-ingest-steward` drops the steward's wake subscription to `+ingest` until its next fresh context, "
@@ -4737,6 +4742,15 @@ def test_claude_md_keeps_its_channel_across_a_re_join(d):
         steps = [line for line in section.splitlines() if line.startswith(step)]
         ok(found == [sentence] and len(steps) == 1 and steps[0].endswith(" " + sentence),
            f"docs: {what}, as pinned, in the only sentence of the section that names ++<channel> (got {without_question_marks(repr(found))})")
+
+
+def test_claude_md_invites_with_the_optional_write_target(d):
+    section = claude_section(claude_md(), 3)
+    found = [s for s in sentences(section) if "`!+<channel>`" in s]
+    steps = [line for line in section.splitlines() if line.startswith("8. ")]
+    ok(found == [INVITE_OPTION] and len(steps) == 1 and f" {INVITE_OPTION} " in steps[0],
+       "docs: step 8 of section 3 of CLAUDE.md has the invitation mention, as optional, a join line carrying !+<channel> under agent-mail 2.2, while "
+       f"WORKER.md's rule to name +<channel> on every post stands, as pinned (got {without_question_marks(repr(found))})")
 
 
 def test_shared_and_heartbeat(d):
@@ -4951,7 +4965,7 @@ DOCS_CHECKS = (test_claude_md, test_claude_md_headings_are_in_order, test_claude
                test_claude_md_keeps_the_question_line_inside_the_pane, test_claude_md_takes_its_channel_from_topic_md_or_from_john, test_claude_md_answers_agent_decks_recovery_turn,
                test_claude_md_starts_a_new_topic_afresh_after_a_close, test_claude_md_wakes_nothing_after_a_close, test_claude_md_names_the_resets_that_lose_nothing,
                test_claude_md_takes_other_channels_as_notices, test_claude_md_names_to_on_every_send, test_claude_md_keeps_its_channel_across_a_re_join,
-               test_shared_and_heartbeat,
+               test_claude_md_invites_with_the_optional_write_target, test_shared_and_heartbeat,
                test_shared_and_heartbeat_forbid_what_spec_6_4_lists_and_grant_nothing, test_shared_and_heartbeat_hold_exactly_their_pinned_sentences,
                test_worker_md, test_worker_md_matches_what_claude_md_files_and_sends, test_worker_md_keeps_its_checks_and_safety_sentences_as_pinned,
                test_worker_md_has_no_silence_rule, test_steward_readme_and_pointer, test_steward_readme_gives_the_join_line_for_a_steward)
@@ -5184,7 +5198,12 @@ def test_docs_checks_catch_each_pinned_regression(d):
         # the same decision: John's line for a steward carries ++<channel> under agent-mail 2.2's mailbox skill
         ("a plain re-join line in section 3", "his line must carry `++<channel>`, as in `/mailbox <steward> ++<channel>`,", "his line is `/mailbox <steward>`,",
          "docs: step 1 of section 3 of CLAUDE.md says that John's line must carry ++<channel>"),
-        ("section 13's re-join sentence dropped", " " + JOIN_RESET_SENTENCE, "", "docs: step 2 of section 13 of CLAUDE.md says that a re-join"))
+        ("section 13's re-join sentence dropped", " " + JOIN_RESET_SENTENCE, "", "docs: step 2 of section 13 of CLAUDE.md says that a re-join"),
+        # John's decision 33 (2026-11-02): the invitation's !+<channel> stays optional, and WORKER.md's rule stands
+        ("the invitation's !+<channel> made a requirement", "It also says, as optional, that", "It also says that",
+         "docs: step 8 of section 3 of CLAUDE.md has the invitation mention"),
+        ("WORKER.md's rule dropped from the invitation's option", ", while WORKER.md's rule to name `+<channel>` on every post stands.", ".",
+         "docs: step 8 of section 3 of CLAUDE.md has the invitation mention"))
     for i, (what, old, new, failure) in enumerate(regressions):
         failures = docs_checks(checkout_with(d, f"regression-{i}", "CLAUDE.md", old, new))
         ok(old in good and any(f.startswith(failure) for f in failures), f"docs: docs_checks catches {what} (got {without_question_marks(repr(failures))})")
