@@ -421,7 +421,7 @@ When `transit-without-note` was above zero that day, the summary gives how many 
 
 ## 13. Restarts and resets
 
-A `/clear` (agent-deck's clear-on-compact, your daily reset), a compaction or a restart loses nothing: the files hold everything. You are in a fresh context when you remember no earlier turn, or when `last_turn` is more than two ticks old. Then:
+A `/clear` (typed by John, or sent with `agent-deck session command`), a compaction or a restart loses nothing: the files hold everything. You are in a fresh context when you remember no earlier turn, or when `last_turn` is more than two ticks old. Then:
 
 1. Re-read this file, `POLICY.md`, `TOPIC.md`, `LEDGER.md` and `steward-state.json`. If steward-state.json holds `closed`, the topic is closed: stop here, subscribing to nothing, arming nothing and writing nothing, and end with one status line, until John types `channel` and gives you a new topic (section 3). Your channel is the one in TOPIC.md's heading, never one taken again from the channels' purposes. With no TOPIC.md there is no topic yet: stop here, subscribing to nothing and arming neither the doorbell nor the tick, until John gives you a topic (section 3).
 2. Call `channels`. If you are not on `+<channel>`'s list of subscribers, `subscribe {channel: "<channel>", wake: true}` again: runtime subscriptions live on the host.
