@@ -1,6 +1,6 @@
 # Mailbox topics: the `/mailbox` join grammar and write targets in agent-mail 2.2
 
-Status: draft for John's approval, 2026-11-02. Decisions 62, 63, 64 and 70 in `/Users/johnw/Products/mailbox-rollout/decisions.md` fix the parts marked *John's decision*; everything marked *builder's call* is the designer's choice and open to correction.
+Status: approved by John as written, 2026-11-02 16:45 PST (decision 73). Decisions 62, 63, 64 and 70 in `/Users/johnw/Products/mailbox-rollout/decisions.md` fix the parts marked *John's decision*; everything marked *builder's call* is the designer's choice and open to correction.
 
 ## 1. Summary
 
