@@ -4681,6 +4681,11 @@ COUNTS_SENTENCE = ("When it is above the posts on `+<channel>` you received sinc
 # of section 1 that names unsubscribe.
 MAY_SUBSCRIBE = ("agent-mail: `receive`, `reread`, `pending`, `channels`, `send` (direct mail, and posts to `+<channel>`), and `subscribe` and "
                  "`unsubscribe` for `+<channel>` alone, apart from what the mailbox join does itself.")
+# Fix round 1 of the third cycle let README row 6 find the steward on +fleet's list before row 1 under agent-mail 2.2, where every join subscribes to
+# it and the steward keeps that subscription after a close (ruling R2). Fix round 2 (ruling R15) pins the row's sentence whole, as the only sentence of
+# the README that speaks of a list of subscribers.
+ROW6_FLEET_SENTENCE = ("If it did more, note what it did, and check in `agent-mail channels` that conductor-ingest-steward is on no channel's list of "
+                       "subscribers before row 1, `+fleet` aside under agent-mail 2.2, where every join subscribes to it.")
 # John's decision 33 (2026-11-02): the invitation mentions, as optional, the !+<channel> a member's join line may carry under agent-mail 2.2, which keeps its
 # subscription across a re-join and lets its posts omit to; WORKER.md is unchanged and still names +<channel> on every post. The sentence is pinned whole,
 # inside step 8 of section 3, as the only sentence of the section that names `!+<channel>`.
@@ -5005,6 +5010,14 @@ def test_steward_readme_and_pointer(d):
     ok("cannot authorize" in top, "docs: the README's rules are unchanged")
 
 
+def test_steward_readme_matches_the_steward(d):
+    r = read(os.path.join(REPO, "steward", "README.md"))
+    found = [s for s in sentences(r) if "list of subscribers" in s]
+    ok(found == [ROW6_FLEET_SENTENCE],
+       "docs: steward/README.md's row 6 finds the steward on no channel's list of subscribers before row 1, +fleet aside under agent-mail 2.2, as "
+       f"pinned (got {without_question_marks(repr(found))})")
+
+
 def test_steward_readme_gives_the_join_line_for_a_steward(d):
     found = [line for line in read(os.path.join(REPO, "steward", "README.md")).splitlines() if "/mailbox conductor-" in line]
     ok(found == [README_JOIN_LINE],
@@ -5030,7 +5043,8 @@ DOCS_CHECKS = (test_claude_md, test_claude_md_headings_are_in_order, test_claude
                test_shared_and_heartbeat,
                test_shared_and_heartbeat_forbid_what_spec_6_4_lists_and_grant_nothing, test_shared_and_heartbeat_hold_exactly_their_pinned_sentences,
                test_worker_md, test_worker_md_matches_what_claude_md_files_and_sends, test_worker_md_keeps_its_checks_and_safety_sentences_as_pinned,
-               test_worker_md_has_no_silence_rule, test_steward_readme_and_pointer, test_steward_readme_gives_the_join_line_for_a_steward)
+               test_worker_md_has_no_silence_rule, test_steward_readme_and_pointer, test_steward_readme_gives_the_join_line_for_a_steward,
+               test_steward_readme_matches_the_steward)
 
 
 def test_strip_code_and_template(d):
@@ -5472,7 +5486,10 @@ def test_docs_checks_catch_each_regression_in_the_readme(d):
          "docs: steward/README.md gives a steward's join line in one paragraph alone"),
         # fix round 2 of the third cycle (ruling R11): the loss a plain re-join causes, said plainly
         ("the README's loss clause left out", ", so that the posts it had not yet received never reach it,", ",", 1,
-         "docs: steward/README.md gives a steward's join line in one paragraph alone"))
+         "docs: steward/README.md gives a steward's join line in one paragraph alone"),
+        # fix round 2 of the third cycle (ruling R15): row 6 expects +fleet under agent-mail 2.2
+        ("row 6's +fleet clause left out", " before row 1, `+fleet` aside under agent-mail 2.2, where every join subscribes to it.", " before row 1.", 1,
+         "docs: steward/README.md's row 6 finds the steward on no channel's list"))
     for i, (what, old, new, count, failure) in enumerate(regressions):
         failures = docs_checks(checkout_with(d, f"readme-regression-{i}", name, old, new, count))
         ok(old in readme and any(f.startswith(failure) for f in failures),
