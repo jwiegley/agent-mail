@@ -261,12 +261,13 @@ agent-deck conductor setup ingest-steward -agent claude \
   -shared-instructions-md ~/src/sys/agent-mail/steward/SHARED.md \
   -instructions-md ~/src/sys/agent-mail/steward/CLAUDE.md \
   -policy-md ~/src/sys/agent-mail/steward/POLICY.md \
-  -heartbeat-rules-md ~/src/sys/agent-mail/steward/HEARTBEAT_RULES.md
+  -heartbeat-rules-md ~/src/sys/agent-mail/steward/HEARTBEAT_RULES.md \
+  -no-clear-on-compact
 ```
 
 - `SHARED.md` is a steward-safe replacement for the shared conductor instructions (today the stewards are the only Claude conductors; `director` runs Codex); `CLAUDE.md` also states that it takes precedence over any shared conductor text and names the parts that do not apply (auto-respond, `/send`, session control, the heartbeat `NEED:` format, `state.json` and `task-log.md`) **[my call]**.
 - The four files live in the agent-mail repository under `steward/` and are landed on `main` before the pilot, so every host's checkout carries them **[John 14]**. Setup links `CLAUDE.md`, `SHARED.md` and `HEARTBEAT_RULES.md` into hera's checkout, so a revision reaches both stewards when the checkout is pulled; the conductor's `POLICY.md` is made a copy right after setup, because John edits thresholds there and must not dirty the checkout **[my call]**. nix packaging of `steward/` follows v2's Task 22 pattern after the pilot.
-- The steward's context reset is Claude Code's own compaction, or a restart or a `/clear`, each a fresh context under CLAUDE.md section 13 **[John 30]**; what starts the next turn after a `/clear` is a day-zero check (section 10) **[my call]**. The default heartbeat stays enabled; it is inert until John groups hera members under the conductor's name, and the design never depends on it **[my call]**.
+- The steward's context reset is Claude Code's own compaction, or a restart or a `/clear`, each a fresh context under CLAUDE.md section 13 **[John 30]**; the command's `-no-clear-on-compact` turns agent-deck's clear-on-compact off, so that a full context ends in Claude Code's own compaction by construction, whatever the TUI's settings **[John 30]**; what starts the next turn after a `/clear` is a day-zero check (section 10) **[my call]**. The default heartbeat stays enabled; it is inert until John groups hera members under the conductor's name, and the design never depends on it **[my call]**.
 - agent-deck opens every start or restart of a conductor with a recovery turn: it types a message that begins `[CONDUCTOR RECOVERY]` into the pane, asking the conductor to drain its inbox with `agent-deck inbox drain` and read `./state.json`. The steward's `CLAUDE.md` answers it in section 2 as the start of a fresh context: it runs its restart steps (its section 13), never `agent-deck inbox drain`, and never reads or keeps a `state.json` **[John 25]**.
 - The model and account are the fleet's defaults **[John 15]**.
 
@@ -619,7 +620,7 @@ Checked daily during the pilots (6.10), then weekly.
 | 7b No fences | Positron or personal policy objects to cross-domain posts on disk | nix-generated `.stignore` per device |
 | 8 Model first | notice delay p50 above 15 minutes for a week | the filer (section 9) |
 | 9 Autonomy | a worker reports nagging, or a default held work that should have started | fewer nudges; defaults off |
-| 10 Digest | members' token cost from the daily summary, or John wants a push | files only; a Discord push after the bridge refresh |
+| 10 Digest | a member reports the daily summary as noise, or John wants a push | files only; a Discord push after the bridge refresh |
 | 12 Exception in the skill | workers refuse valid relays because of the banner | the v2.0.x text change sooner |
 | 13 Fork fix | the fix takes longer than the pilot's other preconditions | backup-and-restore around setup, once |
 | 14 Repo file | revisions reach members too slowly | the section in Task 22's nix skill |

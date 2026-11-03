@@ -76,7 +76,8 @@ agent-deck conductor setup ingest-steward -agent claude \
   -shared-instructions-md ~/src/sys/agent-mail/steward/SHARED.md \
   -instructions-md ~/src/sys/agent-mail/steward/CLAUDE.md \
   -policy-md ~/src/sys/agent-mail/steward/POLICY.md \
-  -heartbeat-rules-md ~/src/sys/agent-mail/steward/HEARTBEAT_RULES.md
+  -heartbeat-rules-md ~/src/sys/agent-mail/steward/HEARTBEAT_RULES.md \
+  -no-clear-on-compact
 ```
 
 For nix-config:
@@ -87,10 +88,11 @@ agent-deck conductor setup nix-steward -agent claude \
   -shared-instructions-md ~/src/sys/agent-mail/steward/SHARED.md \
   -instructions-md ~/src/sys/agent-mail/steward/CLAUDE.md \
   -policy-md ~/src/sys/agent-mail/steward/POLICY.md \
-  -heartbeat-rules-md ~/src/sys/agent-mail/steward/HEARTBEAT_RULES.md
+  -heartbeat-rules-md ~/src/sys/agent-mail/steward/HEARTBEAT_RULES.md \
+  -no-clear-on-compact
 ```
 
-A steward's context reset is Claude Code's own compaction, a restart, or a `/clear` that John types in its pane or sends with `agent-deck session command`. Each loses nothing under CLAUDE.md section 13: the steward's state is on disk, and a fresh context runs that section's recovery steps. agent-deck's clear-on-compact is not used (John's decision 30 of 2026-11-02), because it decides only for the session its TUI previews with analytics on, in the seconds after John selects that session's row, so it cannot serve a steward that runs unattended. `context_resets` in the steward's metrics counts every fresh context.
+A steward's context reset is Claude Code's own compaction, a restart, or a `/clear` that John types in its pane or sends with `agent-deck session command`. Each loses nothing under CLAUDE.md section 13: the steward's state is on disk, and a fresh context runs that section's recovery steps. agent-deck's clear-on-compact is not used (John's decision 30 of 2026-11-02), because it decides only for the session its TUI previews with analytics on, in the seconds after John selects that session's row, so it cannot serve a steward that runs unattended. `-no-clear-on-compact` in both commands turns it off, so that a full context always ends in Claude Code's own compaction, whatever the TUI's settings. `context_resets` in the steward's metrics counts every fresh context.
 
 Setup creates `~/.local/share/agent-deck/conductor/<name>/` with its `meta.json`, links the conductor's CLAUDE.md, POLICY.md and HEARTBEAT_RULES.md to the checkout's files, links the shared `conductor/CLAUDE.md` to SHARED.md, and registers the session `conductor-<name>` without starting it. Its default heartbeat stays on. The heartbeat is inert until John groups hera sessions under the conductor's name, and nothing depends on it.
 

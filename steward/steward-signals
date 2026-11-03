@@ -4623,6 +4623,12 @@ RESET_CHANNEL_STEP = ("1. Re-read this file, `POLICY.md`, `TOPIC.md`, `LEDGER.md
 RECOVERY_PART = ("- **agent-deck's recovery turn:** at each start or restart, agent-deck types a message that begins `[CONDUCTOR RECOVERY]` into your pane, asking "
                  "you to drain your inbox and read `./state.json`. Take it as the start of a fresh context: run section 13, never run `agent-deck inbox drain`, and "
                  "never read or keep a `state.json`.")
+# What a context reset is, under John's decision 30 (2026-11-02): Claude Code's own compaction, a restart, or a /clear that John types or sends with agent-deck
+# session command, never agent-deck's clear-on-compact, which both setup commands turn off with -no-clear-on-compact. Section 13's first sentence says so, and
+# no check quoted it until the second cycle's review asked for one: it is pinned whole, as that section's first sentence, so that agent-deck's clear-on-compact
+# cannot come back as the steward's daily reset unseen.
+RESET_OPENING = ("A `/clear` (typed by John, or sent with `agent-deck session command`), a compaction or a restart loses nothing: the files hold "
+                 "everything.")
 
 
 def test_claude_md_takes_its_channel_from_topic_md_or_from_john(d):
@@ -4664,6 +4670,13 @@ def test_claude_md_wakes_nothing_after_a_close(d):
     ok(found == [CLOSE_STEP],
        "docs: step 4 of section 14 of CLAUDE.md unsubscribes, restarts neither the doorbell nor the tick, renames STATUS, and has a wake that still comes "
        "write nothing, as pinned")
+
+
+def test_claude_md_names_the_resets_that_lose_nothing(d):
+    opening = sentences(claude_section(claude_md(), 13).partition("\n")[2])[:1]  # the first sentence after the section's heading
+    ok(opening == [RESET_OPENING],
+       "docs: section 13 of CLAUDE.md opens with the resets that lose nothing as pinned, a /clear typed by John or sent with agent-deck session command, a "
+       f"compaction or a restart, never agent-deck's clear-on-compact (got {without_question_marks(repr(opening))})")
 
 
 def test_shared_and_heartbeat(d):
@@ -4863,7 +4876,8 @@ DOCS_CHECKS = (test_claude_md, test_claude_md_headings_are_in_order, test_claude
                test_claude_md_keeps_the_never_rules_of_spec_7_1, test_claude_md_prints_no_question_mark_in_its_templates, test_claude_md_routes_requests_and_marks_joins,
                test_claude_md_reminds_of_notes_once, test_claude_md_follows_the_worked_example_and_its_keys, test_claude_md_states_the_helpers_cap_as_it_is,
                test_claude_md_keeps_the_question_line_inside_the_pane, test_claude_md_takes_its_channel_from_topic_md_or_from_john, test_claude_md_answers_agent_decks_recovery_turn,
-               test_claude_md_starts_a_new_topic_afresh_after_a_close, test_claude_md_wakes_nothing_after_a_close, test_shared_and_heartbeat,
+               test_claude_md_starts_a_new_topic_afresh_after_a_close, test_claude_md_wakes_nothing_after_a_close, test_claude_md_names_the_resets_that_lose_nothing,
+               test_shared_and_heartbeat,
                test_shared_and_heartbeat_forbid_what_spec_6_4_lists_and_grant_nothing, test_shared_and_heartbeat_hold_exactly_their_pinned_sentences,
                test_worker_md, test_worker_md_matches_what_claude_md_files_and_sends, test_worker_md_keeps_its_checks_and_safety_sentences_as_pinned,
                test_worker_md_has_no_silence_rule, test_steward_readme_and_pointer)
@@ -5076,7 +5090,10 @@ def test_docs_checks_catch_each_pinned_regression(d):
          "Q ingest-3: HF orgs for the glm-5.3-fp8: A positron-internal, B positron-ai?", "docs: section 9 of CLAUDE.md gives its example question line in under"),
         ("an example question line of the cap's whole 80 characters", "Q ingest-3: HF org for glm-5.3-fp8: A positron-internal, B positron-ai?",
          "Q ingest-3: HF orgs for glm-5.3-fp8 weights: A positron-internal, B positron-ai?",
-         "docs: section 9 of CLAUDE.md gives its example question line in under"))
+         "docs: section 9 of CLAUDE.md gives its example question line in under"),
+        # John's decision 30 (2026-11-02): section 13's first sentence, which named agent-deck's clear-on-compact as the daily reset before the second cycle
+        ("agent-deck's clear-on-compact named again as the daily reset", "(typed by John, or sent with `agent-deck session command`)",
+         "(agent-deck's clear-on-compact, your daily reset)", "docs: section 13 of CLAUDE.md opens with the resets that lose nothing"))
     for i, (what, old, new, failure) in enumerate(regressions):
         failures = docs_checks(checkout_with(d, f"regression-{i}", "CLAUDE.md", old, new))
         ok(old in good and any(f.startswith(failure) for f in failures), f"docs: docs_checks catches {what} (got {without_question_marks(repr(failures))})")
