@@ -499,7 +499,7 @@ John asked that the system be watched at every stage so that refinements come in
 
 ### 6.13 Cost
 
-John does not want steward cost measured or capped **[John 20]**: no token, dollar or usage-window figure is collected, reported or acted on. The loop in 6.4 is still written to be light (the ledger kept in context and edited rather than rewritten, one Bash call for the end-of-turn files, a 5-minute doorbell delay while items are active, UPDATEs only on change, a daily context reset), because a lighter loop is also a faster and more reliable one. Latency added to delivery: none. Sessions John runs: two more, long-lived. Approvals in steady state: none.
+John does not want steward cost measured or capped **[John 20]**: no token, dollar or usage-window figure is collected, reported or acted on. The loop in 6.4 is still written to be light (the ledger kept in context and edited rather than rewritten, one Bash call for the end-of-turn files, a 5-minute doorbell delay while items are active, UPDATEs only on change, a context reset at Claude Code's own compaction **[John 30]**), because a lighter loop is also a faster and more reliable one. Latency added to delivery: none. Sessions John runs: two more, long-lived. Approvals in steady state: none.
 
 ## 7. The skills
 
@@ -610,7 +610,7 @@ Checked daily during the pilots (6.10), then weekly.
 |---|---|---|
 | 1 Copy, not custody | a conflict causes damage that holding the message for minutes would have prevented; or member mail seen in transit without a NOTE stays high for a week (a lower bound, so judged with the NOTE count) | gated claims on shared paths; tool-written Cc copies (the exploration's S3) |
 | 2 Steward | the word misleads members or John in practice | shepherd, coordinator |
-| 3 Real conductors | setup, the heartbeat or the bridge misbehaves for a Claude conductor; the daily reset loses state despite the files | ordinary agent-deck sessions with the same files |
+| 3 Real conductors | setup, the heartbeat or the bridge misbehaves for a Claude conductor; a reset loses state despite the files | ordinary agent-deck sessions with the same files |
 | 3 Powers | any sign a steward acted on injected text beyond writing mail | an allowlist without dangerous_mode, once agent-deck allows it per session |
 | 4 Pane line | the scanner misses or double-pages steward lines twice in a week; an overnight page that could have waited | `conductor notify` tiers after a bridge refresh; quiet hours |
 | 5/5b/11 Relay with checks | one relay that fails a check, one forged steward file, or a worker acting on a relay that should have failed: protected relays are suspended the same day and the decision is put to John | information-only relays |
