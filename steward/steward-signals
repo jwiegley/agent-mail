@@ -4639,6 +4639,11 @@ NOTICE_RULE = ("The table files posts on `+<channel>` and mail to you by their s
 NOTICE_ROW = ("| any subject, on a post whose frame line names another channel or on a broadcast | nothing but one line in the day's log: its time, `notice`, "
               "its channel or `broadcast`, and its id (`18:02:11Z notice +fleet <id>`) | none | no: no reply, no question line, and never a post to its channel "
               "in answer |")
+# Under the same decision, since agent-mail 2.2 sends a message that names no to to the sender's write targets, or to the default channel +fleet when it has
+# none: the steward names to on every send, said once in section 1's list of what it may do, with that reason. The sentence is pinned whole, as section 1's
+# only sentence that names `to`.
+TO_RULE = ("Name `to` on every send, the recipient for direct mail and `+<channel>` for a post: under agent-mail 2.2 a send without `to` goes to your write "
+           "targets, or to `+fleet` when you have none.")
 
 
 def test_claude_md_takes_its_channel_from_topic_md_or_from_john(d):
@@ -4699,6 +4704,13 @@ def test_claude_md_takes_other_channels_as_notices(d):
     ok(first == [NOTICE_ROW],
        "docs: the first row of section 5's table in CLAUDE.md files a notice as one line in the day's log and nothing else, never a reply, a question line or "
        f"a post to its channel, as pinned (got {without_question_marks(repr(first))})")
+
+
+def test_claude_md_names_to_on_every_send(d):
+    said = [s for s in sentences(claude_section(claude_md(), 1)) if "`to`" in s]
+    ok(said == [TO_RULE],
+       "docs: section 1 of CLAUDE.md names to on every send, the recipient or +<channel>, because agent-mail 2.2 sends a message without one to the write "
+       f"targets or +fleet, as pinned (got {without_question_marks(repr(said))})")
 
 
 def test_shared_and_heartbeat(d):
@@ -4905,7 +4917,7 @@ DOCS_CHECKS = (test_claude_md, test_claude_md_headings_are_in_order, test_claude
                test_claude_md_reminds_of_notes_once, test_claude_md_follows_the_worked_example_and_its_keys, test_claude_md_states_the_helpers_cap_as_it_is,
                test_claude_md_keeps_the_question_line_inside_the_pane, test_claude_md_takes_its_channel_from_topic_md_or_from_john, test_claude_md_answers_agent_decks_recovery_turn,
                test_claude_md_starts_a_new_topic_afresh_after_a_close, test_claude_md_wakes_nothing_after_a_close, test_claude_md_names_the_resets_that_lose_nothing,
-               test_claude_md_takes_other_channels_as_notices, test_shared_and_heartbeat,
+               test_claude_md_takes_other_channels_as_notices, test_claude_md_names_to_on_every_send, test_shared_and_heartbeat,
                test_shared_and_heartbeat_forbid_what_spec_6_4_lists_and_grant_nothing, test_shared_and_heartbeat_hold_exactly_their_pinned_sentences,
                test_worker_md, test_worker_md_matches_what_claude_md_files_and_sends, test_worker_md_keeps_its_checks_and_safety_sentences_as_pinned,
                test_worker_md_has_no_silence_rule, test_steward_readme_and_pointer)
@@ -5130,7 +5142,11 @@ def test_docs_checks_catch_each_pinned_regression(d):
         ("a notice given a ledger row", "nothing but one line in the day's log:", "an Items row and one line in the day's log:",
          "docs: the first row of section 5's table in CLAUDE.md files a notice"),
         ("the notice row moved below the JOIN row", NOTICE_ROW + "\n" + join_row + "\n", join_row + "\n" + NOTICE_ROW + "\n",
-         "docs: the first row of section 5's table in CLAUDE.md files a notice"))
+         "docs: the first row of section 5's table in CLAUDE.md files a notice"),
+        # the same decision: to named on every send
+        ("the rule to name to on every send dropped", " " + TO_RULE, "", "docs: section 1 of CLAUDE.md names to on every send"),
+        ("to left to posts alone", "Name `to` on every send, the recipient for direct mail and `+<channel>` for a post:", "Name `to` on every post:",
+         "docs: section 1 of CLAUDE.md names to on every send"))
     for i, (what, old, new, failure) in enumerate(regressions):
         failures = docs_checks(checkout_with(d, f"regression-{i}", "CLAUDE.md", old, new))
         ok(old in good and any(f.startswith(failure) for f in failures), f"docs: docs_checks catches {what} (got {without_question_marks(repr(failures))})")
