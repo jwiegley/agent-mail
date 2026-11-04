@@ -19,7 +19,7 @@
  
  
  def run(args: list[str], timeout: int = 20) -> subprocess.CompletedProcess[str]:
-@@ -742,6 +747,19 @@
+@@ -745,6 +750,19 @@
      result["questions"].append(item)
  
  
@@ -37,9 +37,9 @@
 +
 +
  def visible_prompt_or_question(text: str, tool: str | None = None) -> str | None:
-     if tool in {"pi", "codex"}:
+     if tool in {None, "claude", "pi", "codex"}:
          import discord_qna
-@@ -822,7 +840,7 @@
+@@ -827,7 +845,7 @@
              last_assistant = index
              if "User answered Claude's questions" in lines[index]:
                  return None
@@ -48,7 +48,7 @@
                  return None
              lines = lines[index:]
              break
-@@ -1125,6 +1143,129 @@
+@@ -1130,6 +1148,129 @@
      state["attention_indicator"] = {**result["indicator"], "checked_at": result["timestamp"]}
  
  
@@ -178,7 +178,7 @@
  def deliver_attention(state: dict, result: dict) -> None:
      """Send actionable alerts; retain deduplication only after confirmed delivery."""
      try:
-@@ -1144,6 +1285,8 @@
+@@ -1149,6 +1290,8 @@
          {"where": item["where"], "kind": "stall", "detail": "No meaningful pane progress for the policy threshold."}
          for item in result["stalled_sessions"]
      )
@@ -187,7 +187,7 @@
      recovered = {
          item["where"] for item in result["actions"]
          if item["action"] == "Continue" and item.get("reason") == "errored-session recovery"
-@@ -1203,6 +1346,7 @@
+@@ -1208,6 +1351,7 @@
          "actions": [],
          "questions": [],
          "stalled_sessions": [],
@@ -195,7 +195,7 @@
          "errors": [],
          "session_ids": {},
      }
-@@ -1606,6 +1750,12 @@
+@@ -1611,6 +1755,12 @@
              finally:
                  run(["tmux", "kill-session", "-t", scan], timeout=10)
  

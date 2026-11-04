@@ -4,9 +4,12 @@ and to his Discord bridge, bridge.py.
 They load the patched copies that STEWARD_PATCHED_MONITOR and
 STEWARD_PATCHED_BRIDGE name and call their functions directly; without
 STEWARD_PATCHED_BRIDGE the bridge tests are skipped. Every fixture lives in a
-temporary directory, the mailbox included. Discord delivery, discord_qna and
-every command the scanner runs are replaced by recorders, so no test reaches
-agent-deck, Discord, ~/Mailbox, or the scanner's own state.json and task log.
+temporary directory, the mailbox included. Discord delivery, discord_qna's
+delivery and every command the scanner runs are replaced by recorders, so no
+test reaches agent-deck, Discord, ~/Mailbox, or the scanner's own state.json
+and task log. The question-line tests import the discord_qna beside the
+scanner, which the scanner of 2026-11-03 parses every Claude pane with; its
+parser opens no file and no database.
 The bridge is imported with its paths in an empty temporary directory
 (load_bridge), and its Discord bot is built without logging in, with a fixed
 list of conductors and recorders for agent-deck and Discord's API.
@@ -40,10 +43,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 
 def load_patched(variable, name):
-    """The module at the path that the environment variable VARIABLE names, loaded as NAME."""
+    """The module at the path that the environment variable VARIABLE names, loaded as NAME.
+
+    The file's own directory goes first on sys.path, as it is when the file runs from there: since 2026-11-03 the scanner
+    imports discord_qna beside it for every Claude pane."""
     path = os.environ.get(variable)
     if not path:
         raise RuntimeError(f"set {variable} to the path of the patched file to test")
+    directory = os.path.dirname(os.path.abspath(path))
+    if directory not in sys.path:
+        sys.path.insert(0, directory)
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

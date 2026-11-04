@@ -7,7 +7,7 @@ Two patches to John's unversioned files, for him to apply, each on its own: the 
 - **The STATUS rule.** Each pass reads `~/.local/share/agent-deck/conductor/*-steward/STATUS`. When the file is older than twice the `tick=` it declares, and `open=` is above zero or the steward's channel holds a post stamped after `last-post=`, the pass pages Discord through the existing delivery, once per stale episode: `NEED(steward): conductor-<name> STATUS unchanged since <UTC> (tick <m>m, <n> open)`. A closed topic's `STATUS-final-<date>` never pages. The rule reads post file names in `~/Mailbox/+<channel>/` and never opens a message; a post agent-mail never delivers, such as one stamped more than a day ahead, does not count. A steward whose STATUS, TOPIC.md or channel cannot be read goes into the pass's errors, which page once like the scanner's other errors, and the other stewards are still checked.
 - **MCP tool calls.** A bullet of the form `⏺ <server> - <tool> (MCP)(...`, or `⏺ <server> - <tool> (MCP)` for a call with no arguments, counts as a tool call, so a peer's question inside an agent-mail `receive` result is no longer paged.
 
-The patch was made against the scanner of 2026-11-02 15:43 (74,053 bytes, sha256 `1fd122c6b9e64e03c878ae9cf81c2925eaf1fbc81f4a56aabd07b79656c7df33`). Run every command below from the root of the agent-mail checkout.
+The patch was made against the scanner of 2026-11-03 10:17 (74,565 bytes, sha256 `322348cf1dd5fe5a5ef40513ae2561aad0bf6e24a10b28c446e5674163c70499`); it was first made against the scanner of 2026-11-02 15:43, and a re-base keeps its eight hunks and its added lines unchanged. Run every command below from the root of the agent-mail checkout.
 
 ## Apply
 
@@ -40,7 +40,7 @@ John's own scanner tests, in the director's directory:
 (cd ~/.local/share/agent-deck/conductor/director && ~/.local/share/agent-deck/conductor/venv/bin/python -B -m unittest test_monitor_sessions)
 ```
 
-Run the steward tests again after any change to `monitor_sessions.py`: they hold the fixtures spec 6.12 relies on (the question-line template, a flake input in a question line, an MCP receive block and the STATUS rule), and John's own suite does not run them. If a dry run of the patch then rejects a hunk, regenerate the patch against the changed file.
+Run the steward tests again after any change to `monitor_sessions.py`: they hold the fixtures spec 6.12 relies on (the question-line template, a flake input in a question line, an MCP receive block and the STATUS rule), and John's own suite does not run them. If a dry run of the patch then rejects a hunk, regenerate the patch against the changed file. The tests load the scanner from the path `STEWARD_PATCHED_MONITOR` names with its directory first on `sys.path`, as when the scanner runs, since the scanner of 2026-11-03 imports the `discord_qna` beside it for every Claude pane; its parser opens no file and no database.
 
 ## Restart the scanner
 
