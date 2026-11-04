@@ -4689,8 +4689,8 @@ TURN_RECEIVE_STEP = ("3. `receive {me: \"<steward>\"}` until nothing more waits.
                      "{me: \"<steward>\", last: true}` recovers only the last batch. Never copy a body. The backlog of a subscribe after a drop "
                      "(sections 3, 8 and 13) delivers posts again: one whose id `RECEIVED.log` already held gets a `<time> replay <id>` line in the "
                      "day's log and is neither recorded nor filed again, since step 4 of section 13 files it if a reset cut off its first filing; one "
-                     "stamped, by the stamp in its id, before `topic_since` is from before your topic: it gets a `<time> before-topic <id>` line and "
-                     "is not filed.")
+                     "stamped, by the stamp in its id, more than 10 minutes before `topic_since`, the allowance agent-mail gives a writer's clock, is "
+                     "from before your topic: it gets a `<time> before-topic <id>` line and is not filed.")
 RESET_SUBSCRIBE_STEP = ("2. Call `channels`, then `subscribe {channel: \"<channel>\", wake: true, backlog: 20}` whether or not it lists you, leaving the "
                         "backlog out while steward-state.json holds no `topic_since`: runtime subscriptions live on the host, and a re-join may have left "
                         "`+<channel>` quiet or dropped it (section 3). While the subscription exists, subscribing again keeps your cursor, only sets wake "
@@ -4700,8 +4700,8 @@ RESET_SUBSCRIBE_STEP = ("2. Call `channels`, then `subscribe {channel: \"<channe
 RESET_RECEIVE_STEP = ("3. `receive` until nothing more waits: the mail that arrived while you were away is all still delivered, and so are the posts, "
                       "or only those among the channel's 20 newest when a re-join dropped the subscription (step 2).")
 RESET_RECONCILE_STEP = ("4. Reconcile. Each id appended to `RECEIVED.log` since `last_turn`, by the `<UTC>` on its line, that neither the log of its own "
-                        "UTC date nor a later one names, a `replay` line aside, was never filed: `reread {me: \"<steward>\", id: \"<id>\"}` and file it. An "
-                        "`intent` with no `sent` line may still have its file in the mailbox, which the census matches to it (section 11), so run the "
+                        "UTC date nor a later one names, a `replay` line aside, was never filed: `reread {me: \"<steward>\", id: \"<id>\"}` and file it, or "
+                        "give it its `before-topic` line as step 3 of section 4 says. An `intent` with no `sent` line may still have its file in the mailbox, which the census matches to it (section 11), so run the "
                         "signals call before you dispute anything.")
 # Fix round 1 of the third cycle compared posts-since-last, which counts posts in +<channel> alone, with the posts on +<channel> the steward received,
 # not with every post it received, since under agent-mail 2.2 the +fleet notices are received posts too and could hide a lost subscription. Fix round 2
@@ -4846,7 +4846,10 @@ def test_claude_md_takes_a_backlog_within_its_topic_and_files_each_post_once(d):
     found = [line for line in claude_section(t, 13).splitlines() if line.startswith("4. ")]
     ok(found == [RESET_RECONCILE_STEP],
        "docs: step 4 of section 13 of CLAUDE.md files an id appended since last_turn only when no log from its own date on names it, a replay line "
-       f"aside, as pinned (got {without_question_marks(repr(found))})")
+       f"aside, and gives a post from before the topic its before-topic line, as pinned (got {without_question_marks(repr(found))})")
+    state = [s for s in sentences(t) if s.startswith("`steward-state.json` holds")]
+    ok(len(state) == 1 and "`topic_since`" in state[0],
+       f"docs: section 11 of CLAUDE.md lists topic_since among the keys of steward-state.json (got {without_question_marks(repr(state))})")
 
 
 def test_claude_md_compares_posts_since_last_with_its_own_channel(d):
@@ -5381,8 +5384,9 @@ def test_docs_checks_catch_each_pinned_regression(d):
          ":", "docs: step 5 of section 3 of CLAUDE.md subscribes without a backlog"),
         ("the replay rule dropped from section 4", " The backlog of a subscribe after a drop (sections 3, 8 and 13) delivers posts again: one whose id "
          "`RECEIVED.log` already held gets a `<time> replay <id>` line in the day's log and is neither recorded nor filed again, since step 4 of section "
-         "13 files it if a reset cut off its first filing; one stamped, by the stamp in its id, before `topic_since` is from before your topic: it gets "
-         "a `<time> before-topic <id>` line and is not filed.", "", "docs: step 3 of section 4 of CLAUDE.md records each id in RECEIVED.log once"),
+         "13 files it if a reset cut off its first filing; one stamped, by the stamp in its id, more than 10 minutes before `topic_since`, the "
+         "allowance agent-mail gives a writer's clock, is from before your topic: it gets a `<time> before-topic <id>` line and is not filed.", "",
+         "docs: step 3 of section 4 of CLAUDE.md records each id in RECEIVED.log once"),
         ("a post delivered again filed again", "and is neither recorded nor filed again, since", "and is recorded and filed again, since",
          "docs: step 3 of section 4 of CLAUDE.md records each id in RECEIVED.log once"),
         ("every delivered id recorded again", "append `<UTC> <id>` to `RECEIVED.log` for each delivered id it does not already hold,",
@@ -5393,6 +5397,14 @@ def test_docs_checks_catch_each_pinned_regression(d):
          "docs: step 4 of section 13 of CLAUDE.md files an id appended since last_turn"),
         ("the reconcile reading the log of the line's own date alone", "that neither the log of its own UTC date nor a later one names,",
          "that the log of its own UTC date does not name,", "docs: step 4 of section 13 of CLAUDE.md files an id appended since last_turn"),
+        # fix round 2 of the fourth cycle (rulings R28 and R29, the audit addendum's Lows and nits)
+        ("the before-topic test without agent-mail's allowance for a writer's clock",
+         " more than 10 minutes before `topic_since`, the allowance agent-mail gives a writer's clock, is from", " before `topic_since` is from",
+         "docs: step 3 of section 4 of CLAUDE.md records each id in RECEIVED.log once"),
+        ("the reconcile filing a post from before the topic", " and file it, or give it its `before-topic` line as step 3 of section 4 says.", " and file it.",
+         "docs: step 4 of section 13 of CLAUDE.md files an id appended since last_turn"),
+        ("topic_since left out of the state keys", "`closed`, `topic_since`, the nudges", "`closed`, the nudges",
+         "docs: section 11 of CLAUDE.md lists topic_since"),
         # John's decision 33 (2026-11-02): the invitation's !+<channel> stays optional, and WORKER.md's rule stands
         ("the invitation's !+<channel> made a requirement", "It also says, as optional, that", "It also says that",
          "docs: step 8 of section 3 of CLAUDE.md has the invitation mention"),

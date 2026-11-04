@@ -45,8 +45,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 def load_patched(variable, name):
     """The module at the path that the environment variable VARIABLE names, loaded as NAME.
 
-    The file's own directory goes first on sys.path, as it is when the file runs from there: since 2026-11-03 the scanner
-    imports discord_qna beside it for every Claude pane."""
+    The file's own directory is put first on sys.path unless it is on it already, as it is when the file runs from there:
+    since 2026-11-03 the scanner imports discord_qna beside it for every Claude pane."""
     path = os.environ.get(variable)
     if not path:
         raise RuntimeError(f"set {variable} to the path of the patched file to test")
