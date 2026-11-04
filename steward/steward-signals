@@ -4688,11 +4688,12 @@ TURN_RECEIVE_STEP = ("3. `receive {me: \"<steward>\"}` until nothing more waits.
                      "delivered id it does not already hold, then file each item (section 5), and finish filing before the next `receive`: `reread "
                      "{me: \"<steward>\", last: true}` recovers only the last batch. Never copy a body. The backlog of a subscribe after a drop "
                      "(sections 3, 8 and 13) delivers posts again: one whose id `RECEIVED.log` already held gets a `<time> replay <id>` line in the "
-                     "day's log and is neither recorded nor filed again, since step 4 of section 13 files it if a reset cut off its first filing; one "
-                     "stamped, by the stamp in its id, more than 10 minutes before `topic_since`, the allowance agent-mail gives a writer's clock, is "
+                     "day's log and is neither recorded nor filed again, since step 4 of section 13 files it if a reset cut off its first filing; a "
+                     "post on `+<channel>` stamped, by the stamp in its id, more than 10 minutes before `topic_since`, the allowance agent-mail gives a writer's clock, is "
                      "from before your topic: it gets a `<time> before-topic <id>` line and is not filed.")
-RESET_SUBSCRIBE_STEP = ("2. Call `channels`, then `subscribe {channel: \"<channel>\", wake: true, backlog: 20}` whether or not it lists you, leaving the "
-                        "backlog out while steward-state.json holds no `topic_since`: runtime subscriptions live on the host, and a re-join may have left "
+RESET_SUBSCRIBE_STEP = ("2. Call `channels`, then `subscribe {channel: \"<channel>\", wake: true, backlog: 20}` whether or not it lists you; while "
+                        "steward-state.json holds no `topic_since`, this call stands as your topic's first subscribe: leave the backlog out, and write its "
+                        "time into steward-state.json at once as `topic_since`. Runtime subscriptions live on the host, and a re-join may have left "
                         "`+<channel>` quiet or dropped it (section 3). While the subscription exists, subscribing again keeps your cursor, only sets wake "
                         "and ignores the backlog. A dropped one restarts now with the channel's 20 newest posts, your own aside and those you had already "
                         "received among them, which step 3 of section 4 neither records nor files again, and without any older post you had not yet "
@@ -4707,7 +4708,7 @@ RESET_RECONCILE_STEP = ("4. Reconcile. Each id appended to `RECEIVED.log` since 
 # not with every post it received, since under agent-mail 2.2 the +fleet notices are received posts too and could hide a lost subscription. Fix round 2
 # (ruling R12) pins the sentence whole, as the only one of section 8 that says the subscription may be gone.
 COUNTS_SENTENCE = ("When it is above the posts on `+<channel>` you received since the last call, your subscription may be gone: call `channels`, and "
-                   "subscribe again with `wake: true` and `backlog: 20` if you are not on the list.")
+                   "subscribe again with `wake: true` if you are not on the list, and with `backlog: 20` too once `topic_since` is set.")
 # Fix round 2 of the third cycle (ruling R13): section 1 limits subscribe and unsubscribe to +<channel>, apart from what the mailbox join does itself,
 # since under agent-mail 2.2 the join the steward runs subscribes it to +fleet (the topics design's 5.1). The sentence is pinned whole, as the only one
 # of section 1 that names unsubscribe.
@@ -4825,7 +4826,7 @@ def test_claude_md_keeps_its_channel_across_a_re_join(d):
        f"section that names ++<channel> (got {without_question_marks(repr(steps + others))})")
     lines = claude_section(t, 13).splitlines()
     for step, pinned, what in (("2. ", RESET_SUBSCRIBE_STEP, "subscribes with wake and a backlog of 20 at every fresh context whether or not channels "
-                                "lists the steward, the backlog left out while topic_since is absent, keeps the cursor only while the subscription "
+                                "lists the steward, the backlog left out and topic_since written while it is absent, keeps the cursor only while the subscription "
                                 "exists, and takes back the channel's 20 newest posts, its own aside, after a drop"),
                                ("3. ", RESET_RECEIVE_STEP, "delivers the posts that arrived meanwhile, or only those among the channel's 20 newest when a "
                                 "re-join dropped the subscription")):
@@ -5369,14 +5370,19 @@ def test_docs_checks_catch_each_pinned_regression(d):
         ("the backlog after a join taken before the topic's first subscribe", " all the same, leaving the backlog out until step 5 has set `topic_since`:",
          " all the same:", "docs: step 1 of section 3 of CLAUDE.md gives John's line"),
         ("the backlog at a fresh context taken before the topic's first subscribe",
-         " whether or not it lists you, leaving the backlog out while steward-state.json holds no `topic_since`:", " whether or not it lists you:",
-         "docs: step 2 of section 13 of CLAUDE.md subscribes with wake"),
+         "; while steward-state.json holds no `topic_since`, this call stands as your topic's first subscribe: leave the backlog out, and write its time "
+         "into steward-state.json at once as `topic_since`. Runtime", ": runtime", "docs: step 2 of section 13 of CLAUDE.md subscribes with wake"),
+        # fix round 2 of the fourth cycle (ruling R30, the re-review's N1): a fresh context that finds no topic_since writes it, and section 8 waits for it
+        ("a fresh context's first subscribe that writes no topic_since", ", and write its time into steward-state.json at once as `topic_since`. Runtime",
+         ". Runtime", "docs: step 2 of section 13 of CLAUDE.md subscribes with wake"),
+        ("section 8's backlog taken before the topic's first subscribe", " if you are not on the list, and with `backlog: 20` too once `topic_since` is set.",
+         " and `backlog: 20` if you are not on the list.", "docs: section 8 of CLAUDE.md compares posts-since-last"),
         ("a dropped subscription promised the steward's own posts back", "with the channel's 20 newest posts, your own aside, and without",
          "with the channel's 20 newest posts and without", "docs: step 1 of section 3 of CLAUDE.md gives John's line"),
         ("step 2 of section 13 subscribing without the backlog", "then `subscribe {channel: \"<channel>\", wake: true, backlog: 20}` whether",
          "then `subscribe {channel: \"<channel>\", wake: true}` whether", "docs: step 2 of section 13 of CLAUDE.md subscribes with wake"),
-        ("section 8 subscribing again without the backlog", "subscribe again with `wake: true` and `backlog: 20` if you are not on the list.",
-         "subscribe again with `wake: true` if you are not on the list.", "docs: section 8 of CLAUDE.md compares posts-since-last"),
+        ("section 8 subscribing again without the backlog", " if you are not on the list, and with `backlog: 20` too once `topic_since` is set.",
+         " if you are not on the list.", "docs: section 8 of CLAUDE.md compares posts-since-last"),
         ("the topic's first subscribe given a backlog", "5. `subscribe {channel: \"<channel>\", wake: true}`, so that every post rings your doorbell",
          "5. `subscribe {channel: \"<channel>\", wake: true, backlog: 20}`, so that every post rings your doorbell",
          "docs: step 5 of section 3 of CLAUDE.md subscribes without a backlog"),
@@ -5384,7 +5390,7 @@ def test_docs_checks_catch_each_pinned_regression(d):
          ":", "docs: step 5 of section 3 of CLAUDE.md subscribes without a backlog"),
         ("the replay rule dropped from section 4", " The backlog of a subscribe after a drop (sections 3, 8 and 13) delivers posts again: one whose id "
          "`RECEIVED.log` already held gets a `<time> replay <id>` line in the day's log and is neither recorded nor filed again, since step 4 of section "
-         "13 files it if a reset cut off its first filing; one stamped, by the stamp in its id, more than 10 minutes before `topic_since`, the "
+         "13 files it if a reset cut off its first filing; a post on `+<channel>` stamped, by the stamp in its id, more than 10 minutes before `topic_since`, the "
          "allowance agent-mail gives a writer's clock, is from before your topic: it gets a `<time> before-topic <id>` line and is not filed.", "",
          "docs: step 3 of section 4 of CLAUDE.md records each id in RECEIVED.log once"),
         ("a post delivered again filed again", "and is neither recorded nor filed again, since", "and is recorded and filed again, since",
