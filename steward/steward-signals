@@ -4678,7 +4678,7 @@ START_JOIN_STEP = ("1. Join the mailbox as `<steward>` with the mailbox join com
                    "`++<channel>`, as in `/mailbox <steward> ++<channel>`: a re-join whose line leaves `+<channel>` out drops your subscription, and a "
                    "dropped one restarts when you subscribe again, with the channel's 20 newest posts, your own aside, and without any older post you "
                    "had not yet received. After any join he types in your pane, `subscribe {channel: \"<channel>\", wake: true, backlog: 20}` at once "
-                   "all the same, leaving the backlog out until step 5 has set `topic_since`: while the subscription exists, quiet or wake, that keeps "
+                   "all the same, leaving the backlog out until `topic_since` is set: while the subscription exists, quiet or wake, that keeps "
                    "your cursor, only sets wake and ignores the backlog; after a drop it brings back up to 20 posts, those you had already received "
                    "among them, which section 4 neither records nor files again.")
 START_WAKE_STEP = ("5. `subscribe {channel: \"<channel>\", wake: true}`, so that every post rings your doorbell, and write the time of this call into "
@@ -5367,7 +5367,7 @@ def test_docs_checks_catch_each_pinned_regression(d):
         # post delivered again never filed a second time; fix round 1 of the fourth cycle (rulings R24 to R26) for the record, the topic and own posts
         ("the backlog left off the subscribe after a join", "wake: true, backlog: 20}` at once all the same,", "wake: true}` at once all the same,",
          "docs: step 1 of section 3 of CLAUDE.md gives John's line"),
-        ("the backlog after a join taken before the topic's first subscribe", " all the same, leaving the backlog out until step 5 has set `topic_since`:",
+        ("the backlog after a join taken before the topic's first subscribe", " all the same, leaving the backlog out until `topic_since` is set:",
          " all the same:", "docs: step 1 of section 3 of CLAUDE.md gives John's line"),
         ("the backlog at a fresh context taken before the topic's first subscribe",
          "; while steward-state.json holds no `topic_since`, this call stands as your topic's first subscribe: leave the backlog out, and write its time "
