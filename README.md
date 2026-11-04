@@ -81,7 +81,7 @@ Every harness starts its own `agent-mail mcp` process over stdio. It has seven t
 - `receive {me, max_bytes?}`: delivers your waiting mail. Pass your own agent-deck session name as `me`; any other name is refused before anything is claimed.
 - `pending {}`: one line about what waits, delivering nothing.
 - `subscribe {channel, wake?, backlog?, write?}` and `unsubscribe {channel}`: name the channel without its `+`. `write` makes the channel a write target.
-- `channels {}`: the channels with their purposes, recent posts and listed subscribers, then the known sessions, where your posts go, your binding, and how the mailbox is watched.
+- `channels {}`: the channels with their purposes, recent posts and listed subscribers, then the known sessions, where your posts go, your binding, and how the mailbox is watched. The known-sessions line shows at most 64 characters of a peer's host.
 - `reread {me, id?, last?}`: shows one delivered item again from your archive, or with `last: true` your last batch. It changes nothing. It takes `me` and the reader lock as `receive` does.
 
 Results are text only. Their first line names your binding, `agent-mail (bound name <you>@<host>): ...`, or for a delivery a list line that names every item. A delivery then has a banner, and each item sits between frame lines that carry a random token, so a body cannot fake a frame:

@@ -2502,6 +2502,7 @@ MAX_LINE = 8 << 20
 
 NO_IDENTITY = "agent-mail has no session name: set AGENT_MAIL_NAME or start the server with --name; agent-deck sessions get one automatically"
 CHANNELS_MAX = 8000
+PEER_HOST_MAX, PEER_STAMP_MAX = 64, 32  # characters of a peer's host and of its checked stamp that the known sessions show
 
 
 class BadArguments(Exception):
@@ -2554,6 +2555,11 @@ def fs_type(d):
     return kind
 
 
+def clip(text, limit):
+    """TEXT, or when it is longer than LIMIT characters its first LIMIT and then [cut]."""
+    return text if len(text) <= limit else text[:limit] + "[cut]"
+
+
 def channels_text(d, name, settings, now):
     """The channels tool's text, which the CLI's channels also prints: each channel with its
     purpose, recent posts and listed subscribers, NAME's marks (wake or quiet, write, pinned),
@@ -2561,7 +2567,9 @@ def channels_text(d, name, settings, now):
     go, then the binding, the host, the watch backend and whether the mailbox is on NFS. At
     most 8 KB: a peer can make the channels and the known sessions long, so when the text would
     pass that, they are cut at a line and a marker says so, and NAME's own lines, where its
-    posts go and its binding, follow the marker whole."""
+    posts go and its binding, follow the marker whole. No one member record can fill that: the
+    known sessions show at most 64 characters of a peer's host and 32 of its checked stamp, each
+    then [cut]."""
     state = load_state(d, name) if name else None
     subs = effective_subs(state, settings, now) if name else {}
     chans = list_channels(d, now)
@@ -2574,8 +2582,11 @@ def channels_text(d, name, settings, now):
         lines.append(f"+{c['name']}{mark}: {c['purpose']}; {c['posts_7d']} post(s) in 7 days; last post {c['last_post'] or 'none'}; "
                      f"subscribers listed: {', '.join(c['subscribers']) or 'none'}")
     known = members(d)
+    # A peer wrote each record. member_at bounds its size and takes checked only as a stamp, but puts no limit on host, so the line
+    # bounds both: one record cannot push every other session into the cut below.
     lines.append("known sessions (approximate; member records are written by peers): "
-                 + ("; ".join(f"{n} on {escape(r['host'])}, checked {clean_line(r['checked'])}" for n, r in sorted(known.items())) or "none"))
+                 + ("; ".join(f"{n} on {clip(escape(r['host']), PEER_HOST_MAX)}, checked {clip(clean_line(r['checked']), PEER_STAMP_MAX)}"
+                              for n, r in sorted(known.items())) or "none"))
     own = []
     if name:
         has_targets = any(sub["write"] for sub in subs.values())
@@ -4111,25 +4122,43 @@ def section_channels(t):
     t.ok("error" not in answer and "; last post 99991231T235959.999999Z; " in answer["result"]["content"][0]["text"],
          "the MCP channels tool answers it normally, not with -32603")
 
-    # A peer's member record may be 64 KiB and its host is shown, so one record can fill the 8 KB. The cut takes lines of the
-    # channels and the known sessions; the two lines that are the session's own, where its posts go and its binding, follow it.
+    # A peer's member record may be 64 KiB and its host is shown, so one record could fill the 8 KB, and the cut would take every other
+    # session out of the listing with it. The known sessions show at most 64 characters of a host and 32 of a checked stamp, then [cut].
     crowded = t.box("crowded")
     create_channel(crowded, "fleet", "fleet-wide notices")
     touch_member(crowded, "nix", [], now)
-    t.mk(member_path(crowded, "far"), json.dumps({"v": 2, "name": "far", "host": "h" * 9000, "checked": utc(now), "subs": []}))
+    stamp, fine, euro = utc(now), utc(now, micro=True), chr(0x20AC)  # the euro sign is three UTF-8 bytes, and each shows as four characters
+    for peer, host, checked in (("far", "h" * 9000, stamp), ("edge", "e" * 64, stamp), ("over", "o" * 65, stamp), ("wide", euro * 40, stamp),
+                                ("micro", "m", fine), ("stamped", "x", "9" * 500)):
+        t.mk(member_path(crowded, peer), json.dumps({"v": 2, "name": peer, "host": host, "checked": checked, "subs": []}))
     mine = load_state(crowded, "pi")
     subscribe(crowded, "pi", mine, s, "fleet", write=True, now=now)
     save_state(crowded, "pi", mine)
-    cut = channels_text(crowded, "pi", s, now)
-    rows = cut.splitlines()
+    text = channels_text(crowded, "pi", s, now)
+    rows = text.splitlines()
     t.ok(rows[-2] == "posts go to: +fleet" and rows[-1].startswith("bound name pi; "),
          "a peer's very long host does not hide the session's own lines: where its posts go, then its binding")
-    t.ok("\n[... the rest is cut at 8 KB]\n" in cut and "h" * 100 not in cut and len(cut.encode()) <= CHANNELS_MAX
-         and rows[0].startswith("agent-mail (bound name pi@") and rows[1].startswith("+fleet (you, quiet, write):"),
-         "the cut takes the known sessions, says so before the session's own lines, keeps the channels above it and stays within 8 KB")
-    bare = channels_text(crowded, None, s, now).splitlines()
-    t.ok(bare[-2] == "[... the rest is cut at 8 KB]" and bare[-1].startswith("bound name none; ") and not any(r.startswith("posts go to") for r in bare),
-         "without a name the binding line is still last after the cut, and there is no posts line")
+
+    def roster_of(listing_text):
+        """The entries of the known sessions line, in order; one empty entry when the listing has no such line."""
+        line = next((r for r in listing_text.splitlines() if r.startswith("known sessions")), "")
+        return line.partition("): ")[2].split("; ")
+
+    wide = escape(euro * 40)[:64]
+    t.ok(roster_of(text) == [f"edge on {'e' * 64}, checked {stamp}", f"far on {'h' * 64}[cut], checked {stamp}", f"micro on m, checked {fine}",
+                             f"nix on {escape(HOST)}, checked {stamp}", f"over on {'o' * 64}[cut], checked {stamp}", f"wide on {wide}[cut], checked {stamp}"],
+         "a peer's 9000-character host leaves every session in the known sessions: a host of 64 characters whole, a longer one as its first 64 "
+         "escaped characters then [cut], a stamp whole, and a record whose stamp is 500 characters, which member_at refuses, not listed")
+    t.ok("[... the rest is cut" not in text, "the long host no longer forces the cut at 8 KB")
+    # member_at takes only a stamp for checked, at most 23 characters, so no record gets a longer one to the line. The line's own bound is
+    # checked with members standing in for a record that did.
+    real_members = members
+    t.patch("members", lambda d: {"far": {"v": 2, "name": "far", "host": "x", "checked": "9" * 500, "subs": []},
+                                  "nix": {"v": 2, "name": "nix", "host": "y", "checked": stamp, "subs": []}})
+    unchecked = channels_text(crowded, "pi", s, now)
+    t.patch("members", real_members)
+    t.ok(roster_of(unchecked) == [f"far on x, checked {'9' * 32}[cut]", f"nix on y, checked {stamp}"],
+         "a checked stamp of 500 characters that gets past member_at is shown as its first 32 characters then [cut], and the next session is listed")
     # Forty channels of 270 bytes each, so that the cut falls between channel lines, at limits from one that is under the session's
     # own lines up to nearly 9000. A listing's size depends on the host's name, so no limit here may depend on where a line ends.
     forty = t.box("forty")
@@ -4148,6 +4177,14 @@ def section_channels(t):
     t.ok(all(len(out.encode()) <= limit and out.endswith(f"\n{marker}\n{own}") and all(r.endswith("subscribers listed: none") for r in out.splitlines()[1:-3])
              for limit, out in cuts.items() if limit >= floor),
          "whatever the limit, the text fits in it when the marker and the session's own lines do, and the cut leaves whole channel lines")
+    full = channels_text(forty, "pi", s, now)
+    rows = full.splitlines()
+    t.ok(full.endswith(f"\n{marker}\n{own}") and len(full.encode()) <= CHANNELS_MAX
+         and rows[0].startswith("agent-mail (bound name pi@") and rows[1].startswith("+t00: "),
+         "at 8 KB the cut takes the channels that do not fit, says so before the session's own lines, keeps the first channels above it and fits")
+    bare = channels_text(forty, None, s, now).splitlines()
+    t.ok(bare[-2] == marker and bare[-1].startswith("bound name none; ") and not any(r.startswith("posts go to") for r in bare),
+         "without a name the binding line is still last after the cut, and there is no posts line")
 
 
 def section_receive(t):
