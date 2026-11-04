@@ -4604,7 +4604,8 @@ START_REOPEN_SENTENCE = "Then remove `closed` from steward-state.json if a close
 # deadline under an id the new topic reuses would have section 4 apply that default, mail DEFAULT <q-id> and record it in the DECISIONS.md that step 4 keeps;
 # and the nudges and offers per worker go, for a clean slate. nag, last_summary_post and last_digest stay.
 START_RESET_SENTENCE = ("If steward-state.json holds `closed`, then before anything else set `next_q` to 1 and `relays_suspended` to false, and remove the "
-                        "nudges and offers per worker, the default deadlines, `note_reminder_post` and `last_summary_date`, which were the closed topic's, but "
+                        "nudges and offers per worker, the default deadlines, `note_reminder_post`, `last_summary_date` and `topic_since`, which were the "
+                        "closed topic's, but "
                         "keep `closed` until step 3 has written TOPIC.md, so that your channel stays the one John named.")  # section 3's opening, after START_NAMING_SENTENCE
 START_FILES_STEP = ("4. Create `LEDGER.md` from the template in section 11, and create or keep `DECISIONS.md`, `done.md`, `log/` and `metrics/`, which a closed "
                     "topic leaves (section 14). If John seeded `BACKLOG.md`, each of its items becomes an `unclaimed` row.")
@@ -4662,33 +4663,46 @@ TO_RULE = ("Name `to` on every send, the recipient for direct mail and `+<channe
 # steward.
 # John's decision 34 (2026-11-03, the fourth cycle): the subscribe after a join he types (step 1 of section 3), the one at every fresh context (step 2 of
 # section 13) and the one section 8 makes when the census says the subscription may be gone carry backlog: 20, the most the tool takes. agent-mail
-# ignores a backlog while the subscription exists and, for a new one, leaves the channel's 20 newest posts unread, so a dropped subscription comes back
-# with them, the posts already filed among them, and loses only an older post not yet received. Step 3 of section 4, pinned whole, files a post
-# delivered again once, by its id in RECEIVED.log, unless no day's log names it filed (a reset between its first delivery and its filing). Step 5 of
-# section 3, pinned whole, is the subscribe that starts a topic and carries no backlog, since a channel used before keeps its old posts for 30 days.
-# The README's paragraph says what comes back and what is lost.
+# ignores a backlog while the subscription exists and, for a new one, leaves the channel's 20 newest posts unread, the steward's own among them, which
+# receive never delivers to their sender, so a dropped subscription comes back with the rest of them, those already received among them, and loses only
+# an older post not yet received. Fix round 1 of the fourth cycle (rulings R24 to R26, after the review's Important 1 and the audit's Medium, which
+# showed that a test by the day logs, kept 14 days, files a post up to 30 days old a second time): RECEIVED.log alone, never trimmed while a topic
+# runs, says whether a post was delivered before. Step 3 of section 4, pinned whole, records each id once, gives a post delivered again a `replay` line
+# and never files it again, and does not file a post stamped before `topic_since`, which a backlog on a quiet channel can bring from before the topic.
+# Step 4 of section 13, pinned whole, files an id appended since last_turn that no log from its own date on names, a `replay` line aside, so that a
+# reset between a post's first delivery and its filing still files it once. Step 5 of section 3, pinned whole, is the subscribe that starts a topic:
+# no backlog, and it writes `topic_since` at once; until it has, the other two backlogs are left out (the review's Minor 2). The README's paragraph
+# says what comes back and what is lost.
 START_JOIN_STEP = ("1. Join the mailbox as `<steward>` with the mailbox join command, as the agent-mail skill says, unless `channels` already shows you "
                    "bound as `<steward>`. Under agent-mail 2.2's mailbox skill a join line is the whole configuration, so John's line for you carries "
                    "`++<channel>`, as in `/mailbox <steward> ++<channel>`: a re-join whose line leaves `+<channel>` out drops your subscription, and a "
-                   "dropped one restarts when you subscribe again, with the channel's 20 newest posts and without any older post you had not yet "
-                   "received. After any join he types in your pane, `subscribe {channel: \"<channel>\", wake: true, backlog: 20}` at once all the "
-                   "same: while the subscription exists, quiet or wake, that keeps your cursor, only sets wake and ignores the backlog; after a drop it "
-                   "brings back up to 20 posts, those you had already filed among them, which section 4 files once.")
-START_WAKE_STEP = ("5. `subscribe {channel: \"<channel>\", wake: true}`, so that every post rings your doorbell: no backlog here, since a channel used "
-                   "before keeps its old posts for 30 days and none of them is this topic's.")
-TURN_RECEIVE_STEP = ("3. `receive {me: \"<steward>\"}` until nothing more waits. After each batch, append `<UTC> <id>` for each delivered id to "
-                     "`RECEIVED.log`, then file each item (section 5), and finish filing before the next `receive`: `reread {me: \"<steward>\", last: "
-                     "true}` recovers only the last batch. Never copy a body. An id that `RECEIVED.log` already holds when the batch arrives is a post "
-                     "delivered again, which the backlog of a subscribe after a drop does (sections 3, 8 and 13): append it all the same, write "
-                     "`<time> replay <id>` in the day's log, and file it only if no day's log names it as filed, which a reset between its first "
-                     "delivery and its filing leaves, so that a post is filed once.")
-RESET_SUBSCRIBE_STEP = ("2. Call `channels`, then `subscribe {channel: \"<channel>\", wake: true, backlog: 20}` whether or not it lists you: runtime "
-                        "subscriptions live on the host, and a re-join may have left `+<channel>` quiet or dropped it (section 3). While the subscription "
-                        "exists, subscribing again keeps your cursor, only sets wake and ignores the backlog. A dropped one restarts now with the channel's "
-                        "20 newest posts, those you had already filed among them, which step 3 of section 4 files once, and without any older post you had "
-                        "not yet received.")
+                   "dropped one restarts when you subscribe again, with the channel's 20 newest posts, your own aside, and without any older post you "
+                   "had not yet received. After any join he types in your pane, `subscribe {channel: \"<channel>\", wake: true, backlog: 20}` at once "
+                   "all the same, leaving the backlog out until step 5 has set `topic_since`: while the subscription exists, quiet or wake, that keeps "
+                   "your cursor, only sets wake and ignores the backlog; after a drop it brings back up to 20 posts, those you had already received "
+                   "among them, which section 4 neither records nor files again.")
+START_WAKE_STEP = ("5. `subscribe {channel: \"<channel>\", wake: true}`, so that every post rings your doorbell, and write the time of this call into "
+                   "steward-state.json at once as `topic_since`: no backlog here, since a channel used before keeps its old posts for 30 days and none "
+                   "of them is this topic's.")
+TURN_RECEIVE_STEP = ("3. `receive {me: \"<steward>\"}` until nothing more waits. After each batch, append `<UTC> <id>` to `RECEIVED.log` for each "
+                     "delivered id it does not already hold, then file each item (section 5), and finish filing before the next `receive`: `reread "
+                     "{me: \"<steward>\", last: true}` recovers only the last batch. Never copy a body. The backlog of a subscribe after a drop "
+                     "(sections 3, 8 and 13) delivers posts again: one whose id `RECEIVED.log` already held gets a `<time> replay <id>` line in the "
+                     "day's log and is neither recorded nor filed again, since step 4 of section 13 files it if a reset cut off its first filing; one "
+                     "stamped, by the stamp in its id, before `topic_since` is from before your topic: it gets a `<time> before-topic <id>` line and "
+                     "is not filed.")
+RESET_SUBSCRIBE_STEP = ("2. Call `channels`, then `subscribe {channel: \"<channel>\", wake: true, backlog: 20}` whether or not it lists you, leaving the "
+                        "backlog out while steward-state.json holds no `topic_since`: runtime subscriptions live on the host, and a re-join may have left "
+                        "`+<channel>` quiet or dropped it (section 3). While the subscription exists, subscribing again keeps your cursor, only sets wake "
+                        "and ignores the backlog. A dropped one restarts now with the channel's 20 newest posts, your own aside and those you had already "
+                        "received among them, which step 3 of section 4 neither records nor files again, and without any older post you had not yet "
+                        "received.")
 RESET_RECEIVE_STEP = ("3. `receive` until nothing more waits: the mail that arrived while you were away is all still delivered, and so are the posts, "
-                      "or the channel's 20 newest of them when a re-join dropped the subscription (step 2).")
+                      "or only those among the channel's 20 newest when a re-join dropped the subscription (step 2).")
+RESET_RECONCILE_STEP = ("4. Reconcile. Each id appended to `RECEIVED.log` since `last_turn`, by the `<UTC>` on its line, that neither the log of its own "
+                        "UTC date nor a later one names, a `replay` line aside, was never filed: `reread {me: \"<steward>\", id: \"<id>\"}` and file it. An "
+                        "`intent` with no `sent` line may still have its file in the mailbox, which the census matches to it (section 11), so run the "
+                        "signals call before you dispute anything.")
 # Fix round 1 of the third cycle compared posts-since-last, which counts posts in +<channel> alone, with the posts on +<channel> the steward received,
 # not with every post it received, since under agent-mail 2.2 the +fleet notices are received posts too and could hide a lost subscription. Fix round 2
 # (ruling R12) pins the sentence whole, as the only one of section 8 that says the subscription may be gone.
@@ -4715,8 +4729,8 @@ INVITE_OPTION = ("It also says, as optional, that under agent-mail 2.2 a join li
 README_JOIN_LINE = ("If you join a steward to the mailbox again, the line depends on the installed mailbox skill (John's decision 32). Under agent-mail 2.2's "
                     "skill a join line is the whole configuration, so type `/mailbox conductor-ingest-steward ++ingest`, or `/mailbox conductor-nix-steward "
                     "++nix-config`: a plain `/mailbox conductor-ingest-steward` drops the steward's subscription to `+ingest`, and the join report names "
-                    "what it dropped; the steward's next subscribe asks for a backlog of 20, so the channel's 20 newest posts come back and only an older "
-                    "post it had not yet received is lost (John's decision 34). Under 2.1's skill the line is `/mailbox conductor-ingest-steward`. Either "
+                    "what it dropped; the steward's next subscribe asks for a backlog of 20, so the channel's 20 newest posts, its own aside, come back and "
+                    "only an older post it had not yet received is lost (John's decision 34). Under 2.1's skill the line is `/mailbox conductor-ingest-steward`. Either "
                     "way the steward subscribes itself with wake when it starts a topic, at once after any join you type in its pane, and again at every "
                     "fresh context, with the backlog in the last two (CLAUDE.md sections 3 and 13).")
 
@@ -4806,28 +4820,33 @@ def test_claude_md_keeps_its_channel_across_a_re_join(d):
     others = [line for line in lines if "++<channel>" in line and not line.startswith("1. ")]
     ok(steps == [START_JOIN_STEP] and others == [],
        "docs: step 1 of section 3 of CLAUDE.md gives John's line, which carries ++<channel> under agent-mail 2.2's mailbox skill, says that a dropped "
-       "subscription restarts with the channel's 20 newest posts and without any older post not yet received, and subscribes with wake and a backlog "
-       f"of 20 at once after any join he types, as pinned, the only line of the section that names ++<channel> (got {without_question_marks(repr(steps + others))})")
+       "subscription restarts with the channel's 20 newest posts, its own aside, and without any older post not yet received, and subscribes with "
+       "wake and a backlog of 20 at once after any join he types, the backlog left out until topic_since is set, as pinned, the only line of the "
+       f"section that names ++<channel> (got {without_question_marks(repr(steps + others))})")
     lines = claude_section(t, 13).splitlines()
     for step, pinned, what in (("2. ", RESET_SUBSCRIBE_STEP, "subscribes with wake and a backlog of 20 at every fresh context whether or not channels "
-                                "lists the steward, keeps the cursor only while the subscription exists, and takes back the channel's 20 newest posts "
-                                "after a drop"),
-                               ("3. ", RESET_RECEIVE_STEP, "delivers the posts that arrived meanwhile, or the channel's 20 newest of them when a re-join "
-                                "dropped the subscription")):
+                                "lists the steward, the backlog left out while topic_since is absent, keeps the cursor only while the subscription "
+                                "exists, and takes back the channel's 20 newest posts, its own aside, after a drop"),
+                               ("3. ", RESET_RECEIVE_STEP, "delivers the posts that arrived meanwhile, or only those among the channel's 20 newest when a "
+                                "re-join dropped the subscription")):
         found = [line for line in lines if line.startswith(step)]
         ok(found == [pinned], f"docs: step {step[0]} of section 13 of CLAUDE.md {what}, as pinned (got {without_question_marks(repr(found))})")
 
 
-def test_claude_md_files_a_post_delivered_again_once(d):
+def test_claude_md_takes_a_backlog_within_its_topic_and_files_each_post_once(d):
     t = claude_md()
     found = [line for line in claude_section(t, 3).splitlines() if line.startswith("5. ")]
     ok(found == [START_WAKE_STEP],
-       "docs: step 5 of section 3 of CLAUDE.md subscribes without a backlog when a topic starts, since a channel used before keeps its old posts, as "
-       f"pinned (got {without_question_marks(repr(found))})")
+       "docs: step 5 of section 3 of CLAUDE.md subscribes without a backlog when a topic starts, since a channel used before keeps its old posts, and "
+       f"writes topic_since at once, as pinned (got {without_question_marks(repr(found))})")
     found = [line for line in claude_section(t, 4).splitlines() if line.startswith("3. ")]
     ok(found == [TURN_RECEIVE_STEP],
-       "docs: step 3 of section 4 of CLAUDE.md files a post delivered again once, by its id in RECEIVED.log, unless no day's log names it filed, as "
-       f"pinned (got {without_question_marks(repr(found))})")
+       "docs: step 3 of section 4 of CLAUDE.md records each id in RECEIVED.log once, never files a post delivered again a second time, and files no "
+       f"post stamped before topic_since, as pinned (got {without_question_marks(repr(found))})")
+    found = [line for line in claude_section(t, 13).splitlines() if line.startswith("4. ")]
+    ok(found == [RESET_RECONCILE_STEP],
+       "docs: step 4 of section 13 of CLAUDE.md files an id appended since last_turn only when no log from its own date on names it, a replay line "
+       f"aside, as pinned (got {without_question_marks(repr(found))})")
 
 
 def test_claude_md_compares_posts_since_last_with_its_own_channel(d):
@@ -5082,7 +5101,7 @@ DOCS_CHECKS = (test_claude_md, test_claude_md_headings_are_in_order, test_claude
                test_claude_md_keeps_the_question_line_inside_the_pane, test_claude_md_takes_its_channel_from_topic_md_or_from_john, test_claude_md_answers_agent_decks_recovery_turn,
                test_claude_md_starts_a_new_topic_afresh_after_a_close, test_claude_md_wakes_nothing_after_a_close, test_claude_md_names_the_resets_that_lose_nothing,
                test_claude_md_takes_other_channels_as_notices, test_claude_md_times_only_posts_on_the_channel, test_claude_md_names_to_on_every_send,
-               test_claude_md_keeps_its_channel_across_a_re_join, test_claude_md_files_a_post_delivered_again_once,
+               test_claude_md_keeps_its_channel_across_a_re_join, test_claude_md_takes_a_backlog_within_its_topic_and_files_each_post_once,
                test_claude_md_invites_with_the_optional_write_target, test_claude_md_compares_posts_since_last_with_its_own_channel,
                test_claude_md_leaves_the_join_its_own_subscriptions,
                test_shared_and_heartbeat,
@@ -5276,7 +5295,10 @@ def test_docs_checks_catch_each_pinned_regression(d):
          "docs: section 3 of CLAUDE.md removes closed when a new topic starts"),
         ("a new topic's start that keeps the closed topic's suspended relays", " and `relays_suspended` to false,", ",",
          "docs: section 3 of CLAUDE.md removes closed when a new topic starts"),
-        ("a new topic's start that keeps the closed topic's reminder and summary date", ", `note_reminder_post` and `last_summary_date`, which", ", which",
+        ("a new topic's start that keeps the closed topic's reminder and summary date", ", `note_reminder_post`, `last_summary_date` and `topic_since`, "
+         "which", ", `topic_since`, which", "docs: section 3 of CLAUDE.md removes closed when a new topic starts"),
+        # fix round 1 of the fourth cycle (ruling R25): a new topic's start that keeps the closed topic's topic_since
+        ("a new topic's start that keeps the closed topic's topic_since", ", `last_summary_date` and `topic_since`, which", " and `last_summary_date`, which",
          "docs: section 3 of CLAUDE.md removes closed when a new topic starts"),
         # the cycle's review, Important 2: the default deadlines, and the nudges and offers per worker
         ("a new topic's start that keeps the closed topic's default deadlines", "remove the nudges and offers per worker, the default deadlines,",
@@ -5320,8 +5342,8 @@ def test_docs_checks_catch_each_pinned_regression(d):
         ("a plain re-join line in section 3", "so John's line for you carries `++<channel>`, as in `/mailbox <steward> ++<channel>`:",
          "so John's line for you is `/mailbox <steward>`:", "docs: step 1 of section 3 of CLAUDE.md gives John's line"),
         # fix round 1 of the third cycle: both subscribes unconditional, with wake
-        ("the subscribe after John's join left to the join report", "wake: true, backlog: 20}` at once all the same:",
-         "wake: true, backlog: 20}` when the join report names `+<channel>` as dropped:", "docs: step 1 of section 3 of CLAUDE.md gives John's line"),
+        ("the subscribe after John's join left to the join report", "wake: true, backlog: 20}` at once all the same,",
+         "wake: true, backlog: 20}` when the join report names `+<channel>` as dropped,", "docs: step 1 of section 3 of CLAUDE.md gives John's line"),
         ("step 2 of section 13 subscribing only when channels does not list the steward", "whether or not it lists you", "if it does not list you",
          "docs: step 2 of section 13 of CLAUDE.md subscribes with wake"),
         ("step 2 of section 13 subscribing without wake", "then `subscribe {channel: \"<channel>\", wake: true, backlog: 20}` whether",
@@ -5329,18 +5351,25 @@ def test_docs_checks_catch_each_pinned_regression(d):
         # fix round 2 of the third cycle (ruling R11): a dropped subscription restarts without the posts not yet received; John's decision 34
         # (2026-11-03) brings the channel's 20 newest back
         ("section 3 claiming that subscribing again restores a dropped subscription whole",
-         "a dropped one restarts when you subscribe again, with the channel's 20 newest posts and without any older post you had not yet received.",
-         "subscribing again restores it whole.", "docs: step 1 of section 3 of CLAUDE.md gives John's line"),
+         "a dropped one restarts when you subscribe again, with the channel's 20 newest posts, your own aside, and without any older post you had not "
+         "yet received.", "subscribing again restores it whole.", "docs: step 1 of section 3 of CLAUDE.md gives John's line"),
         ("step 2 claiming that the cursor is kept after a drop", "While the subscription exists, subscribing again keeps your cursor, only sets wake "
-         "and ignores the backlog. A dropped one restarts now with the channel's 20 newest posts, those you had already filed among them, which step 3 "
-         "of section 4 files once, and without any older post you had not yet received.", "Subscribing again keeps your cursor and only sets wake.",
-         "docs: step 2 of section 13 of CLAUDE.md subscribes with wake"),
-        ("step 3 promising every post after a drop", ", and so are the posts, or the channel's 20 newest of them when a re-join dropped the subscription "
-         "(step 2).", ", and so are the posts.", "docs: step 3 of section 13 of CLAUDE.md delivers the posts"),
+         "and ignores the backlog. A dropped one restarts now with the channel's 20 newest posts, your own aside and those you had already received "
+         "among them, which step 3 of section 4 neither records nor files again, and without any older post you had not yet received.",
+         "Subscribing again keeps your cursor and only sets wake.", "docs: step 2 of section 13 of CLAUDE.md subscribes with wake"),
+        ("step 3 promising every post after a drop", ", and so are the posts, or only those among the channel's 20 newest when a re-join dropped the "
+         "subscription (step 2).", ", and so are the posts.", "docs: step 3 of section 13 of CLAUDE.md delivers the posts"),
         # John's decision 34 (2026-11-03): a backlog of 20 on each subscribe that may restart a dropped subscription, none on the topic's first, and a
-        # post delivered again filed once
-        ("the backlog left off the subscribe after a join", "wake: true, backlog: 20}` at once all the same:", "wake: true}` at once all the same:",
+        # post delivered again never filed a second time; fix round 1 of the fourth cycle (rulings R24 to R26) for the record, the topic and own posts
+        ("the backlog left off the subscribe after a join", "wake: true, backlog: 20}` at once all the same,", "wake: true}` at once all the same,",
          "docs: step 1 of section 3 of CLAUDE.md gives John's line"),
+        ("the backlog after a join taken before the topic's first subscribe", " all the same, leaving the backlog out until step 5 has set `topic_since`:",
+         " all the same:", "docs: step 1 of section 3 of CLAUDE.md gives John's line"),
+        ("the backlog at a fresh context taken before the topic's first subscribe",
+         " whether or not it lists you, leaving the backlog out while steward-state.json holds no `topic_since`:", " whether or not it lists you:",
+         "docs: step 2 of section 13 of CLAUDE.md subscribes with wake"),
+        ("a dropped subscription promised the steward's own posts back", "with the channel's 20 newest posts, your own aside, and without",
+         "with the channel's 20 newest posts and without", "docs: step 1 of section 3 of CLAUDE.md gives John's line"),
         ("step 2 of section 13 subscribing without the backlog", "then `subscribe {channel: \"<channel>\", wake: true, backlog: 20}` whether",
          "then `subscribe {channel: \"<channel>\", wake: true}` whether", "docs: step 2 of section 13 of CLAUDE.md subscribes with wake"),
         ("section 8 subscribing again without the backlog", "subscribe again with `wake: true` and `backlog: 20` if you are not on the list.",
@@ -5348,12 +5377,22 @@ def test_docs_checks_catch_each_pinned_regression(d):
         ("the topic's first subscribe given a backlog", "5. `subscribe {channel: \"<channel>\", wake: true}`, so that every post rings your doorbell",
          "5. `subscribe {channel: \"<channel>\", wake: true, backlog: 20}`, so that every post rings your doorbell",
          "docs: step 5 of section 3 of CLAUDE.md subscribes without a backlog"),
-        ("the replay rule dropped from section 4", " An id that `RECEIVED.log` already holds when the batch arrives is a post delivered again, which the "
-         "backlog of a subscribe after a drop does (sections 3, 8 and 13): append it all the same, write `<time> replay <id>` in the day's log, and file "
-         "it only if no day's log names it as filed, which a reset between its first delivery and its filing leaves, so that a post is filed once.", "",
-         "docs: step 3 of section 4 of CLAUDE.md files a post delivered again once"),
-        ("a post delivered again filed again", "and file it only if no day's log names it as filed, which a reset between its first delivery and its "
-         "filing leaves, so that a post is filed once.", "and file it again.", "docs: step 3 of section 4 of CLAUDE.md files a post delivered again once"),
+        ("the topic's first subscribe that writes no topic_since", ", and write the time of this call into steward-state.json at once as `topic_since`:",
+         ":", "docs: step 5 of section 3 of CLAUDE.md subscribes without a backlog"),
+        ("the replay rule dropped from section 4", " The backlog of a subscribe after a drop (sections 3, 8 and 13) delivers posts again: one whose id "
+         "`RECEIVED.log` already held gets a `<time> replay <id>` line in the day's log and is neither recorded nor filed again, since step 4 of section "
+         "13 files it if a reset cut off its first filing; one stamped, by the stamp in its id, before `topic_since` is from before your topic: it gets "
+         "a `<time> before-topic <id>` line and is not filed.", "", "docs: step 3 of section 4 of CLAUDE.md records each id in RECEIVED.log once"),
+        ("a post delivered again filed again", "and is neither recorded nor filed again, since", "and is recorded and filed again, since",
+         "docs: step 3 of section 4 of CLAUDE.md records each id in RECEIVED.log once"),
+        ("every delivered id recorded again", "append `<UTC> <id>` to `RECEIVED.log` for each delivered id it does not already hold,",
+         "append `<UTC> <id>` to `RECEIVED.log` for each delivered id,", "docs: step 3 of section 4 of CLAUDE.md records each id in RECEIVED.log once"),
+        ("a post from before the topic filed", ": it gets a `<time> before-topic <id>` line and is not filed.", ": file it as any other.",
+         "docs: step 3 of section 4 of CLAUDE.md records each id in RECEIVED.log once"),
+        ("the reconcile taking a replay line for a filing", " names, a `replay` line aside, was never filed:", " names was never filed:",
+         "docs: step 4 of section 13 of CLAUDE.md files an id appended since last_turn"),
+        ("the reconcile reading the log of the line's own date alone", "that neither the log of its own UTC date nor a later one names,",
+         "that the log of its own UTC date does not name,", "docs: step 4 of section 13 of CLAUDE.md files an id appended since last_turn"),
         # John's decision 33 (2026-11-02): the invitation's !+<channel> stays optional, and WORKER.md's rule stands
         ("the invitation's !+<channel> made a requirement", "It also says, as optional, that", "It also says that",
          "docs: step 8 of section 3 of CLAUDE.md has the invitation mention"),
@@ -5554,9 +5593,11 @@ def test_docs_checks_catch_each_regression_in_the_readme(d):
         ("the README's subscribe after a join left out", ", at once after any join you type in its pane,", ",", 1,
          "docs: steward/README.md gives a steward's join line in one paragraph alone"),
         # fix round 2 of the third cycle (ruling R11) said the loss a plain re-join causes plainly; John's decision 34 (2026-11-03) added the recovery
-        ("the README's recovery clause left out", "; the steward's next subscribe asks for a backlog of 20, so the channel's 20 newest posts come back and "
-         "only an older post it had not yet received is lost (John's decision 34)", "", 1,
+        ("the README's recovery clause left out", "; the steward's next subscribe asks for a backlog of 20, so the channel's 20 newest posts, its own "
+         "aside, come back and only an older post it had not yet received is lost (John's decision 34)", "", 1,
          "docs: steward/README.md gives a steward's join line in one paragraph alone"),
+        ("the README promising the steward's own posts back", "the channel's 20 newest posts, its own aside, come back", "the channel's 20 newest posts come back",
+         1, "docs: steward/README.md gives a steward's join line in one paragraph alone"),
         ("the README's backlog left out of the fresh-context sentence", ", with the backlog in the last two (CLAUDE.md sections 3 and 13).",
          " (CLAUDE.md sections 3 and 13).", 1, "docs: steward/README.md gives a steward's join line in one paragraph alone"),
         # fix round 2 of the third cycle (ruling R15): row 6 expects +fleet under agent-mail 2.2

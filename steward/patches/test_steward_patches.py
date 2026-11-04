@@ -7,9 +7,9 @@ STEWARD_PATCHED_BRIDGE the bridge tests are skipped. Every fixture lives in a
 temporary directory, the mailbox included. Discord delivery, discord_qna's
 delivery and every command the scanner runs are replaced by recorders, so no
 test reaches agent-deck, Discord, ~/Mailbox, or the scanner's own state.json
-and task log. The question-line tests import the discord_qna beside the
-scanner, which the scanner of 2026-11-03 parses every Claude pane with; its
-parser opens no file and no database.
+and task log. The question-line and MCP-bullet tests import the discord_qna
+beside the scanner, which the scanner of 2026-11-03 parses every Claude pane
+with; its parser opens no file and no database.
 The bridge is imported with its paths in an empty temporary directory
 (load_bridge), and its Discord bot is built without logging in, with a fixed
 list of conductors and recorders for agent-deck and Discord's API.
