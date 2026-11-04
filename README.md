@@ -180,7 +180,7 @@ What crosses hosts: messages, posts, broadcasts, channel directories with their 
 
 What stays on its host: claims, archive copies, rejected files and temporary files (nix's `.stignore` keeps them local); your reader state in `~/.local/state/agent-mail/` (seen sets, runtime subscriptions, the last batch); the reader lock and doorbell slots in `/tmp/agent-mail-<uid>`; `~/.config/agent-mail/config.json`; and the pause file.
 
-- Each name still has exactly one reader, on one host. If a member record shows your name read on another host within 10 minutes, `receive` and `doctor` warn: "another reader of <you> appears active on <host>".
+- Each name still has exactly one reader, on one host. If a member record shows your name read on another host within 10 minutes, `receive` and `doctor` warn: "another reader of <you> appears active on <host>". A host over 64 characters is shown as its first 64 characters and `[cut]`.
 - A claim records the host that made it, so a reader checks a claim's PID only on the claim's own host.
 - A host that was offline delivers its mail when it reconnects, except direct mail stamped more than 14 days earlier and still unclaimed, which the readers on any host prune (section 4). Posts that arrive late are still delivered, because readers track the ids they have seen, not a position.
 - Syncthing's temporary files are hidden names, so readers ignore them. A conflict copy is never mail: readers report it once, and `doctor` lists it.

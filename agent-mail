@@ -2599,7 +2599,11 @@ def channels_text(d, name, settings, now):
     if len(text.encode()) + 1 + len(tail.encode()) > CHANNELS_MAX:
         cut = "\n[... the rest is cut at 8 KB]"
         room = max(CHANNELS_MAX - len(cut.encode()) - 1 - len(tail.encode()), 0)
-        text = text.encode()[:room].decode("utf-8", "ignore").rsplit("\n", 1)[0] + cut
+        data = text.encode()
+        kept = data[:room]
+        if data[room:room + 1] not in (b"", b"\n"):  # the room ends inside a line, which does not fit; a line that ends at the room does
+            kept = kept.rpartition(b"\n")[0]
+        text = kept.decode("utf-8", "ignore") + cut
     return text + "\n" + tail
 
 
@@ -4191,6 +4195,40 @@ def section_channels(t):
     bare = channels_text(forty, None, s, now).splitlines()
     t.ok(bare[-2] == marker and bare[-1].startswith("bound name none; ") and not any(r.startswith("posts go to") for r in bare),
          "without a name the binding line is still last after the cut, and there is no posts line")
+    # The room is the limit less the marker and the session's own lines, in bytes. A line that ends where the room ends fits, and is kept: the
+    # cut drops only a line the room ends inside. So when the room ends at the end of a channel line the cut keeps the lines up to it, with a
+    # byte less of room the lines before it, and with a byte more the lines up to it again. The second box has purposes of three-byte
+    # characters, which keeps the bytes of the room and the characters of the text apart.
+    accents = t.box("accents")
+    for i in range(6):
+        create_channel(accents, f"u{i}", euro * 60)
+
+    def misses(box, ks):
+        """The (box, k, offset) cases where the cut of BOX's listing is not the lines that fit, with the room ending OFFSET bytes from the end of
+        channel line K."""
+        t.patch("CHANNELS_MAX", 10 ** 6)
+        whole = channels_text(box, "pi", s, now).splitlines()
+        t.patch("CHANNELS_MAX", real_max)
+        rest = f"\n{marker}\n" + "\n".join(whole[-2:])
+        found = []
+        for k in ks:
+            end = len("\n".join(whole[:1 + k]).encode())
+            for offset, lines in ((-1, k - 1), (0, k), (1, k)):
+                t.patch("CHANNELS_MAX", end + offset + len(rest.encode()))
+                if channels_text(box, "pi", s, now) != "\n".join(whole[:1 + lines]) + rest:
+                    found.append((os.path.basename(box), k, offset))
+        t.patch("CHANNELS_MAX", real_max)
+        return found
+
+    wrong = misses(forty, (1, 20, 40)) + misses(accents, (1, 3, 6))
+    t.ok(not [w for w in wrong if w[2] == 0],
+         f"a channel line that ends exactly where the room ends is kept, and the next one is not; wrong at {[w for w in wrong if w[2] == 0]}")
+    t.ok(not [w for w in wrong if w[2] != 0],
+         f"with a byte less of room that line is dropped, and with a byte more it is kept and the next one is not; wrong at {[w for w in wrong if w[2] != 0]}")
+    t.patch("CHANNELS_MAX", 20 + len(f"\n{marker}\n{own}".encode()))  # a room that ends inside the first line
+    inside = channels_text(forty, "pi", s, now)
+    t.patch("CHANNELS_MAX", real_max)
+    t.ok(inside == f"\n{marker}\n{own}", "when the room ends inside the first line, the cut keeps none of it: the marker and the session's own lines are all that is left")
     # Many ordinary member records make the roster itself the cause of a cut. The known sessions are one line, so when it does not fit it goes
     # whole, and the session's own two lines stay last. A hundred records fit, so it is their number that does it.
     busy = t.box("busy")
