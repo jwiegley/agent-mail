@@ -1653,7 +1653,7 @@ def collect(d, name, settings, state, max_bytes, now):
     record = read_member(d, name)
     # Within 10 minutes either way: another host's clock may run a little ahead of ours.
     if record is not None and record["host"] != HOST and abs(now - parse_utc(record["checked"])) < DUPLICATE_READER:
-        extra.append(f"agent-mail: another reader of {name} appears active on {escape(record['host'])}")
+        extra.append(f"agent-mail: another reader of {name} appears active on {clip(escape(record['host']), PEER_HOST_MAX)}")
     done = False
     try:
         for i, (_, entry, original, st) in enumerate(found):
@@ -3029,7 +3029,7 @@ def doctor(d, name, settings):
     if name:
         record = read_member(d, name)
         if record is not None and record["host"] != HOST and abs(now - parse_utc(record["checked"])) < DUPLICATE_READER:
-            finding(f"another reader of {name} appears active on {escape(record['host'])}")
+            finding(f"another reader of {name} appears active on {clip(escape(record['host']), PEER_HOST_MAX)}")
     if settings.paused or os.path.exists(os.path.expanduser(PAUSE_PATH)):
         finding(f"paused: {PAUSE_PATH} exists, so this host sends nothing and rings no doorbell")
     else:
@@ -4182,9 +4182,33 @@ def section_channels(t):
     t.ok(full.endswith(f"\n{marker}\n{own}") and len(full.encode()) <= CHANNELS_MAX
          and rows[0].startswith("agent-mail (bound name pi@") and rows[1].startswith("+t00: "),
          "at 8 KB the cut takes the channels that do not fit, says so before the session's own lines, keeps the first channels above it and fits")
+    t.patch("CHANNELS_MAX", 10 ** 6)
+    every = channels_text(forty, "pi", s, now).splitlines()
+    t.patch("CHANNELS_MAX", real_max)
+    fit = len(rows) - 4  # the header, the marker and the session's own two lines are the rest
+    t.ok(0 < fit < 40 and len(("\n".join(rows[:-3] + [every[1 + fit]]) + f"\n{marker}\n{own}").encode()) > CHANNELS_MAX,
+         "the cut drops no more channel lines than it must: with the next one the text would not fit in 8 KB")
     bare = channels_text(forty, None, s, now).splitlines()
     t.ok(bare[-2] == marker and bare[-1].startswith("bound name none; ") and not any(r.startswith("posts go to") for r in bare),
          "without a name the binding line is still last after the cut, and there is no posts line")
+    # Many ordinary member records make the roster itself the cause of a cut. The known sessions are one line, so when it does not fit it goes
+    # whole, and the session's own two lines stay last. A hundred records fit, so it is their number that does it.
+    busy = t.box("busy")
+    create_channel(busy, "fleet", "fleet-wide notices")
+    os.makedirs(os.path.join(busy, ".agent-mail", "members"), 0o700)
+
+    def add_sessions(first, last):
+        for i in range(first, last):
+            peer = f"s{i:03d}"
+            t.mk(member_path(busy, peer), json.dumps({"v": 2, "name": peer, "host": "h", "checked": stamp, "subs": []}))
+
+    add_sessions(0, 100)
+    hundred = channels_text(busy, "pi", s, now)
+    t.ok(len(roster_of(hundred)) == 100 and marker not in hundred, "a hundred ordinary records are all listed, with no cut")
+    add_sessions(100, 300)
+    rows = channels_text(busy, "pi", s, now).splitlines()
+    t.ok(len(rows) == 5 and rows[1].startswith("+fleet: ") and rows[2] == marker and rows[3].startswith("posts go to: ") and rows[4].startswith("bound name pi; "),
+         "three hundred push the known sessions past 8 KB and that one line goes whole: the cut says so, and the session's own two lines stay last")
 
 
 def section_receive(t):
@@ -4349,6 +4373,17 @@ def section_posts(t):
     t.mk(member_path(d, "a"), json.dumps({"v": 2, "name": "a", "host": "h2", "checked": utc(T0 - 60), "subs": ["fleet"]}))
     out, code, _ = t.capture(cmd_watch, "a", d, 0.01, False, MAX_BYTES, 1)
     t.ok(code is None and out == "", "a quiet pass of the claiming watch prints nothing, even with a duplicate-reader warning to give")
+    # A peer's member record named for the reader may carry a host of 60 KB, which both warnings show. Each shows at most 64 characters of
+    # the escaped host, then [cut], so that neither grows with it.
+    ghost = t.box("ghost")
+    os.makedirs(os.path.join(ghost, ".agent-mail", "members"), 0o700)
+    t.mk(member_path(ghost, "a"), json.dumps({"v": 2, "name": "a", "host": "h" * 60000, "checked": utc(T0 - 60), "subs": []}))
+    heard = receive(ghost, "a", s, sink)
+    t.ok(f"agent-mail: another reader of a appears active on {'h' * 64}[cut]\n" in heard and len(heard.encode()) < 300,
+         "receive shows at most 64 characters of a peer's host in its duplicate-reader warning, then [cut], and a 60 KB host does not make it long")
+    report = doctor(ghost, "a", s)[0]
+    t.ok(f"finding: another reader of a appears active on {'h' * 64}[cut]" in report.splitlines() and len(report.encode()) < 1000,
+         "doctor shows the same bounded host in its finding, and a 60 KB host does not make its report long")
     big_post = t.post(d, "fleet", "nix", "x" * POST_LIMIT)
     out = receive(d, "a", s, sink)
     t.ok(f"{os.path.basename(big_post)} in +fleet was not read: " in out and f"over the {POST_LIMIT}-byte limit for posts" in out and os.path.exists(big_post),
