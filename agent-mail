@@ -967,16 +967,16 @@ def create_channel(d, ch, purpose):
 
 def list_channels(d, now):
     """Each channel, sorted by name, with its purpose, its posts in the last 7 days, its
-    newest post's stamp and the subscribers that member records list (display only). The
-    stamp is the post name's own text: as a float, a stamp late in the year 9999 rounds
-    past what utc() can show."""
+    newest post's stamp and the subscribers that member records list (display only, and a
+    record is listed once for a channel however often it repeats it). The stamp is the post
+    name's own text: as a float, a stamp late in the year 9999 rounds past what utc() can show."""
     try:
         entries = os.listdir(d)
     except (FileNotFoundError, NotADirectoryError):
         raise MailError("mailbox_missing", f"mailbox {d} does not exist") from None
     listed = {}
     for name, record in members(d).items():
-        for ch in record["subs"]:
+        for ch in set(record["subs"]):  # a record may repeat a channel, and its name is listed once
             listed.setdefault(ch, []).append(name)
     out = []
     for entry in sorted(entries):
@@ -1653,7 +1653,7 @@ def collect(d, name, settings, state, max_bytes, now):
     record = read_member(d, name)
     # Within 10 minutes either way: another host's clock may run a little ahead of ours.
     if record is not None and record["host"] != HOST and abs(now - parse_utc(record["checked"])) < DUPLICATE_READER:
-        extra.append(f"agent-mail: another reader of {name} appears active on {clip(escape(record['host']), PEER_HOST_MAX)}")
+        extra.append(f"agent-mail: another reader of {name} appears active on {clip(record['host'], PEER_HOST_MAX)}")
     done = False
     try:
         for i, (_, entry, original, st) in enumerate(found):
@@ -2502,7 +2502,7 @@ MAX_LINE = 8 << 20
 
 NO_IDENTITY = "agent-mail has no session name: set AGENT_MAIL_NAME or start the server with --name; agent-deck sessions get one automatically"
 CHANNELS_MAX = 8000
-PEER_HOST_MAX, PEER_STAMP_MAX = 64, 32  # characters of a peer's host and of its checked stamp that the known sessions show
+PEER_HOST_MAX, PEER_STAMP_MAX = 64, 32  # characters shown of a peer's host (known sessions, duplicate-reader warnings) and of its checked stamp (known sessions)
 
 
 class BadArguments(Exception):
@@ -2556,8 +2556,15 @@ def fs_type(d):
 
 
 def clip(text, limit):
-    """TEXT, or when it is longer than LIMIT characters its first LIMIT and then [cut]."""
-    return text if len(text) <= limit else text[:limit] + "[cut]"
+    """TEXT escaped as a notice shows it, or, when that is longer than LIMIT characters, the escaped
+    characters that fit in LIMIT, never part of an escape, then [cut]."""
+    shown = escape(text)
+    if len(shown) <= limit:
+        return shown
+    kept = shown[:limit]
+    # SAFE has no backslash, so each one in the escaped text begins a four-character \xNN: one in the last three characters is cut short.
+    start = kept.rfind("\\", max(limit - 3, 0))
+    return (kept if start == -1 else kept[:start]) + "[cut]"
 
 
 def channels_text(d, name, settings, now):
@@ -2569,7 +2576,7 @@ def channels_text(d, name, settings, now):
     pass that, they are cut at a line and a marker says so, and NAME's own lines, where its
     posts go and its binding, follow the marker whole. No one member record can fill that: the
     known sessions show at most 64 characters of a peer's host and 32 of its checked stamp, each
-    then [cut]."""
+    then [cut], and a channel's line lists a record once however often the record repeats it."""
     state = load_state(d, name) if name else None
     subs = effective_subs(state, settings, now) if name else {}
     chans = list_channels(d, now)
@@ -2583,9 +2590,9 @@ def channels_text(d, name, settings, now):
                      f"subscribers listed: {', '.join(c['subscribers']) or 'none'}")
     known = members(d)
     # A peer wrote each record. member_at bounds its size and takes checked only as a stamp, but puts no limit on host, so the line
-    # bounds both: one record cannot push every other session into the cut below.
+    # bounds both, and list_channels lists a record once for a channel: one record cannot push every other session into the cut below.
     lines.append("known sessions (approximate; member records are written by peers): "
-                 + ("; ".join(f"{n} on {clip(escape(r['host']), PEER_HOST_MAX)}, checked {clip(clean_line(r['checked']), PEER_STAMP_MAX)}"
+                 + ("; ".join(f"{n} on {clip(r['host'], PEER_HOST_MAX)}, checked {clip(clean_line(r['checked']), PEER_STAMP_MAX)}"
                               for n, r in sorted(known.items())) or "none"))
     own = []
     if name:
@@ -3033,7 +3040,7 @@ def doctor(d, name, settings):
     if name:
         record = read_member(d, name)
         if record is not None and record["host"] != HOST and abs(now - parse_utc(record["checked"])) < DUPLICATE_READER:
-            finding(f"another reader of {name} appears active on {clip(escape(record['host']), PEER_HOST_MAX)}")
+            finding(f"another reader of {name} appears active on {clip(record['host'], PEER_HOST_MAX)}")
     if settings.paused or os.path.exists(os.path.expanduser(PAUSE_PATH)):
         finding(f"paused: {PAUSE_PATH} exists, so this host sends nothing and rings no doorbell")
     else:
@@ -4131,9 +4138,10 @@ def section_channels(t):
     crowded = t.box("crowded")
     create_channel(crowded, "fleet", "fleet-wide notices")
     touch_member(crowded, "nix", [], now)
-    stamp, fine, euro = utc(now), utc(now, micro=True), chr(0x20AC)  # the euro sign is three UTF-8 bytes, and each shows as four characters
+    stamp, fine, euro = utc(now), utc(now, micro=True), chr(0x20AC)  # the euro sign is three UTF-8 bytes, and each byte shows as four characters
+    acute = chr(0xE9)  # an accented letter, two bytes
     for peer, host, checked in (("far", "h" * 9000, stamp), ("edge", "e" * 64, stamp), ("over", "o" * 65, stamp), ("wide", euro * 40, stamp),
-                                ("micro", "m", fine), ("stamped", "x", "9" * 500)):
+                                ("wider", acute * 65, stamp), ("shifted", "s" + acute * 64, stamp), ("micro", "m", fine), ("stamped", "x", "9" * 500)):
         t.mk(member_path(crowded, peer), json.dumps({"v": 2, "name": peer, "host": host, "checked": checked, "subs": []}))
     mine = load_state(crowded, "pi")
     subscribe(crowded, "pi", mine, s, "fleet", write=True, now=now)
@@ -4148,14 +4156,32 @@ def section_channels(t):
         line = next((r for r in listing_text.splitlines() if r.startswith("known sessions")), "")
         return line.partition("): ")[2].split("; ")
 
-    wide = escape(euro * 40)[:64]
+    # A host shows as the escaped characters that fit in 64, never part of a \xNN, then [cut]. Forty euro signs, 480 characters escaped, show 16
+    # units: five signs and the first byte of a sixth. Sixty-five accented letters show 16 units too. With an ASCII letter in front the units no
+    # longer end at 64, so the last one that would be split is dropped, and 61 characters show.
+    euro_shown, acute_shown = "\\xe2\\x82\\xac", "\\xc3\\xa9"
+    wide_shown = euro_shown * 5 + "\\xe2[cut]"
+    wider_shown = acute_shown * 8 + "[cut]"
+    shifted_shown = "s" + acute_shown * 7 + "\\xc3[cut]"
     t.ok(roster_of(text) == [f"edge on {'e' * 64}, checked {stamp}", f"far on {'h' * 64}[cut], checked {stamp}", f"micro on m, checked {fine}",
-                             f"nix on {escape(HOST)}, checked {stamp}", f"over on {'o' * 64}[cut], checked {stamp}", f"wide on {wide}[cut], checked {stamp}"],
-         "a peer's 9000-character host leaves every session in the known sessions: a host of 64 characters whole, a longer one as its first 64 "
-         "escaped characters then [cut], a stamp whole, and a record whose stamp is 500 characters, which member_at refuses, not listed")
+                             f"nix on {escape(HOST)}, checked {stamp}", f"over on {'o' * 64}[cut], checked {stamp}", f"shifted on {shifted_shown}, checked {stamp}",
+                             f"wide on {wide_shown}, checked {stamp}", f"wider on {wider_shown}, checked {stamp}"],
+         "a peer's 9000-character host leaves every session in the known sessions: a host of 64 characters whole, a longer one as the escaped characters "
+         "that fit in 64 then [cut], never part of an escape, a stamp whole, and a record whose stamp is 500 characters, which member_at refuses, not listed")
     t.ok("[... the rest is cut" not in text, "the long host no longer forces the cut at 8 KB")
-    # member_at takes only a stamp for checked, at most 23 characters, so no record gets a longer one to the line. The line's own bound is
-    # checked with members standing in for a record that did.
+    # A record may repeat a channel in its subscriptions: 3000 times is 27 KB, within member_at's 64 KiB. The channel's line lists the record once,
+    # so that one record cannot fill the 8 KB that way either.
+    repeated = t.box("repeated")
+    create_channel(repeated, "fleet", "fleet-wide notices")
+    touch_member(repeated, "nix", [], now)
+    t.mk(member_path(repeated, "dup"), json.dumps({"v": 2, "name": "dup", "host": "d", "checked": stamp, "subs": ["fleet"] * 3000}))
+    many_subs = channels_text(repeated, "pi", s, now)
+    t.ok(roster_of(many_subs) == [f"dup on d, checked {stamp}", f"nix on {escape(HOST)}, checked {stamp}"] and "[... the rest is cut" not in many_subs,
+         "a record that repeats a channel 3000 times in its subscriptions does not hide the other sessions: every known session is listed and nothing is cut")
+    t.ok(next((r for r in many_subs.splitlines() if r.startswith("+fleet")), "").endswith("subscribers listed: dup"),
+         "and the channel's line lists that record once")
+    # member_at takes only a stamp for checked, at most 23 characters, so a real record reaches the 32-character bound only when its stamp's
+    # escaped form is longer (Unicode digits); the bound itself is checked with members standing in for a record with a longer one.
     real_members = members
     t.patch("members", lambda d: {"far": {"v": 2, "name": "far", "host": "x", "checked": "9" * 500, "subs": []},
                                   "nix": {"v": 2, "name": "nix", "host": "y", "checked": stamp, "subs": []}})
@@ -4422,6 +4448,21 @@ def section_posts(t):
     report = doctor(ghost, "a", s)[0]
     t.ok(f"finding: another reader of a appears active on {'h' * 64}[cut]" in report.splitlines() and len(report.encode()) < 1000,
          "doctor shows the same bounded host in its finding, and a 60 KB host does not make its report long")
+    # A host is a peer's text, so both warnings escape it: a newline in it cannot break a warning into two lines.
+    t.mk(member_path(ghost, "a"), json.dumps({"v": 2, "name": "a", "host": "a\nb", "checked": utc(T0 - 60), "subs": []}))
+    warned = receive(ghost, "a", s, sink).splitlines()
+    t.ok("agent-mail: another reader of a appears active on a\\x0ab" in warned and "b" not in warned,
+         "receive escapes a peer's host in its duplicate-reader warning, so a newline in it does not break the warning into two lines")
+    findings = doctor(ghost, "a", s)[0].splitlines()
+    t.ok("finding: another reader of a appears active on a\\x0ab" in findings and "b" not in findings,
+         "doctor escapes the same host in its finding, so a newline in it does not break the finding into two lines")
+    # A host of 40 euro signs is 480 characters escaped. Both warnings show the 16 units that fit in 64 characters, then [cut].
+    t.mk(member_path(ghost, "a"), json.dumps({"v": 2, "name": "a", "host": chr(0x20AC) * 40, "checked": utc(T0 - 60), "subs": []}))
+    units = "\\xe2\\x82\\xac" * 5 + "\\xe2[cut]"
+    t.ok(f"agent-mail: another reader of a appears active on {units}" in receive(ghost, "a", s, sink).splitlines(),
+         "receive shows a host of 40 euro signs as the 16 escape units that fit in 64 characters, then [cut]")
+    t.ok(f"finding: another reader of a appears active on {units}" in doctor(ghost, "a", s)[0].splitlines(),
+         "doctor shows that host the same way")
     big_post = t.post(d, "fleet", "nix", "x" * POST_LIMIT)
     out = receive(d, "a", s, sink)
     t.ok(f"{os.path.basename(big_post)} in +fleet was not read: " in out and f"over the {POST_LIMIT}-byte limit for posts" in out and os.path.exists(big_post),
