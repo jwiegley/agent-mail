@@ -712,7 +712,7 @@ def member_at(fd, name):
         if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_size > 65536:
             return None
         data = json.loads(os.read(mfd, 65537).decode("utf-8"))
-    except (OSError, ValueError, RecursionError, MemoryError):  # a peer can nest a record past the decoder's depth
+    except (OSError, ValueError, RecursionError, MemoryError):  # a peer can nest a record past the decoder's depth; no peer record may stop a reader
         return None
     finally:
         os.close(mfd)
