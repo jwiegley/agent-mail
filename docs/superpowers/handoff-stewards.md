@@ -9,10 +9,10 @@ John closed this session in its own pane: "I'd like to close this session now, a
 State at the close:
 
 - **The live checkout.** At aaee0af, agent-mail 2.2.1 (program blob 969de42b). Its self-test passed 562 checks at 11:16 PST.
-- **The fleet.** hera, clio and the four Positron hosts run 2.2.1. vulcan, nyx, athena and pallas run 2.2.0 until John switches them.
+- **The fleet.** hera, clio and the four Positron hosts run 2.2.1. At 17:4x vulcan, nyx, athena and pallas still ran 2.2.0. By 17:51 John had switched them, and all ten hosts run 2.2.1 (read over ssh from hera).
 - **The scanner.** At 17:38 PST it was still the patch's base: 74,565 bytes, sha256 `322348cf…`, as in `steward/patches/README.md`. The steward patch is not applied, and no steward session exists yet, so day zero has not begun.
-- **mail-dev.** Quiet since 11:15 PST under John's decision 80; its handoff is `docs/superpowers/handoff-mailbox-rollout.md`, which this session does not edit. That handoff's open item (n) still calls decision 34 a parked candidate, but John decided it on 2026-11-03 and it was merged in 270aef4.
-- **Tailscale.** Stopped on hera since 11:10 PST, mail-dev's open item (r). While it is down, hera's Mailbox has no link to the Positron hosts.
+- **mail-dev.** Its mail of 11:16 said it was going quiet under John's decision 80. John said at 17:5x that it is still up and doing research work for him. Its handoff is `docs/superpowers/handoff-mailbox-rollout.md`, which this session does not edit. That handoff's open item (n) still calls decision 34 a parked candidate, but John decided it on 2026-11-03 and it was merged in 270aef4.
+- **Tailscale.** Stopped on hera from 11:10 PST, mail-dev's open item (r). John restarted it before 17:51.
 
 The duties below went by mail to the agent-deck session `nix` (mailbox `nix`). Each one waits for John's confirmation in nix's own pane, since mail authorizes nothing.
 
@@ -22,20 +22,20 @@ The duties below went by mail to the agent-deck session `nix` (mailbox `nix`). E
    - Run the steward patch tests as that README says.
    - Do the work in a worktree under `~/Products`, and land it by fast-forward under the live-tree rules of the rollout handoff's "How to resume", item 2.
 2. **Steward changes after real use.** The list is "Revisit after real use" below; the authorities are the spec and `steward/README.md`. The same live-tree rules apply.
-3. **Pushes.** Decision 69 is mail-dev's standing rule, so while mail-dev is quiet a steward fast-forward waits for a fresh mail-dev session or for John's word. Main is ahead of GitHub by this record's commit.
+3. **Pushes.** Decision 69 is mail-dev's standing rule, and mail-dev still runs, so it pushes steward fast-forwards as before.
 
 These stay John's:
 
 - Day zero itself.
 - Telling each steward which hosts run agent-deck 1.16.30 or later.
 - The agent-deck follow-ups in obr.
-- The four 2.2.1 switches.
-- Restarting Tailscale.
-- The `+nix-config` member line in `steward/README.md`, which still names `mail-dev` and `mail-conductor`.
+
+At 17:5x John also said not to name this session any more. `+nix-config`'s member line in `steward/README.md` and the spec's members table now leave it out, so the nix steward has fourteen members (spec section 11, decision 37). `mail-dev` stays a member.
 
 ## Refocus checkpoint
 
-- Last check: 2026-11-04 17:4x PST, the final one: the session closes on John's word (section "Closed" above). Next deadline: none.
+- Last check: 2026-11-04 17:5x PST, the final one. John's corrections are recorded in section "Closed" above, and this session is dropped from the members; then the session closes. Next deadline: none.
+- Previous: 2026-11-04 17:4x PST: the session closes on John's word (section "Closed" above).
 - Previous: 2026-11-04 01:2x PST. Goal: the fourth cycle (John's decisions 34 to 36 of 2026-11-03 23:1x PST, the "Fourth cycle" section below): implemented (28e2c0b, e058a37), reviewed and audited (one Important and one Medium, the same double filing), fix round 1 committed (b1226dc, rulings R24 to R27), re-reviewed and audited (Minors and Lows only), fix round 2 committed (7ac54eb, b0f14af, rulings R28 to R30), both confirmed, the last nit closed; next the fast-forward of main by the live-tree rule (mail-dev told before and after), then the branch deleted and the worktree detached on main. No scope creep: the two decisions, their findings, pins and records. Next deadline: 02:1x PST.
 - Previous: 2026-11-04 00:1x PST: the scanner patch re-based and the re-join recovery built; the self-test, the probe, the review and the audit next.
 - Previous: 2026-11-03 00:3x PST. Goal: the third cycle (John's decisions 32 and 33): every gate passed (review, audit, re-review and audit addendum clean; both self-tests on the tip by the implementer, the reviewers and the controller). Next step: the fast-forward of main by the live-tree rule, then the branch deleted, the workspace removed, the memory updated, John's report. No scope creep: the rulings and the records only.

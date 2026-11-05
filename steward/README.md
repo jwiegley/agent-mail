@@ -125,7 +125,7 @@ The purposes of `+ingest` and `+nix-config` name their stewards, but step 4 foll
 ```text
 channel nix-config
 purpose <the topic's purpose, in your words>
-members omlx syncthing mail-dev mail-conductor audio8-tts mcp-servers wiggum nix pi translate-tool athena pallas automation nixos monitor
+members omlx syncthing mail-dev audio8-tts mcp-servers wiggum nix pi translate-tool athena pallas automation nixos monitor
 ```
 
 The steward joins the mailbox under its title, subscribes to its channel with wake, starts its doorbell and its tick, posts `STEWARD conductor-ingest-steward is on +ingest`, mails each member `TOPIC +ingest: John named you a member`, and prints its first status line (CLAUDE.md section 3). The invitations count against `sends_per_turn`, so the rest go at its next turns. To send them sooner, type `digest` in the steward's pane, which starts its next turn, or wait for its tick. It takes each member's host and harness from John's words, from agent-deck's listing on hera, or from the member's JOIN; a member it cannot place waits under Watch until it can. Tell it, too, which worker hosts run agent-deck 1.16.30 or later (section 2).
