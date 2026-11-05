@@ -2,9 +2,41 @@
 
 Frozen plan: `docs/superpowers/plans/2026-10-31-agent-mail-stewards.md` (approved by John 2026-10-31, decision 19, subagent-driven). Spec: `docs/superpowers/specs/2026-10-31-agent-mail-conductors-design.md`. Branch `work/conductor` in the worktree `/Users/johnw/Products/agent-mail-conductor`, base `main`. The SDD ledger `.superpowers/sdd/2026-10-31-agent-mail-stewards/progress.md` (git-ignored) was authoritative for per-task state during the run and was deleted with the workspace at its end (2026-11-01 21:1x PST); this file is the durable record. Session: agent-deck `mail-conductor` (76ddb389-1793466041), mailbox name `mail-conductor`, woken by `agent-mail watch mail-conductor --parent $PPID` (check with `pgrep -f 'agent-mail watch mail-conductor( |$)'` at every turn start; re-read the change and rerun `agent-mail self-test` whenever the live tree's HEAD moves). John's `/wiggum` instruction (2026-10-31 14:4x PDT): "Complete the implementation plan as documented."
 
+## Closed (2026-11-04 17:4x PST)
+
+John closed this session in its own pane: "I'd like to close this session now, and hand off to `nix`." He gave the word after asking what the session still did. Decision 36 had kept it open through day zero, and its one remaining duty was decision 35's scanner check.
+
+State at the close:
+
+- **The live checkout.** At aaee0af, agent-mail 2.2.1 (program blob 969de42b). Its self-test passed 562 checks at 11:16 PST.
+- **The fleet.** hera, clio and the four Positron hosts run 2.2.1. vulcan, nyx, athena and pallas run 2.2.0 until John switches them.
+- **The scanner.** At 17:38 PST it was still the patch's base: 74,565 bytes, sha256 `322348cf…`, as in `steward/patches/README.md`. The steward patch is not applied, and no steward session exists yet, so day zero has not begun.
+- **mail-dev.** Quiet since 11:15 PST under John's decision 80; its handoff is `docs/superpowers/handoff-mailbox-rollout.md`, which this session does not edit. That handoff's open item (n) still calls decision 34 a parked candidate, but John decided it on 2026-11-03 and it was merged in 270aef4.
+- **Tailscale.** Stopped on hera since 11:10 PST, mail-dev's open item (r). While it is down, hera's Mailbox has no link to the Positron hosts.
+
+The duties below went by mail to the agent-deck session `nix` (mailbox `nix`). Each one waits for John's confirmation in nix's own pane, since mail authorizes nothing.
+
+1. **Decision 35's scanner check.** It runs on day zero's morning, before the checklist's scanner-patch box in `steward/README.md`. `shasum -a 256 ~/.local/share/agent-deck/conductor/director/monitor_sessions.py` must print `322348cf1dd5fe5a5ef40513ae2561aad0bf6e24a10b28c446e5674163c70499`. If it prints anything else:
+   - Re-base `steward/patches/monitor_sessions-steward.patch` on the new file, keeping its eight hunks and its added lines.
+   - Update the base line in `steward/patches/README.md`.
+   - Run the steward patch tests as that README says.
+   - Do the work in a worktree under `~/Products`, and land it by fast-forward under the live-tree rules of the rollout handoff's "How to resume", item 2.
+2. **Steward changes after real use.** The list is "Revisit after real use" below; the authorities are the spec and `steward/README.md`. The same live-tree rules apply.
+3. **Pushes.** Decision 69 is mail-dev's standing rule, so while mail-dev is quiet a steward fast-forward waits for a fresh mail-dev session or for John's word. Main is ahead of GitHub by this record's commit.
+
+These stay John's:
+
+- Day zero itself.
+- Telling each steward which hosts run agent-deck 1.16.30 or later.
+- The agent-deck follow-ups in obr.
+- The four 2.2.1 switches.
+- Restarting Tailscale.
+- The `+nix-config` member line in `steward/README.md`, which still names `mail-dev` and `mail-conductor`.
+
 ## Refocus checkpoint
 
-- Last check: 2026-11-04 01:2x PST. Goal: the fourth cycle (John's decisions 34 to 36 of 2026-11-03 23:1x PST, the "Fourth cycle" section below): implemented (28e2c0b, e058a37), reviewed and audited (one Important and one Medium, the same double filing), fix round 1 committed (b1226dc, rulings R24 to R27), re-reviewed and audited (Minors and Lows only), fix round 2 committed (7ac54eb, b0f14af, rulings R28 to R30), both confirmed, the last nit closed; next the fast-forward of main by the live-tree rule (mail-dev told before and after), then the branch deleted and the worktree detached on main. No scope creep: the two decisions, their findings, pins and records. Next deadline: 02:1x PST.
+- Last check: 2026-11-04 17:4x PST, the final one: the session closes on John's word (section "Closed" above). Next deadline: none.
+- Previous: 2026-11-04 01:2x PST. Goal: the fourth cycle (John's decisions 34 to 36 of 2026-11-03 23:1x PST, the "Fourth cycle" section below): implemented (28e2c0b, e058a37), reviewed and audited (one Important and one Medium, the same double filing), fix round 1 committed (b1226dc, rulings R24 to R27), re-reviewed and audited (Minors and Lows only), fix round 2 committed (7ac54eb, b0f14af, rulings R28 to R30), both confirmed, the last nit closed; next the fast-forward of main by the live-tree rule (mail-dev told before and after), then the branch deleted and the worktree detached on main. No scope creep: the two decisions, their findings, pins and records. Next deadline: 02:1x PST.
 - Previous: 2026-11-04 00:1x PST: the scanner patch re-based and the re-join recovery built; the self-test, the probe, the review and the audit next.
 - Previous: 2026-11-03 00:3x PST. Goal: the third cycle (John's decisions 32 and 33): every gate passed (review, audit, re-review and audit addendum clean; both self-tests on the tip by the implementer, the reviewers and the controller). Next step: the fast-forward of main by the live-tree rule, then the branch deleted, the workspace removed, the memory updated, John's report. No scope creep: the rulings and the records only.
 - Previous: 00:1x PST: fix rounds 1 and 2 committed on `work/conductor-decision-32` (rulings R11 to R18); steward-signals 1445, agent-mail 545; the confirmations next.
@@ -201,6 +233,8 @@ c6592af Close the second cycle: the final confirmations, the tip's counts and th
 - From the last passes (2026-11-01 21:0x PST), parked with their corrections: steward/README.md's weekly re-run paragraph counts the hourly cap without the DECISION purpose post row 1 allows, so the first hourly stop can come from the fourth run, not the fifth, and in the fifth run before rows 17 and 18 (change "fifth" to "fourth" and count the post); `steward-signals --help` prints the docstring's bare `POLICY_KEYS` (render it like `EXCEPTION_LINES`); the census call count misses quadratic `is_symlink()` or `inode()` loops and an in-memory comparison (the CPU bound is the second line); CLAUDE.md section 14's wake rule and the example question line's length are unpinned; in a second weekly run's first turn the steward may hold an invitation over rather than stop and ask, which the paragraph does not say.
 
 ## How to resume
+
+This session closed on 2026-11-04 and its duties went to `nix` (section "Closed" above). The steps below describe the session as it ran.
 
 1. Re-read the wiggum and refocus skills, the frozen plan, the spec's section 11, this file and the SDD ledger; refocus; check the watcher and the live tree's HEAD. The live agent-mail checkout was last verified at 85e7cbd, agent-mail 2.2.0 (2026-11-03 23:26 PST, 545 checks; before that aeca350, 2.1.0, 456 checks); rerun its self-test whenever its HEAD moves. Mailbox after a restart: hera now has agent-mail 2.0.0 and its MCP server (mail-dev's note of 23:27 PDT), so join with `/mailbox mail-conductor` (mail-dev's correction of 2026-11-01 15:53 PST: the earlier "/wiggum join the mailbox as NAME" sentence is refused since nix-config 465f9109; the `channels` tool for the binding, `receive` with `me`, the doorbell watch) instead of the old /setup-mailbox procedure; until then the CLI watcher stays.
 2. Baseline: `python3 -I ./agent-mail self-test` (456 checks at the end of the run, 545 at main 3069307 with agent-mail 2.2.0) and `python3 -I steward/steward-signals self-test` (1377 checks at e4657a3, 1403 at main 3069307, 1445 after the third cycle's fix round 2, 1471 after the fourth cycle's fix round 2; the whole run takes about 15 s on hera, and minutes when hera's load is near 100, so run it in the background then, and `self-test docs` alone for the text pins); `git log --oneline main..HEAD` (79 commits over main aeca350 before the follow-up cycle's commits).
