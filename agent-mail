@@ -5515,6 +5515,18 @@ def section_pending(t):
         json.loads = real_loads
     t.ok(deep is None, "a member record nested too deeply to decode reads as no record, so channels, send and pending go on")
 
+    real_ringable = ringable
+
+    def second_scan(*args, **kwargs):
+        raise AssertionError("pending --format json scanned a second time")
+
+    globals()["ringable"] = second_scan
+    try:
+        one_scan = as_json(d, "pi", *pins)[0]
+    finally:
+        globals()["ringable"] = real_ringable
+    t.ok(one_scan == obj, "json takes its ring from the scan that gives its counts, never from a second scan by ringable")
+
     real_status = pending_status
 
     def unforeseen(*args, **kwargs):
