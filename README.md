@@ -218,7 +218,7 @@ Both files were byte-identical on the two hosts, `pending` for an unsubscribed n
 | `read NAME [--max-bytes N] [--channel CHANNEL[:wake]]` | Deliver NAME's waiting mail once. |
 | `watch NAME [--poll S] [--notify auto\|on\|off] [--channel CHANNEL[:wake]] [--forever] [--parent PID] [--max-bytes N]` | Wait for mail, deliver it, then exit; `--forever` keeps going. |
 | `watch [NAME] --doorbell [--parent PID] [--forever]` | Print the ring line when mail starts waiting, and exit 10. Claims nothing. |
-| `pending NAME [--format human\|loop\|context] [--channel CHANNEL[:wake]]` | One line about waiting mail, delivering nothing. |
+| `pending [NAME] [--format human\|loop\|context\|json] [--channel CHANNEL[:wake]]` | One line about waiting mail, delivering nothing. Without NAME, the name resolves as the MCP server's does (section 5). `--format json` prints one JSON object (below). |
 | `channels [NAME]` | List the channels. |
 | `channel create CHANNEL --purpose TEXT` | Create `+CHANNEL`. |
 | `subscribe NAME CHANNEL [--wake\|--no-wake] [--write\|--no-write] [--backlog N]` | Subscribe NAME to a channel; `--write` makes it a write target. A flag left out keeps its current value. |
@@ -228,4 +228,29 @@ Both files were byte-identical on the two hosts, `pending` for an unsubscribed n
 | `init` | Make a directory other than `~/Mailbox` a mailbox. |
 | `self-test [SECTION ...]` | Run the built-in checks. |
 
-Exit status: 0 on success; 1 for a refusal or an error, with `agent-mail: <message>` on stderr, and for `doctor` when it finds anything; 2 for a usage error, or when `read` meets a file it cannot claim; 3 when printing failed and the mail went back; 4 when another reader holds the name's lock; 10 when a doorbell rang.
+**`pending --format json`** prints one line, one JSON object, and nothing on stderr. Like every `pending`, it claims nothing and prunes nothing. It holds no message id, file name, sender, subject or text, so all of it may be shown. Contract version 1, shown here on several lines:
+
+    {"v": 1, "agent_mail": "2.3.0", "name": "pi", "host": "hera", "paused": false,
+     "direct": 1, "broadcast": 0,
+     "channels": [{"name": "fleet", "unread": 2, "wake": true, "write": false, "pinned": false, "missing": false},
+                  {"name": "nix-config", "unread": 0, "wake": true, "write": true, "pinned": false, "missing": false}],
+     "write_targets": ["nix-config"], "default_channel": "fleet",
+     "ring": {"digest": "0123456789ab", "direct": 1, "channel": 2},
+     "last_delivery": {"at": "20261105T050120Z", "items": 3, "possibly_unseen": false}}
+
+| Field | Meaning |
+|---|---|
+| `v` | The contract version, 1. A consumer refuses any other. |
+| `agent_mail` | The program's version. |
+| `name`, `host` | The bound name and the host's short name. |
+| `paused` | Whether the host's pause file exists (section 5). |
+| `direct`, `broadcast` | The direct mail and the broadcasts waiting, counted as `--format human` counts them. |
+| `channels` | Every subscription, pinned ones included, sorted by name: its `unread` posts (settled, and not your own), its `wake`, `write` and `pinned` marks, and `missing` when the channel is missing or is not a channel, which then counts nothing. The `unread` counts add up to human's channel count. |
+| `write_targets` | The subscriptions marked write, sorted; empty when there are none. |
+| `default_channel` | Where a send without a recipient goes when there are no write targets. |
+| `ring` | `null` when nothing rings; otherwise the doorbell line's digest and its direct and channel counts, as `--format context` prints them. |
+| `last_delivery` | `null` before the first delivery; otherwise its UTC stamp, its number of items, and `possibly_unseen` when it may not have reached you. |
+
+A refusal is one JSON object too, and exits as every refusal does: `{"v": 1, "agent_mail": "2.3.0", "name": null, "error": "no_identity", "problem": "no source names this session"}`. `error` is the refusal's code (`no_identity`, `invalid_name`, `bad_config`, `mailbox_missing`, `not_mailbox`, `unsafe_mailbox`, and so on) and `problem` its message. `name` is `null` until a name is resolved or passes its check.
+
+Exit status: 0 on success; 1 for a refusal or an error, with `agent-mail: <message>` on stderr (for `pending --format json`, the JSON refusal on stdout instead), and for `doctor` when it finds anything; 2 for a usage error, or when `read` meets a file it cannot claim; 3 when printing failed and the mail went back; 4 when another reader holds the name's lock; 10 when a doorbell rang.
