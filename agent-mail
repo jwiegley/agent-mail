@@ -712,7 +712,7 @@ def member_at(fd, name):
         if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_size > 65536:
             return None
         data = json.loads(os.read(mfd, 65537).decode("utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError, MemoryError):  # a peer can nest a record past the decoder's depth
         return None
     finally:
         os.close(mfd)
@@ -2485,23 +2485,27 @@ def loop_line(d, name, ids, now):
 
 
 def pending_scan(d, name, settings, now):
-    """What pending's human and json count for NAME, claiming and pruning nothing: (the
-    direct messages waiting, regular files only; NAME's state; its effective subscriptions;
-    its unread posts and broadcasts, settled and not its own). Both count from here, so the
-    json's counts are human's."""
+    """What pending's human and json count for NAME, claiming and pruning nothing: (the ids
+    of the direct messages waiting, regular files only; NAME's state; its effective
+    subscriptions; its unread posts and broadcasts, settled and not its own). Both count from
+    here, so the json's counts are human's, and json's ring is taken from the same scan, so one
+    object never contradicts itself."""
     found, *_ = candidates(name, d, now)
     state = load_state(d, name)
     subs = effective_subs(state, settings, now)
     posts, _ = unread_posts(d, name, state, subs, now)
-    return sum(1 for *_, st in found if stat.S_ISREG(st.st_mode)), state, subs, posts
+    return [parse_msg(original).id for _, _, original, st in found if stat.S_ISREG(st.st_mode)], state, subs, posts
 
 
 def pending_status(d, name, settings, now):
     """pending --format json, contract v1 (README section 9): what waits for NAME, as one
     object. It counts as human does, lists each effective subscription with its unread posts
     and its marks (missing when open_channel refuses it, which then counts nothing), and
-    gives the ring that ringable and ring_digest make. It holds no message id, file name,
-    sender or subject, so a consumer may show all of it."""
+    gives the ring the doorbell's line would carry, taken as ringable takes it (the direct
+    mail and the unread posts of the wake subscriptions, never broadcasts) but from the same
+    scan, with ring_digest. Like --format context it ignores the pause file, which paused
+    reports. It holds no message id, file name, sender or subject, so a consumer may show
+    all of it."""
     direct, state, subs, posts = pending_scan(d, name, settings, now)
     unread = collections.Counter(item.channel for item in posts if item.kind == "post")
     channels = []
@@ -2513,16 +2517,16 @@ def pending_status(d, name, settings, now):
             missing = True
         channels.append({"name": ch, "unread": 0 if missing else unread[ch], "wake": subs[ch]["wake"], "write": subs[ch]["write"],
                          "pinned": subs[ch]["pinned"], "missing": missing})
-    ring_direct, ring_channel, _ = ringable(d, name, settings, now)
+    ring_channel = [item.id for item in posts if item.kind == "post" and subs[item.channel]["wake"]]
     ring = None
-    if ring_direct or ring_channel:
-        ring = {"digest": ring_digest(ring_direct + ring_channel), "direct": len(ring_direct), "channel": len(ring_channel)}
+    if direct or ring_channel:
+        ring = {"digest": ring_digest(direct + ring_channel), "direct": len(direct), "channel": len(ring_channel)}
     last = state.get("last_batch") or {}
     delivery = None
     if last.get("at"):
         delivery = {"at": utc(last["at"]), "items": len(last.get("ids", [])), "possibly_unseen": bool(last.get("possibly_unseen"))}
     return {"v": 1, "agent_mail": VERSION, "name": name, "host": HOST, "paused": settings.paused,
-            "direct": direct, "broadcast": sum(1 for item in posts if item.kind == "broadcast"), "channels": channels,
+            "direct": len(direct), "broadcast": sum(1 for item in posts if item.kind == "broadcast"), "channels": channels,
             "write_targets": sorted(ch for ch, sub in subs.items() if sub["write"]), "default_channel": settings.default_channel,
             "ring": ring, "last_delivery": delivery}
 
@@ -2541,7 +2545,7 @@ def pending_line(d, name, settings, fmt):
             return loop_line(d, name, sorted(direct + channel), now)
         return ring_line(name, direct, channel) if direct or channel else ""
     direct, state, _, posts = pending_scan(d, name, settings, now)
-    counts = (direct, sum(1 for i in posts if i.kind == "post"), sum(1 for i in posts if i.kind == "broadcast"))
+    counts = (len(direct), sum(1 for i in posts if i.kind == "post"), sum(1 for i in posts if i.kind == "broadcast"))
     last = state.get("last_batch") or {}
     note = f"; your receive at {utc(last['at'])} may not have reached you; call reread with last=true and your me" if last.get("possibly_unseen") else ""
     if not any(counts):
@@ -3287,13 +3291,15 @@ def run_doorbell(a):
 
 def run_pending(a):
     """pending [NAME]. Without NAME the name resolves as the MCP server resolves it, as for
-    watch --doorbell. With --format json, each refusal on the way (the name, the settings, the
-    mailbox, the scan) is one JSON object on stdout, naming the name once it was resolved or
-    passed its check, and stderr stays empty; the other formats, and a failed output, leave
-    refusals to main."""
+    watch --doorbell; an explicit empty NAME is refused, as it was before NAME became optional.
+    With --format json, each refusal on the way (the name, the settings, the mailbox, the scan)
+    is one JSON object on stdout, naming the name once it was resolved or passed its check, and
+    stderr stays empty; anything unforeseen is the refusal internal_error, which names only the
+    exception's type (its text can hold a file name) while the log gets the details. The other
+    formats, and a failed output, leave refusals to main."""
     name = None
     try:
-        if a.name:
+        if a.name is not None:
             name = check_name(a.name)
         else:
             ident = resolve_identity(None, os.environ, os.path.expanduser("~"))
@@ -3307,6 +3313,13 @@ def run_pending(a):
             raise
         emit(None, json.dumps({"v": 1, "agent_mail": VERSION, "name": name, "error": e.code, "problem": e.message}) + "\n")
         return EXIT_STATUS.get(e.code, 1)
+    except Exception as e:
+        if a.format != "json":
+            raise
+        log(f"pending for {name or 'an unresolved name'}: internal error: {type(e).__name__}: {e}")
+        emit(None, json.dumps({"v": 1, "agent_mail": VERSION, "name": name, "error": "internal_error",
+                               "problem": f"{type(e).__name__}; see the agent-mail log"}) + "\n")
+        return 1
 
 
 def clean_line(text):
@@ -3386,7 +3399,8 @@ def build_parser():
                  "Print one line about NAME's waiting mail without claiming or pruning anything. Without NAME, the name resolves as "
                  "mcp's does. human counts what waits; loop (the default) changes only when new mail is announced and as a reminder, "
                  "for pi-loop; context prints the doorbell line, or nothing when no mail rings; json prints one JSON object, contract "
-                 "v1 in the README's section 9, and a refusal as one JSON object too, leaving stderr empty.")
+                 "v1 in the README's section 9, and a refusal as one JSON object too, leaving stderr empty, except for a usage "
+                 "error (status 2) or a failed output (status 3).")
     pe.add_argument("name", nargs="?", metavar="NAME", help="the session's name; without it, the name resolves as mcp's does")
     pe.add_argument("--format", choices=("human", "loop", "context", "json"), default="loop", help="the line's form (default loop)")
     pe.add_argument("--channel", **pin)
@@ -5481,6 +5495,47 @@ def section_pending(t):
         broken = main(["--dir", d, "pending", "pi", "--format", "json", *pins])
     t.ok(broken == 3 and broken_out.writes == 1 and broken_err.getvalue() == "agent-mail: the output failed\n",
          "when its output fails, pending --format json exits 3 as every command does, without a second write for a refusal")
+
+    empty_name = as_json(d, "")
+    t.ok(empty_name[0] == {"v": 1, "agent_mail": VERSION, "name": None, "error": "invalid_name", "problem": "invalid mailbox name ''"}
+         and empty_name[1:3] == (1, ""),
+         "an explicit empty NAME is refused as invalid_name, as 2.2.2 refused it, and does not fall back to the environment")
+
+    real_loads = json.loads
+
+    def too_deep(text, *args, **kwargs):
+        raise RecursionError("maximum recursion depth exceeded while decoding a JSON array")
+
+    json.loads = too_deep
+    try:
+        deep = read_member(d, "pi")
+    except RecursionError:
+        deep = "raised"
+    finally:
+        json.loads = real_loads
+    t.ok(deep is None, "a member record nested too deeply to decode reads as no record, so channels, send and pending go on")
+
+    real_status = pending_status
+
+    def unforeseen(*args, **kwargs):
+        raise PermissionError(13, "Permission denied", os.path.join(d, "pi_20261105T050120.000000Z_from-wombat-sender_0badf00d.txt"))
+
+    globals()["pending_status"] = unforeseen
+    try:
+        with contextlib.redirect_stdout(io.StringIO()) as odd_out, contextlib.redirect_stderr(io.StringIO()) as odd_err:
+            odd = main(["--dir", d, "pending", "pi", "--format", "json"])
+    finally:
+        globals()["pending_status"] = real_status
+    printed.append(odd_out.getvalue())
+    try:
+        with open(os.path.join(os.path.expanduser(STATE_DIR), "log"), encoding="utf-8") as f:
+            logged = f.read()
+    except OSError:
+        logged = ""
+    t.ok(json_lines(odd_out.getvalue()) == [{"v": 1, "agent_mail": VERSION, "name": "pi", "error": "internal_error",
+                                             "problem": "PermissionError; see the agent-mail log"}]
+         and odd == 1 and odd_err.getvalue() == "" and "internal error: PermissionError" in logged,
+         "an unforeseen error is one JSON refusal, internal_error, naming only the exception's type; the details go to the log")
     leaks = ["wombat-sender", "numbat-sender", "quokka-sender", "SUBJECT-OF-", "BODY-OF-", "IN-A-DIRECTORY", "OLD-POST", "OLD-DIRECT",
              "STILL-SETTLING", "_from-"] + [os.path.basename(p)[:-len(".txt")] for p in files]
     found = sorted({x for x in leaks for text in printed if x in text})
