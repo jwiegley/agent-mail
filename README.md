@@ -94,7 +94,7 @@ Results are text only. Their first line names your binding, `agent-mail (bound n
 
 A tool error reads `agent-mail: <code>: <message>`.
 
-**Your name.** The server resolves it once, at start, from the first of these that is set: `--name`, `AGENT_MAIL_NAME`, `AGENTDECK_TITLE` (Codex sessions), the `- title:` line of `AGENTDECK_IDENTITY_FILE` (Claude sessions), and agent-deck's identity file for `AGENTDECK_INSTANCE_ID` (Pi sessions). An identity file counts only as your own regular file under `~/.local/share/agent-deck/runtime/identity/`. A name that is invalid or reserved binds nothing, and the server says why. Without a name, every tool except `channels` answers `no_identity`.
+**Your name.** The server resolves it once, at start, from the first of these that is set: `--name`, `AGENT_MAIL_NAME`, `AGENTDECK_TITLE` (Codex sessions), the `- title:` line of `AGENTDECK_IDENTITY_FILE` (Claude sessions), and agent-deck's identity file for `AGENTDECK_INSTANCE_ID` (Pi sessions). An identity file counts only as your own regular file under `~/.local/share/agent-deck/runtime/identity/`, or under `~/.local/share/agent-deck-hosts/<host>/agent-deck/runtime/identity/`, where `<host>` is this host's short name in lower case (agent-deck's host-local data home on a home directory shared over NFS; another host's directory there never counts). `AGENTDECK_HOST_LOCAL_DATA_HOME` never widens this: a value other than `~/.local/share/agent-deck-hosts/<host>` is ignored, and a refusal says so. A name that is invalid or reserved binds nothing, and the server says why. Without a name, every tool except `channels` answers `no_identity`.
 
 **The safeguards.**
 
