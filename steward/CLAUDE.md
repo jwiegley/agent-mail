@@ -247,7 +247,7 @@ Q ingest-3: HF org for glm-5.3-fp8: A positron-internal, B positron-ai?
   ```
   Q <prefix>-<n> still open 4h: <text>: A <x>, B <y>?
   ```
-- Above the line goes the detail: the options with their consequences, your recommendation, the default and its deadline, what is blocked, and the exact Discord message John would send, `<name>: <q-id> <letter>` (`ingest-steward: ingest-3 A`), as a new message in that lower-case prefix: until John's bridge patch lands, a reply to the page or a capitalised prefix reaches the director, not you. The detail holds no question mark.
+- Above the line goes the detail: the options with their consequences, your recommendation, the default and its deadline, what is blocked, and the exact Discord message John would send, `<name>: <q-id> <letter>` (`ingest-steward: ingest-3 A`), as a new message with your prefix, in any case, or as a reply to your page; either reaches you. The detail holds no question mark.
 - No quiet hours.
 - The line is the whole of the way to John: never mail conductor-director a question or a record of one, nor a digest, since it reads mail only when John prompts it.
 - When a question's deadline passes with no answer, apply its default: mail the worker concerned `DEFAULT <q-id>: <hold|wait|skip>, no answer from John by <deadline>`, record it in `DECISIONS.md` with `by: steward default`, and close the question. A default only holds, waits or skips; it never starts work.
@@ -420,7 +420,7 @@ When `transit-without-note` was above zero that day, the summary gives how many 
 <UTC> tick=<min> open=<n> active=<n> waiting-john=<n> last-post=<UTC> doorbell=<ok|missing>
 ```
 
-`<UTC>` is the time now as `YYYYMMDDTHHMMSSZ`. `tick=` is the cadence in minutes of the tick you armed. `open=` counts every item that is not `done` or `dropped`; `active=` and `waiting-john=` count the items in those states. `last-post=` is the stamp, to the second, of the newest post on the channel that you know of, one you filed or one you sent. `doorbell=` is what `/usr/bin/pgrep` finds after this turn's re-arm or restart. STATUS is your only liveness guard: John's scanner pages `NEED(steward): <steward> STATUS unchanged since <UTC> (tick <m>m, <n> open)` once in each stale episode, when the file is older than twice its `tick=` and `open=` is above zero, or when it is that old and the channel holds a post stamped after its `last-post=`. The director's stall page never fires for you, since your doorbell and tick count as live work.
+`<UTC>` is the time now as `YYYYMMDDTHHMMSSZ`. `tick=` is the cadence in minutes of the tick you armed. `open=` counts every item that is not `done` or `dropped`; `active=` and `waiting-john=` count the items in those states. `last-post=` is the stamp, to the second, of the newest post on the channel that you know of, one you filed or one you sent. `doorbell=` is what `/usr/bin/pgrep` finds after this turn's re-arm or restart. STATUS is your only liveness guard: John's scanner pages `NEED(steward): <steward> STATUS unchanged since <UTC> (tick <m>m, <n> open)` once in each stale episode, when the file is older than twice its `tick=`, whatever `open=` says: your tick is always armed, so a stale STATUS means you have stopped taking turns. The director's stall page never fires for you, since your doorbell and tick count as live work.
 
 ## 13. Restarts and resets
 

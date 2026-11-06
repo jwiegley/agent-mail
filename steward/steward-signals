@@ -5706,74 +5706,47 @@ def test_docs_checks(d):
        "docs: in a checkout with no CLAUDE.md, each check function adds one failure that names it and the error, the next one still runs, and ok and REPO are put back")
 
 
-# agent-mail's name grammar and its bound on a post stamped ahead, which three files copy and nothing else ties together (the final review, M-4): agent-mail's
-# own NAME_PAT and FUTURE, this file's NAME_RE, from which MSG_RE is built, and the scanner patch's MAIL_NAME and MAIL_FUTURE. Each copy is read as text from a
-# checkout, the line that defines it found by a pattern whose group is the copy, so that a check can plant a copy that drifts in a scratch checkout. A bound is
-# a number, or numbers joined by *, as the patch writes 24 * 3600.
-GRAMMAR_COPIES = (  # (the file, its path in a checkout, the line that defines its name pattern, the line that defines its bound or None)
-    ("agent-mail", "agent-mail", r'^NAME_PAT = r"(.*)"$', r"^FUTURE = ([0-9.* ]+?) *(?:#.*)?$"),
-    ("steward-signals", os.path.join("steward", "steward-signals"), r'^NAME_RE = re\.compile\(r"(.*)"\)', None),
-    ("the scanner patch", os.path.join("steward", "patches", "monitor_sessions-steward.patch"), r'^\+MAIL_NAME = r"(.*)"$', r"^\+MAIL_FUTURE = ([0-9.* ]+?) *(?:#.*)?$"))
-
-
-def product_of(text):
-    """The value of TEXT, a number or numbers joined by *, such as 24 * 3600, as a float; None for anything else."""
-    parts = [part.strip() for part in text.split("*")]
-    if not all(NUMBER_RE.fullmatch(part) for part in parts):
-        return None
-    value = 1.0
-    for part in parts:
-        value *= float(part)
-    return value
+# agent-mail's name grammar, which two files copy and nothing else ties together (the final review, M-4): agent-mail's own NAME_PAT and this file's NAME_RE,
+# from which MSG_RE is built. (Until 2026-11-05 the scanner patch was a third copy, with agent-mail's bound on a post stamped ahead; John's scanner no longer
+# reads the mailbox.) Each copy is read as text from a checkout, the line that defines it found by a pattern whose group is the copy, so that a check can plant
+# a copy that drifts in a scratch checkout.
+GRAMMAR_COPIES = (  # (the file, its path in a checkout, the line that defines its name pattern)
+    ("agent-mail", "agent-mail", r'^NAME_PAT = r"(.*)"$'),
+    ("steward-signals", os.path.join("steward", "steward-signals"), r'^NAME_RE = re\.compile\(r"(.*)"\)'))
 
 
 def grammar_disagreements(checkout):
     """Why the copies of GRAMMAR_COPIES in the checkout CHECKOUT do not agree, one line for each reason, or [] when they agree: a copy whose defining line is
-    missing or not alone in its file, a bound that is not a number or a product of numbers, and a name pattern or a bound that differs from agent-mail's. It
-    reads the three files and nothing else, and what it says holds no question mark, since a pattern's are taken out."""
+    missing or not alone in its file, and a name pattern that differs from agent-mail's. It reads the two files and nothing else, and what it says holds no
+    question mark, since a pattern's are taken out."""
     copies, wrong = {}, []
-    for what, path, *lines in GRAMMAR_COPIES:
-        text = read(os.path.join(checkout, path))
-        for kind, line in zip(("name pattern", "bound"), lines):
-            if line is None:
-                continue
-            found = re.findall(line, text, re.M)
-            if len(found) != 1:
-                wrong.append(f"{what} has {len(found)} lines that define its {kind}, not one")
-            elif kind == "bound" and product_of(found[0]) is None:
-                wrong.append(f"the bound of {what} is not a number or a product of numbers")
-            else:
-                copies[what, kind] = found[0] if kind == "name pattern" else product_of(found[0])
-    for (what, kind), copy in copies.items():
-        theirs = copies.get(("agent-mail", kind))
+    for what, path, line in GRAMMAR_COPIES:
+        found = re.findall(line, read(os.path.join(checkout, path)), re.M)
+        if len(found) != 1:
+            wrong.append(f"{what} has {len(found)} lines that define its name pattern, not one")
+        else:
+            copies[what] = found[0]
+    theirs = copies.get("agent-mail")
+    for what, copy in copies.items():
         if what != "agent-mail" and theirs is not None and copy != theirs:
-            wrong.append(without_question_marks(f"the {kind} of {what}, {copy}, is not agent-mail's, {theirs}"))
+            wrong.append(without_question_marks(f"the name pattern of {what}, {copy}, is not agent-mail's, {theirs}"))
     return wrong
 
 
-def test_the_name_grammar_agrees_in_its_three_copies(d):
+def test_the_name_grammar_agrees_in_its_two_copies(d):
     found = grammar_disagreements(REPO)
-    ok(found == [], "docs: agent-mail, this helper and the scanner patch copy agent-mail's name grammar alike, and agent-mail and the patch its 24-hour bound on a post "
-                    f"stamped ahead (got {without_question_marks(repr(found))})")
-    _, path, line, _ = GRAMMAR_COPIES[1]
+    ok(found == [], f"docs: agent-mail and this helper copy agent-mail's name grammar alike (got {without_question_marks(repr(found))})")
+    _, path, line = GRAMMAR_COPIES[1]
     ok(re.findall(line, read(os.path.join(REPO, path)), re.M) == [NAME_RE.pattern], "docs: the copy that the grammar check reads in this helper's text is the NAME_RE it runs with")
 
 
 def test_the_grammar_check_catches_each_copy_that_drifts(d):
-    files = {path: read(os.path.join(REPO, path)) for _, path, _, _ in GRAMMAR_COPIES}
-    helper, patch, pattern = GRAMMAR_COPIES[1][1], GRAMMAR_COPIES[2][1], NAME_RE.pattern
+    files = {path: read(os.path.join(REPO, path)) for _, path, _ in GRAMMAR_COPIES}
+    helper, pattern = GRAMMAR_COPIES[1][1], NAME_RE.pattern
     regressions = (  # (what, the file, the text it changes, its replacement, how a reason that grammar_disagreements must give starts)
         ("agent-mail's pattern widened to underscores", "agent-mail", f'NAME_PAT = r"{pattern}"', 'NAME_PAT = r"[a-z0-9_](?:[a-z0-9._]|-(?!-))*"', "the name pattern of "),
         ("this helper's pattern allowing a double hyphen", helper, f'NAME_RE = re.compile(r"{pattern}")', 'NAME_RE = re.compile(r"[a-z0-9](?:[a-z0-9.-])*")',
          "the name pattern of steward-signals"),
-        ("the patch's pattern allowing capitals", patch, f'+MAIL_NAME = r"{pattern}"', '+MAIL_NAME = r"[a-zA-Z0-9](?:[a-zA-Z0-9.]|-(?!-))*"',
-         "the name pattern of the scanner patch"),
-        ("agent-mail's bound halved", "agent-mail", "FUTURE = 86400.0", "FUTURE = 43200.0", "the bound of the scanner patch, 86400.0, is not agent-mail's, 43200.0"),
-        ("the patch's bound halved", patch, "+MAIL_FUTURE = 24 * 3600", "+MAIL_FUTURE = 12 * 3600", "the bound of the scanner patch, 43200.0, is not agent-mail's, 86400.0"),
-        ("the patch's pattern line renamed", patch, "+MAIL_NAME = r", "+MAIL_NAME_PAT = r", "the scanner patch has 0 lines that define its name pattern"),
-        ("the patch's bound made a name", patch, "+MAIL_FUTURE = 24 * 3600", "+MAIL_FUTURE = ONE_DAY", "the scanner patch has 0 lines that define its bound"),
-        ("the patch's bound made a broken product", patch, "+MAIL_FUTURE = 24 * 3600", "+MAIL_FUTURE = 24 * * 3600",
-         "the bound of the scanner patch is not a number or a product of numbers"),
         ("a second definition of agent-mail's pattern", "agent-mail", f'NAME_PAT = r"{pattern}"\n', f'NAME_PAT = r"{pattern}"\nNAME_PAT = r"[a-z]+"\n',
          "agent-mail has 2 lines that define its name pattern"))
     for i, (what, path, old, new, reason) in enumerate(regressions):
@@ -5798,7 +5771,7 @@ def section_docs(d):
     test_docs_checks_catch_each_regression_in_the_readme(d)
     test_docs_checks_accept_the_never_clauses_they_describe(d)
     test_docs_checks_keeps_to_its_limits(d)
-    test_the_name_grammar_agrees_in_its_three_copies(d)
+    test_the_name_grammar_agrees_in_its_two_copies(d)
     test_the_grammar_check_catches_each_copy_that_drifts(d)
 
 
