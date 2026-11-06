@@ -1435,9 +1435,9 @@ def log_matters(rows, senders, members, steward, channel, waiting, handled, ledg
         claimed item itself is M5's), one line, for the newest such claim; and two requests from different members to different names that match each
         other, neither matching any claim, whoever made it, nor starting with a claim's slug, one line for the first of them;
       elsewhere (M4): a member's post on another channel whose first word is one of POST_VERBS or that matches an open claim on +CHANNEL (a CLAIM post
-        whose slug is an open item of LEDGER);
+        of the whole report, an open claim staying open for days, whose slug is an open item of LEDGER);
       misdirected (M5): a request whose slug names an open item of LEDGER owned by a member that is neither its sender nor its recipient.
-    The counts and every matter but U2 use the last TRAFFIC_HOURS hours, claims among them; U2 the whole report. No matter rests on a host-mismatch row
+    The counts and every matter but U2 use the last TRAFFIC_HOURS hours, D1's and D2's claims among them; U2 and M4's open claims the whole report. No matter rests on a host-mismatch row
     (see trusted), nor on a row stamped more than TOPIC_ALLOWANCE_S before SINCE: such a row may keep the steward quiet, never move it to act. So a
     reply on one marks no question post replied (which would spare its ROUTE), but a reply from a question's recipient spares U2 whatever its host, and
     U2 rests on no recipient that is not recording by a row the helper trusts. A matter whose first id TRAFFIC.log names with its own matter is left
@@ -5502,6 +5502,15 @@ def test_traffic_matter_rules(d):
     late = log_row("kimi-linear", "glm-5.2", 29 * 3600, "re", reply=question["id"])
     ok(log_matters_scene(d, [question, late])[0]["replied"] == [], "traffic: U1 reads the question posts of the last 24 hours")
     claim = log_row("+ingest", "muse-spark", 7200, "CLAIM glm53-fp8: evaluate glm-5.3 fp8")
+    open_ledger = ("## Items\n| slug | owner | what | writes | holds | state | first-seen | updated | waiting on | refs |\n|---|---|---|---|---|---|---|---|---|---|\n"
+                   "| glm53-fp8 | muse-spark | x | - | - | active | - | - | - | - |\n")
+    matched = log_row("+nix-config", "pipeline", 3000, "evaluate glm-5.3 fp8 bench")
+    old_open = log_row("+ingest", "muse-spark", 30 * 3600, "CLAIM glm53-fp8: evaluate glm-5.3 fp8")
+    ok([m["kind"] for m in log_matters_scene(d, [old_open, matched], ledger=open_ledger)[0]["elsewhere"]] == ["match"],
+       "traffic: M4 reads open claims from the whole report: a claim made 30 hours ago, still open, is still matched")
+    open_update = log_row("+ingest", "muse-spark", 7200, "UPDATE glm53-fp8: evaluate glm-5.3 fp8")
+    ok(log_matters_scene(d, [open_update, matched], ledger=open_ledger)[0]["elsewhere"] == [],
+       "traffic: M4's open claims are CLAIM posts: an UPDATE of an open item is none")
     ahead = log_row("kimi-linear", "glm-5.2", -2 * 3600, "kimi-eval: evaluate fp8 for glm-5.3")
     ok(log_matters_scene(d, [claim, ahead])[0]["duplicates"] == [], "traffic: a row stamped more than 10 minutes ahead raises no matter")
     cdir, box, fixture = log_scene(d, [claim, request, log_row("pipeline", "nix", -2 * 3600, "ahead", host="vulcan")])
