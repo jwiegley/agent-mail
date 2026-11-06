@@ -2,7 +2,7 @@
 
 Written 2026-10-31 on hera, on branch `work/conductor`, from John's request of that morning, the decisions he made in the `mail-conductor` session between 11:30 and 12:40 PDT, and five more he made after the builder check at about 13:30 PDT. Status: **approved by John on 2026-10-31, as written (decision 16).** The implementation plan comes next, through superpowers:writing-plans; building follows the plan.
 
-Amended 2026-11-02 for John's decisions 22 to 25 and 28 to 33 (23, 24 and 28 withdrawn); the amendments carry their markers.
+Amended 2026-11-02 for John's decisions 22 to 25 and 28 to 33 (23, 24 and 28 withdrawn); the amendments carry their markers. Amended 2026-11-06 for the send log, by the rollout's decisions 90 to 99 and `docs/superpowers/specs/2026-11-05-agent-mail-send-log-design.md`; those amendments carry their markers too.
 
 Marks. **[John n]** is John's decision, numbered in section 11. **[my call]** is a choice I made; every one is listed in section 11 for John to check. **Verified** means run or read on hera on 2026-10-31; **Unverified** means documented but not checked here. Placeholders: `<channel>` is a topic's channel name (`nix-config`, `ingest`), `<steward>` its steward's session and mailbox name (`conductor-nix-steward`, `conductor-ingest-steward`), `<prefix>` its question-id prefix (`nix`, `ingest`). Section 5.1 gives the mapping once.
 
@@ -156,7 +156,7 @@ Rules for workers (the text in 7.2, `steward/WORKER.md`):
 | Event | Files written | Who is rung |
 |---|---|---|
 | A state post (CLAIM, UPDATE, BLOCKED, DONE, DROP, NOTE) | 1, in `+<channel>/` | The steward (wake subscription); members read it quietly at their next receive |
-| A asks B | 2: direct mail to B, a NOTE post | B at once (Claude), within 30 s (Pi with its loop), at its next turn (Codex); the steward by the NOTE |
+| A asks B | 2: direct mail to B, a NOTE post | B at once (Claude), within 30 s (Pi with its loop), at its next turn (Codex); the steward by the NOTE *(amended 2026-11-06: and, while the send log is on, by the mail's record)* |
 | An unaddressed REQUEST or QUESTION | 1 post | The steward, which mails the likeliest member a one-line ROUTE with `In-Reply-To` the post id |
 | A steward intervention | 1 direct mail per party | That party |
 | A question for John | 0 | Discord and indicator 1 within one scanner pass |
@@ -363,6 +363,8 @@ The member-record and presence ages are not used for deafness: v2's doorbell nev
 
 **Signals helper.** `steward-signals <channel>`: a stdlib Python script in the agent-mail repository's `steward/` directory, read-only, with a self-test **[John 8]**. It prints one row per member: agent-deck status and substate (hera's `agent-deck list --json`, and `agent-deck remote sessions <host> --json --with-errors` for remote members, marking every member of a failed host unknown); unread direct mail, by file names, with the oldest stamp; the yes-or-no waiting-on-John probe for one named member; and the census joins: own-name files against `SENT.log`, NUDGE ids against unread names, member-to-member mail seen in transit against NOTE `direct:` ids. It reads member records as metadata, never a message body. A `metrics` subcommand merges the steward's counters into `metrics/<date>.json`. About 200 lines. The helper exists before the pilot; the skill also gives the raw commands for a day when the helper is broken.
 
+*Amended 2026-11-06 (rollout decisions 90 to 99): a second subcommand, `steward-signals traffic <channel>`, run on each tick after `signals`, reports a member's mail left waiting for a name with no reader, a stopped member or a member that is not reading (M1 to M3, from file names alone, before agent-mail 2.4), and, from the send log read through `agent-mail traffic`, a request made after a third session's matching claim (D1), two matching requests (D2), a question post answered by a recorded reply (U1), a member's question by mail with no recorded reply after `answer_h` (U2), a member's post on another channel (M4) and a request to an item's wrong owner (M5), with counts for the topic and the fleet. It prints ids, names, counts, single words and slugs, never a subject whole. Its rules are the send-log design's 5.8.*
+
 ### 6.6 Intervention and autonomy
 
 **Defaults.** Say nothing and never acknowledge. Intervene once per matter, by direct mail, in the steward's own words, naming posts by id. At most 6 sends per turn and 20 per hour; more means a loop or a flood, so stop and ask John **[my call]**.
@@ -370,13 +372,13 @@ The member-record and presence ages are not used for deafness: v2's doorbell nev
 **What it does alone** **[John 9: all four]**:
 
 1. **Nudge** an idle-with-item or busy-stuck worker: one short question, at most twice per item per day **[John]**, at least 30 minutes apart, never before a declared `until`; the second nudge says it is the last **[my call: the limits beyond twice a day]**.
-2. **Census** of file names in `~/Mailbox` and `+<channel>/`: who has unread mail and for how long; which steward-named files are not in `SENT.log`; which member-to-member mails seen in transit have a NOTE. Names only, never contents.
-3. **Hold, wait or skip defaults**: tell the later claimant in an overlap to wait for the earlier; say a claim duplicates landed work and suggest skipping; route an unanswered `QUESTION` after 30 minutes to the likeliest member; apply a question's safe default at its deadline, as `DEFAULT <q-id>: <hold|wait|skip>, no answer from John by <deadline>`, recorded in `DECISIONS.md` with `by: steward default`. Only outcomes that hold, wait or skip; nothing that starts work.
+2. **Census** of file names in `~/Mailbox` and `+<channel>/`: who has unread mail and for how long; which steward-named files are not in `SENT.log`; which member-to-member mails seen in transit have a NOTE. Names only, never contents. *Amended 2026-11-06 (the send-log design, 5.8.1 and 5.8.2; rollout decision 90): once agent-mail 2.4's send log is on, the census also reads the members' records through `agent-mail traffic`, by way of `steward-signals traffic`: who mailed whom, when, the reply link, and each subject reduced to sorted single words and its slug; metadata only, never a body.*
+3. **Hold, wait or skip defaults**: tell the later claimant in an overlap to wait for the earlier; say a claim duplicates landed work and suggest skipping; route an unanswered `QUESTION` after 30 minutes to the likeliest member (*amended 2026-11-06, the send-log design's U1, 5.8.4: not one that a recorded reply answers, which stays open until an ANSWER post, and one only John can answer still goes to him*); apply a question's safe default at its deadline, as `DEFAULT <q-id>: <hold|wait|skip>, no answer from John by <deadline>`, recorded in `DECISIONS.md` with `by: steward default`. Only outcomes that hold, wait or skip; nothing that starts work.
 4. **Offer seeded backlog**: a starved worker is offered the next unclaimed `BACKLOG.md` items whose `needs:` it meets, as a suggestion; it claims or declines. (John chose the option whose description offers items; the steward never assigns.)
 
 **Never**: invent or assign work; approve anything; restart, stop, launch or type into a session; page Discord itself; drain another inbox; relay by any path but mail.
 
-Message templates (fixed subject shapes, so workers can act on them mechanically; every body carries `slug:`): `OVERLAP <a> / <b>: both write <place>`, `DUPLICATE <new> looks like <old> (<owner>, claimed <time>)`, `ALREADY-DONE <slug>: <refs>`, `NUDGE <slug>: no update since <time>`, `OFFER: <n> unclaimed items you can take`, `ROUTE <slug>: <asker> asked the topic <one line> (post <id>)`, `NEEDS-JOHN <slug>: <action> needs John in your own session`, `DECISION <q-id>: <letter>, <option text>`, `DEFAULT <q-id>: <hold|wait|skip>`, `DISPUTE <id>: not sent by me`, `STEWARD back after <duration>`.
+Message templates (fixed subject shapes, so workers can act on them mechanically; every body carries `slug:`): `OVERLAP <a> / <b>: both write <place>`, `DUPLICATE <new> looks like <old> (<owner>, claimed <time>)`, `ALREADY-DONE <slug>: <refs>`, `NUDGE <slug>: no update since <time>`, `OFFER: <n> unclaimed items you can take`, `ROUTE <slug>: <asker> asked the topic <one line> (post <id>)`, `NEEDS-JOHN <slug>: <action> needs John in your own session`, `DECISION <q-id>: <letter>, <option text>`, `DEFAULT <q-id>: <hold|wait|skip>`, `DISPUTE <id>: not sent by me`, `STEWARD back after <duration>`. *Amended 2026-11-06 (the send-log design, 5.8.4 and 5.8.5; rollout decision 96): and `UNREAD <id>: <to> has not read it since <time>`, from the census's unread mail, and `UNANSWERED <id>: no reply since <time>`, from the send log.*
 
 ### 6.7 Questions to John and his answers
 
@@ -460,7 +462,7 @@ John asked that the system be watched at every stage so that refinements come in
 | Counter | Why |
 |---|---|
 | notice delay: from a triggering post's stamp to the turn that filed it, and from first-seen to the intervention sent (p50 and max) | the filer's trigger in section 9 |
-| posts seen; direct mails to the steward; NOTEs; member mail seen in transit without a NOTE (a lower bound: delivered mail leaves the shared folder within seconds and archives never sync) | coverage, reported without a ratio |
+| posts seen; direct mails to the steward; NOTEs; member mail seen in transit without a NOTE (a lower bound: delivered mail leaves the shared folder within seconds and archives never sync) *(amended 2026-11-06: with the send log on, a recording member's sends are counted exactly; the lower bound remains for senders not yet recording)* | coverage, reported without a ratio |
 | interventions by type and the worker's response (acted, disputed, ignored) | usefulness and false flags |
 | questions opened, answered, dropped, defaulted; time from pane line to answer; pages per day; `rate` records | the question path |
 | relays sent; relays disputed; relays that failed a check; forged files found | decision 5b's signal |
@@ -479,7 +481,7 @@ John asked that the system be watched at every stage so that refinements come in
 
 **Amplification.** Direct mail is uncapped in v2; the steward caps itself (6 per turn, 20 per hour) and never acknowledges; a per-session direct-mail cap is a v2.1 candidate (section 8). It never nudges a Codex worker and never drains an inbox.
 
-**Data domains.** Posts on `+ingest` reach every host, including the personal-only ones, and `+nix-config` posts reach the Positron hosts' local disks. John decided against fences **[John 7b]**; the v2 risk "one folder mixing data domains" is accepted, not retired.
+**Data domains.** Posts on `+ingest` reach every host, including the personal-only ones, and `+nix-config` posts reach the Positron hosts' local disks. John decided against fences **[John 7b]**; the v2 risk "one folder mixing data domains" is accepted, not retired. *Amended 2026-11-06 (rollout decision 91): with the send log on, every send's subject, direct mail's included, sits on all ten hosts for 7 days, readable by any process of John's user; John approved that, and the steward never copies a subject into its files, mail, posts or pane.*
 
 ### 6.12 Failure modes
 
@@ -492,7 +494,7 @@ John asked that the system be watched at every stage so that refinements come in
 | Syncthing lag or hera down | A Positron post reaches the steward late or not at all while hera is down; first-seen ordering tolerates late claims; workers carry on directly |
 | A forged `from-<steward>` post or mail | Found by the census at the next turn (post) or while in transit (mail); `DISPUTE`, one question line to John, protected relays suspended until he decides |
 | A forged relay that passes the checks | Not detected before the worker acts; the same-day suspension and John's review follow the DISPUTE, if any |
-| Workers bypass the channel (direct mail without a NOTE) | Partly visible as mail seen in transit without a NOTE; the digest reports the count as a lower bound; the steward reminds once by mail |
+| Workers bypass the channel (direct mail without a NOTE) | Partly visible as mail seen in transit without a NOTE; the digest reports the count as a lower bound; the steward reminds once by mail. *Amended 2026-11-06: with the send log on, a recording member's direct mail is seen whether or not a NOTE follows; the NOTE stays the rule until phase 2 (rollout decision 97).* |
 | The DECISION post arrives after the relay mail | The worker receives again within the window before concluding |
 | Nudge storm or loop | Self-cap of 6 per turn and 20 per hour; the steward stops and asks John |
 | Two stewards on hera | Each tick and doorbell is named by channel, so neither restarts the other's; a member in both topics posts each item in one topic |
@@ -565,7 +567,7 @@ If section 6.10's numbers show the notice delay too long, a filer takes over the
 
 John's, made 2026-10-31 in the `mail-conductor` session with the full options and trade-offs in front of him:
 
-1. **Routing:** copy, not custody. Peers mail each other directly and post NOTEs; state changes are posts; the steward sees everything and never carries a message; nothing changes in agent-mail 2 for the pilot.
+1. **Routing:** copy, not custody. Peers mail each other directly and post NOTEs; state changes are posts; the steward sees everything and never carries a message; nothing changes in agent-mail 2 for the pilot. *Amended 2026-11-06 (rollout decision 90, built in agent-mail 2.4): for metadata, the last clause is reversed and the steward's view widened. While John has the send log on, every send's time, host, sender, recipient, id, subject and reply link is recorded, never a body, and a steward reads its own members' records through `steward-signals traffic`. Copy, not custody, direct mail between peers, state changes as posts and carrying no message all stand.*
 2. **Name:** steward.
 3. **Placement:** real agent-deck conductors, running Claude Code, on hera, with the same powers as every session.
 4. **Questions:** a pane line of at most 80 characters ending in `?`, paged by the director's scanner; answers in the pane or by Discord `<conductor>:` prefix; questions only, never digests.
@@ -575,7 +577,7 @@ John's, made 2026-10-31 in the `mail-conductor` session with the full options an
 7. **Order:** both topics, staggered: ingest first, the day Task 25 lands and the Positron agent-deck is 1.16.30 or later; nix-config after one clean ingest day.
 7b. **Fences:** none; any host may take part in any topic ("I tend to work on both personal and positron tasks pretty much whenever").
 8. **Bookkeeping:** the model first, with a small read-only signals helper; a filer only when the measurements call for it, its interface fixed now.
-9. **Autonomy:** nudge (at most twice per item per day), census of file names, hold/wait/skip defaults, and offering seeded backlog.
+9. **Autonomy:** nudge (at most twice per item per day), census of file names, hold/wait/skip defaults, and offering seeded backlog. *Amended 2026-11-06 (rollout decision 90): the steward may also read the send log's metadata, through agent-mail and its helper, reduced to ids, names, counts and single words, never a subject whole.*
 10. **John's view:** files; a one-paragraph summary posted to the channel at 07:30; the digest on demand in the pane or by Discord.
 
 After the builder check, at about 13:30 PDT:
@@ -630,7 +632,9 @@ Checked daily during the pilots (6.10), then weekly.
 
 | Decision or call | Signal that reopens it | Alternative |
 |---|---|---|
-| 1 Copy, not custody | a conflict causes damage that holding the message for minutes would have prevented; or member mail seen in transit without a NOTE stays high for a week (a lower bound, so judged with the NOTE count) | gated claims on shared paths; tool-written Cc copies (the exploration's S3) |
+| 1 Copy, not custody | a conflict causes damage that holding the message for minutes would have prevented; or member mail seen in transit without a NOTE stays high for a week (a lower bound, so judged with the NOTE count) | gated claims on shared paths; tool-written Cc copies (the exploration's S3) *(amended 2026-11-06, rollout decision 99: decision 90 reversed this decision for metadata by John's choice, not by this row's signal, which was never measured)* |
+| 90/91 The send log's subjects | a subject, or a phrase of one, found in a digest, a post, a pane or Discord | counts only; or the log off |
+| 90/96 The send log's matters | two false DUPLICATE, UNREAD or UNANSWERED mails in a week | counts only; or the log off |
 | 2 Steward | the word misleads members or John in practice | shepherd, coordinator |
 | 3 Real conductors | setup, the heartbeat or the bridge misbehaves for a Claude conductor; a reset loses state despite the files | ordinary agent-deck sessions with the same files |
 | 3 Powers | any sign a steward acted on injected text beyond writing mail | an allowlist without dangerous_mode, once agent-deck allows it per session |
