@@ -5,6 +5,7 @@ The build session for agent-mail 2.4 and the steward helper's `traffic` subcomma
 ## Refocus checkpoint
 
 - 2026-11-06 06:14 PST: goal, the brief's steps 1, 2 and 6 in that order; step 1's code, checks and texts done; no detours. Next: commits, a fresh review, the report. Next check by 07:14 PST.
+- 2026-11-06 09:14 PST: step 1 reported to mail-dev as ready to land (81d66ce); step 2 committed (be6fc82, af7f469); the fess audit of the branch next, then step 6. Next check by 10:14 PST.
 - 2026-11-06 09:11 PST, late (due 07:35; step 1's reviewer ran 2 h 51 min, and the check was missed while waiting on it): both reviews back and every finding fixed; step 1's fixes committed next (with this file), then step 2's commits and its fess audit. No detours. Next check by 10:11 PST.
 - 2026-11-06 06:35 PST: step 1 committed (a510f1e, f0585b6) and under a fresh review; step 2's program, checks and README written and passing, held uncommitted until step 1's review fixes are in, so that step 1's commits stay a prefix of the branch. No detours. Next: step 1's fixes, then step 2's commits, review and fess audit. Next check by 07:35 PST.
 
@@ -13,7 +14,7 @@ The build session for agent-mail 2.4 and the steward helper's `traffic` subcomma
 | Step | What | State |
 |---|---|---|
 | 1 | `steward-signals traffic` with M1 to M3 from file names, `UNREAD`, TRAFFIC.log, CLAUDE.md and steward README rows | committed a510f1e, f0585b6, and the review fixes after them; ready to land |
-| 2 | agent-mail 2.4.0: the record, `via`, retention, `agent-mail traffic` (human and JSON v1), doctor, README, version, self-test | written; fresh review done, every finding fixed; uncommitted until step 1's fixes are in |
+| 2 | agent-mail 2.4.0: the record, `via`, retention, `agent-mail traffic` (human and JSON v1), doctor, README, version, self-test | committed be6fc82 (program), af7f469 (README); fresh review done, every finding fixed; fess audit next |
 | 6 | the helper's log reader, D1, D2, U1, U2, M4, M5, counts, the privacy bullet, WORKER.md, `answer_h` | not started |
 
 ## Test counts
@@ -65,6 +66,10 @@ Step 2:
   - `+all` and `+root` passed as recipients; plurals; subjects quoted as JSON strings; `--since` read to the second; doctor's newest ignores stamps far ahead; README: decision 92 at the turn-on command, the refusals outside JSON, the prune's timing, the example's consistency, `recording_since` null, `not_regular` widened;
   - the four survivors (an MCP send without `to`, a record of exactly 4,096 bytes, coverage under `--name`, a non-regular marker in the prune) each have a check now; 13 mutants of the fixes, all killed.
   - Left as designed: doctor counts a record it could not open, since it reads names and lstat alone (design 5.6).
+
+## Corrections
+
+- 2026-11-06 09:1x PST: the 2.4.0 program was first committed as 0efcee6, with the README as 04a90bd, under a stale draft message (705 checks, thirty mutants, no review) after a failed edit of the message went unnoticed in the same shell call. Neither was reported or pushed. Both were rebuilt with `git commit-tree -S` on the same trees and the corrected message as be6fc82 and af7f469; `git diff 04a90bd af7f469` is empty.
 
 ## For mail-dev to carry (not in this repository)
 
