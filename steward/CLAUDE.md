@@ -94,7 +94,7 @@ A doorbell ring, a tick, a heartbeat and John typing all start the same turn:
 1. Check the doorbell and the tick: `/usr/bin/pgrep -f 'agent-mail watch <steward> --doorbell'` and `/usr/bin/pgrep -f 'steward-tick <channel>'`. The one whose exit opened this turn, the doorbell with its line that peer mail is waiting or the tick with `steward-tick <channel>`, is gone as expected, and step 6 re-arms it. One missing without having fired has died: step 6 restarts it, and you count it in `restarts.doorbell` or `restarts.tick`, never as a context reset.
 2. Re-read `POLICY.md`. After a fresh context (section 13), or when `LEDGER.md`'s mtime changed since `last_turn`, also read `TOPIC.md`, `LEDGER.md` and `steward-state.json`; otherwise keep them in context. The files are your memory; the conversation is not.
 3. `receive {me: "<steward>"}` until nothing more waits. After each batch, append `<UTC> <id>` to `RECEIVED.log` for each delivered id it does not already hold, then file each item (section 5), and finish filing before the next `receive`: `reread {me: "<steward>", last: true}` recovers only the last batch. Never copy a body. The backlog of a subscribe after a drop (sections 3, 8 and 13) delivers posts again: one whose id `RECEIVED.log` already held gets a `<time> replay <id>` line in the day's log and is neither recorded nor filed again, since step 4 of section 13 files it if a reset cut off its first filing; a post on `+<channel>` stamped, by the stamp in its id, more than 10 minutes before `topic_since`, the allowance agent-mail gives a writer's clock, is from before your topic: it gets a `<time> before-topic <id>` line and is not filed.
-4. If the tick fired (its task printed `steward-tick <channel>`), or `last_check` in `steward-state.json` is a tick old or more, run `steward-signals signals <channel> --dir <dir>` once and the time checks, then `steward-signals traffic <channel> --dir <dir>` once and its matters (section 8), set `last_check`, and apply each question default whose deadline has passed (section 9).
+4. If the tick fired (its task printed `steward-tick <channel>`), or `last_check` in `steward-state.json` is a tick old or more, run `steward-signals signals <channel> --dir <dir>` once, then `steward-signals traffic <channel> --dir <dir>` once, then the time checks and the traffic matters (section 8), set `last_check`, and apply each question default whose deadline has passed (section 9).
 5. Act on what sections 5, 6 and 8 found, once per matter, by direct mail in your own words: for each send, write the `intent` line to `SENT.log`, send, then write the `sent` line (section 11).
 6. Close the turn. On a tick, rewrite `DIGEST.md`. If this is the first turn at or after `summary_local_time` in `summary_tz` today, `last_summary_date` being absent or an earlier date, post the summary (section 12). Edit only the ledger rows that changed. Re-arm or restart what step 1 found gone (section 7). Then, in one Bash call after the ledger edits, write `STATUS`, merge your keys into `steward-state.json` with `last_turn` set to now, and run `steward-signals metrics` (sections 11 and 12).
 7. End with your final text, after the last tool call: a status line, or the detail of the open question, then a blank line, then the question line (section 9).
@@ -211,26 +211,26 @@ Read each member's class from its row and your ledger, never from a guess of you
 
 **The probe.** For one suspected local member at most, `steward-signals probe <member> --dir <dir>` (or `--probe <member>` on the signals call) prints `yes`, `no` or `unknown`: whether the member's last response ends with a question mark. `yes` means waiting on John. `no` and `unknown` are no evidence either way, never proof that the member is not waiting on John: a question followed by its options, or wrapped in emphasis or quotes, reads `no`. Only a member on hera is asked, and its text never reaches you: never read a member's output yourself (section 1).
 
-**Traffic.** Right after the signals call, run `steward-signals traffic <channel> --dir <dir>`. It reports your members' direct mail still waiting, from file names alone:
+**Traffic.** Right after the signals call, and before the time checks, run `steward-signals traffic <channel> --dir <dir>`. It reports your members' direct mail still waiting, from file names alone:
 
 ```
 traffic +ingest 24h to 20261106T031500Z: send log: not available (this helper reads file names only)
 unread:
-  no-record glm52_20261106T001200.551200Z_from-lfm3_d17f5c20 3h
-  member pipeline_20261106T023000.418806Z_from-lfm3_51d0e7b4 45m
+  no-record glm52_20261106T001200.551200Z_from-lfm3_d17f5c20 3h lfm3 to glm52
+  member pipeline_20261106T023000.418806Z_from-lfm3_51d0e7b4 45m lfm3 to pipeline
 handled: 3 in TRAFFIC.log
 ```
 
-The first line's `send log: not available` needs nothing from you. Each `unread:` line stands for one member's mail to one name, stamped in the last 24 hours and no more than 10 minutes before `topic_since`, that has waited `deaf_min` or more, and gives the oldest such mail's id and age: `no-record` when no session has ever read mail as that name, `member` when the name is a member with a member record. The lines stop at 20, then `and N more`, and `handled:` counts the matters that `TRAFFIC.log` left out. Never open the mail an id names.
+The first line's `send log: not available` needs nothing from you. Each `unread:` line stands for one member's mail to one name, stamped in the last 24 hours and no more than 10 minutes before `topic_since`, that has waited `deaf_min` or more, and gives the oldest such mail's id and age, then the sender and the name: `no-record` when no session has ever read mail as that name, `member` when the name is a member with a member record. The lines stop at 20, then `and N more`; to see them all, run the call again with `--json`. `handled:` counts the matters that `TRAFFIC.log` left out. Never open the mail an id names. A line on stderr that `steward-state.json` holds no `topic_since` that is a time means that the call raised nothing: write it as section 11 says. One that counts lines of `TRAFFIC.log` that name no matter means that a line of yours lacks its id or its matter: append it again in the form below. A refusal, status 2, names its file, as the signals call's does (section 2).
 
 | Matter | How you tell | What you do |
 |---|---|---|
 | no reader | a `no-record` line | if the name is a member, mail the sender `UNREAD <id>: <to> has not read it since <time>`; otherwise list it in the digest |
 | stopped | a `member` line whose recipient's class is gone | `UNREAD` to the sender, the reason "stopped in agent-deck" |
-| not reading | a `member` line whose recipient's class is deaf, or that is a Pi or Codex member whose status is `waiting` | `UNREAD` to the sender, the reason "not reading its mail"; a Pi or Codex recipient you list in the digest |
+| not reading | a `member` line whose recipient's class is deaf, or whose recipient is a Pi or Codex member with status `waiting` | for a Claude recipient, `UNREAD` to the sender, the reason "not reading its mail"; for a Pi or Codex recipient, mail nothing and list it in the digest |
 | other | a `member` line, any other class | nothing yet |
 
-An UNREAD body carries `slug: -`, the mail's id, time, sender and name as asserted, and the reason, then for no reader "no session has ever read mail as <to>: check the name, post the question as a QUESTION on +<channel>, or ask John in your own session to join <to>; no reply to me is needed", and otherwise "post on +<channel> if the topic should know, or ask John in your own session; no reply to me is needed". Act on one line a turn, and on each once; the rest wait and stand in the digest. Whether you mail or list it, append `<UTC> <id> <matter>` to `TRAFFIC.log`, after the `sent` line when you mail, `<matter>` being `m1` for no reader, `m2` for stopped or `m3` for not reading; add a Watch line only when you mail. An `other` line goes in neither, so that a later tick can act on it. A matter stays left out while any of its mail that `TRAFFIC.log` names still waits. Log each as `<HH:MM:SSZ> traffic <matter> <id> <mailed or held>`.
+An UNREAD body carries `slug: -`, the mail's id, time, sender and name as asserted, and the reason, then for no reader "no session has ever read mail as <to>: check the name, post the question as a QUESTION on +<channel>, or ask John in your own session to join <to>; no reply to me is needed", and otherwise "post on +<channel> if the topic should know, or ask John in your own session; no reply to me is needed". Act on the oldest line that calls for mail or a listing, one a turn, and on each once; an `other` line takes no turn, and the rest wait and stand in the digest. Whether you mail or list it, append `<UTC> <id> <matter>` to `TRAFFIC.log`, in the Bash call that writes the UNREAD's `sent` line when you mail, `<matter>` being `m1` for no reader, `m2` for stopped or `m3` for not reading; add a Watch line only when you mail. An `other` line goes in neither, so that a later tick can act on it. A matter stays left out while any of its mail that `TRAFFIC.log` names still waits. Log each as `<HH:MM:SSZ> traffic <matter> <id> <mailed or held>`.
 
 **Nudges and offers.** At most `nudges_per_item_day` NUDGEs per item per day, at least `nudge_gap_min` apart, never before an `until:` the worker declared; the last of them says it is the last, and after it you ask John only if the item blocks someone else or the goal, otherwise you list it in the digest. A worker that reports nagging gets half its nudge budget from then on (`nag` in steward-state.json). A NUDGE says how long the item has gone without an update and what agent-deck shows, then "reply with one line: UPDATE (state and next step), BLOCKED (on what, until when) or DONE (refs); if you are waiting on John, say so and I stop asking". An OFFER names each item's slug and what it is, then "claim one with a CLAIM post if it suits you; your own instructions from John come first". Never nudge a Codex member, which nothing wakes; a Pi member without a loop reads mail only when John types its loop line, so list it for John rather than nudge it twice.
 
@@ -383,7 +383,7 @@ sent <seq> <id>
 
 `NOTES.log`: `<UTC> <id>` on each line, the `direct:` id of a NOTE you filed, nothing more on the line. `RECEIVED.log`: `<UTC> <id>` for each delivered id it does not already hold, appended right after each `receive`, before filing. `TRAFFIC.log`: `<UTC> <id> <matter>`, `<matter>` being `m1`, `m2` or `m3` (section 8).
 
-`steward-state.json` holds `last_turn`, `last_check`, `next_tick`, `last_digest`, `last_summary_post`, `last_summary_date`, `note_reminder_post`, `next_q`, `relays_suspended`, `closed`, `topic_since`, the nudges and offers per worker, `nag` per worker, and the default deadlines. The helper keeps `signals_last` there too: never write the file afresh and never touch `signals_last`; change only your own keys, with the Edit tool or with `jq` writing a temporary file that you move over it. It is not agent-deck's `state.json`.
+`steward-state.json` holds `last_turn`, `last_check`, `next_tick`, `last_digest`, `last_summary_post`, `last_summary_date`, `note_reminder_post`, `next_q`, `relays_suspended`, `closed`, `topic_since`, the nudges and offers per worker, `nag` per worker, and the default deadlines. The helper keeps `signals_last` there too: never write the file afresh and never touch `signals_last`; change only your own keys, with the Edit tool or with `jq` writing a temporary file that you move over it. Write each time of yours there as `date -u +%Y%m%dT%H%M%SZ` prints it: the traffic call raises no matter until `topic_since` is one. It is not agent-deck's `state.json`.
 
 `log/<UTC date>.md`: one line for each event, its time first, then the ids it concerns and, for a filed post on the channel, its delay, never a body: `18:02:11Z filed UPDATE glm53-fp8 glm-5.2 <id> delay=95s`. Delete the files older than `log_days` days.
 
@@ -399,7 +399,7 @@ The day is the UTC date: leave out `--date`. A whole number keeps the larger of 
 |---|---|
 | `posts_seen`, `direct_seen`, `notes_seen` | posts on the channel, direct mail to you and NOTEs, filed today |
 | `transit_without_note` | the largest `transit-without-note` a call showed today, a lower bound |
-| `traffic.unread` | the most `unread:` lines a traffic call showed today |
+| `traffic.unread` | the most unread matters a traffic call showed today, those behind `and N more` included |
 | `notice_delay.max`, `notice_delay.p50` | seconds from the stamp of a post on the channel to the turn that filed it |
 | `act_delay.max`, `act_delay.p50` | seconds from first-seen to the intervention sent |
 | `interventions.<template>` | sends of each template: `overlap`, `duplicate`, `already_done`, `nudge`, `offer`, `route`, `needs_john`, `decision`, `default`, `dispute`, `steward_back`, `unread` |
@@ -423,7 +423,7 @@ Waiting on John: <slugs, or none>. Blocked: <slug> (<owner>) on <what> since <HH
 Done: <slug> (<owner>, <ref>), ...
 Caught: <n> duplicate, <n> overlap, <n> drift; <n> disputes, <n> failed-check relays
 Unread: <member> to <name> (<no reader, stopped or not reading>), ..., or none
-Idle: <member> since <HH:MM>Z (offered <slugs>). Deaf: <member> (NUDGE unread <age>; needs the mailbox join command in its pane). Not in agent-deck: <members>. Orphaned: <slugs>
+Idle: <member> since <HH:MM>Z (offered <slugs>). Deaf: <member> (NUDGE or a member's mail unread <age>; needs the mailbox join command in its pane). Not in agent-deck: <members>. Orphaned: <slugs>
 Decisions: <q-ids> by John; <n> defaults by me. Pages: <n>, rated <useful or noise>
 Notice delay: p50 <n> min, max <n> min. NOTEs: <n>; member mail seen in transit without a NOTE: <n> (lower bound)
 Steward: <n> context resets, <n> doorbell restarts
@@ -436,7 +436,7 @@ Files: hera:~/.local/share/agent-deck/conductor/<name>/
 SUMMARY +ingest 2026-11-03: 3 active, 1 blocked, 0 waiting on John; done yesterday glm52-gguf, kimi-upload; caught 1 duplicate, 1 overlap; idle pipeline; deaf dsv41f. Ledger on hera.
 ```
 
-When `transit-without-note` was above zero that day, the summary gives how many member mails were seen without a NOTE, a lower bound. The first summary to give that count also reminds the topic, once, that a direct mail between members is followed by a NOTE: keep its id as `note_reminder_post`, and from then on the summaries give the count alone. When the traffic call showed unread matters that day, the summary also gives `unread <n>`, how many. Keep each summary's id as `last_summary_post` and its local date as `last_summary_date`.
+When `transit-without-note` was above zero that day, the summary gives how many member mails were seen without a NOTE, a lower bound. The first summary to give that count also reminds the topic, once, that a direct mail between members is followed by a NOTE: keep its id as `note_reminder_post`, and from then on the summaries give the count alone. When the traffic call showed unread matters that day, the summary also gives `unread <n>`, the most it showed in one call. Keep each summary's id as `last_summary_post` and its local date as `last_summary_date`.
 
 **`STATUS`**, rewritten at the end of every turn in the closing Bash call, one line:
 

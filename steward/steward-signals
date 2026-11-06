@@ -1182,15 +1182,27 @@ Unread = collections.namedtuple("Unread", "kind id sender to age")  # kind is "n
 
 
 def read_traffic_log(path):
-    """The matters in the TRAFFIC.log at PATH, which the steward appends to, as a set of (id, matter) pairs from its lines `<UTC> <id> <matter>`: the id is a
-    message's id, its file's name without .txt (see parse_name), and the matter one of TRAFFIC_MATTERS. The time is the steward's own and is not read. A line of
-    any other shape is skipped, a damaged byte is replaced, and a missing file holds none."""
+    """(the matters, how many lines name none) in the TRAFFIC.log at PATH, which the steward appends to as `<UTC> <id> <matter>`. The matters are a set of
+    (id, matter) pairs: a line names one when it holds a message's id (a word that parse_name takes, with or without .txt) and one of TRAFFIC_MATTERS in any
+    case, each word taken without the quotes, brackets, stars and punctuation around it; the first of each counts, whatever else the line holds, so that a
+    slip such as `- <UTC> <id> M3 mailed` still keeps its matter out after a reset. TRAFFIC.log is the steward's own file, so reading it leniently trusts no
+    peer. A blank line is nothing; any other line that names no matter is counted. The time is not read, a damaged byte is replaced, and a missing file holds
+    none."""
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
-            rows = [line.split() for line in f]
+            lines = f.read().splitlines()
     except FileNotFoundError:
-        return set()
-    return {(row[1], row[2]) for row in rows if len(row) == 3 and parse_name(f"{row[1]}.txt") is not None and row[2] in TRAFFIC_MATTERS}
+        return set(), 0
+    pairs, unnamed = set(), 0
+    for line in lines:
+        words = [word.strip("`'\"*()[]{}<>,;:.!-").removesuffix(".txt") for word in line.split()]
+        ids = [word for word in words if parse_name(f"{word}.txt") is not None]
+        matters = [word.casefold() for word in words if word.casefold() in TRAFFIC_MATTERS]
+        if ids and matters:
+            pairs.add((ids[0], matters[0]))
+        elif line.strip():
+            unnamed += 1
+    return pairs, unnamed
 
 
 def topic_since_of(path):
@@ -1265,11 +1277,11 @@ def capped_list(heading, lines):
 
 def render_traffic_text(report):
     """REPORT (see traffic_report) as text: the first line, traffic +CHANNEL Nh to STAMP: send log: not available (REASON); then unread: and a line for each
-    unread matter, KIND ID AGE (see capped_list); then handled: N in TRAFFIC.log. Every line holds only names, ids, ages, counts and the helper's own words,
-    in lower case but for the T and Z of a stamp, and no line holds a question mark."""
+    unread matter, KIND ID AGE SENDER to NAME (see capped_list); then handled: N in TRAFFIC.log. Every line holds only names, ids, ages, counts and the
+    helper's own words, in lower case but for the T and Z of a stamp and the name of TRAFFIC.log, and no line holds a question mark."""
     log = report["send_log"]
     lines = [f"traffic +{report['channel']} {report['hours']}h to {report['until']}: send log: not available ({log['reason']})",
-             *capped_list("unread", [f"{line['kind']} {line['id']} {compact_age(line['age_s'])}" for line in report["unread"]]),
+             *capped_list("unread", [f"{line['kind']} {line['id']} {compact_age(line['age_s'])} {line['from']} to {line['to']}" for line in report["unread"]]),
              f"handled: {report['handled']} in {TRAFFIC_LOG}"]
     return without_question_marks("\n".join(lines) + "\n")
 
@@ -1280,7 +1292,7 @@ def traffic_command(channel, directory, mailbox, as_json):
     (see unread_matters), read from the names in the mailbox's top level, the member records' names and the conductor's TOPIC.md, POLICY.md (deaf_min),
     TRAFFIC.log and steward-state.json (topic_since); the steward's name is conductor- and the name of DIRECTORY, and MAILBOX is the --mailbox (see
     mailbox_of). The clock is read once, before the listing. Nothing is written, and no file in the mailbox is opened. With no topic_since that can be read,
-    no matter is raised, and one line on stderr says so. A refusal is one line on stderr, the status 2, nothing on stdout: a CHANNEL that is not an agent-mail
+    no matter is raised, and one line on stderr says so; another says how many lines of TRAFFIC.log name no matter, when any do. A refusal is one line on stderr, the status 2, nothing on stdout: a CHANNEL that is not an agent-mail
     name, a DIRECTORY that is not a directory or whose name makes no steward's name, a conductor file that cannot be read or that its reader refuses, a
     TOPIC.md that lists the steward itself, an agent-mail config file that agent-mail would refuse, and a mailbox or member record that cannot be read."""
     now = time.time()  # the one reading of the clock, before the listing
@@ -1296,7 +1308,7 @@ def traffic_command(channel, directory, mailbox, as_json):
         if any(m.name == steward for m in members):
             raise Refusal(str(RosterError(steward, "the steward itself is listed as a member")))
         policy = conductor_file(directory, "POLICY.md", load_policy)
-        handled = conductor_file(directory, TRAFFIC_LOG, read_traffic_log)
+        handled, unnamed = conductor_file(directory, TRAFFIC_LOG, read_traffic_log)
         since = conductor_file(directory, STATE_FILE, topic_since_of)
         box, which = mailbox_of(mailbox, steward, "traffic")
         if not os.path.isdir(box):
@@ -1314,6 +1326,9 @@ def traffic_command(channel, directory, mailbox, as_json):
     print(render_json(report) if as_json else render_traffic_text(report), end="", flush=True)
     if since is None:
         print(f"steward-signals: traffic: {STATE_FILE} holds no topic_since that is a time, so no matter is raised", file=sys.stderr)
+    if unnamed:
+        print(f"steward-signals: traffic: {unnamed} {'line' if unnamed == 1 else 'lines'} of {TRAFFIC_LOG} name no message id and matter, "
+              "so they leave nothing out", file=sys.stderr)
     return 0
 
 
@@ -4431,15 +4446,16 @@ def mail_id(name):
 
 
 def test_traffic_log_lines(d):
-    a, b, c = (mail_id(mail_named("pipeline", i)) for i in range(3))
+    a, b, c, e, f_, g = (mail_id(mail_named("pipeline", i)) for i in range(6))
     path = os.path.join(d, "TRAFFIC.log")
     with open(path, "wb") as f:
-        f.write(f"20261102T200000Z {a} m1\n20261102T200000Z {b} m9\n{c} m2\n20261102T200000Z not_an-id m1\n20261102T200000Z {c} m3 more\n".encode()
-                + b"\xff\xfe " + f"{b} m2\n".encode() + f"   20261102T200000Z {c}   m3   \n".encode())
-    ok(read_traffic_log(path) == {(a, "m1"), (b, "m2"), (c, "m3")},
-       "traffic: TRAFFIC.log is read as <UTC> <id> <matter>, the id a message's and the matter m1, m2 or m3; any other shape is skipped, a damaged byte is "
-       "replaced, and the time is not read")
-    ok(read_traffic_log(os.path.join(d, "no-such-log")) == set(), "traffic: a missing TRAFFIC.log holds no matter")
+        f.write(f"20261102T200000Z {a} m1\n20261102T200000Z {b} m9\n20261102T200000Z not_an-id m1\n\n   \n".encode()
+                + b"\xff\xfe " + f"{b} m2\n".encode() + f"- 20261102T200000Z {c} M3 mailed\n".encode() + f"20261102T200000Z `{e}.txt` m1.\n".encode()
+                + f"{f_} m2 {g} m3\n".encode() + f"20261102T200000Z {g}\n".encode())
+    ok(read_traffic_log(path) == ({(a, "m1"), (b, "m2"), (c, "m3"), (e, "m1"), (f_, "m2")}, 3),
+       "traffic: TRAFFIC.log is read leniently: a message id and a matter anywhere on a line, in any case, quotes, .txt and punctuation aside, the first "
+       "of each; a damaged byte is replaced, blank lines are nothing, and a line with no id or no matter is counted")
+    ok(read_traffic_log(os.path.join(d, "no-such-log")) == (set(), 0), "traffic: a missing TRAFFIC.log holds no matter")
 
 
 def test_traffic_reads_topic_since(d):
@@ -4543,7 +4559,7 @@ def test_traffic_end_to_end(d):
     out, status, err = traffic(cdir, box)
     lines = out.splitlines()
     ok(status == 0 and err == "" and re.fullmatch(r"traffic \+ingest 24h to [0-9]{8}T[0-9]{6}Z: send log: not available \(this helper reads file names only\)", lines[0])
-       and lines[1:] == ["unread:", f"  no-record {mail_id(nobody)} 3h", f"  member {mail_id(member)} 45m", "handled: 0 in TRAFFIC.log"],
+       and lines[1:] == ["unread:", f"  no-record {mail_id(nobody)} 3h glm-5.2 to nobody", f"  member {mail_id(member)} 45m omlx to pipeline", "handled: 0 in TRAFFIC.log"],
        f"traffic: the text form gives the first line, saying the send log is not available, the unread lines and the handled count (got {lines!r})")
     out, status, err = traffic(cdir, box, "--json")
     report = json.loads(out)
@@ -4553,8 +4569,13 @@ def test_traffic_end_to_end(d):
        "traffic: --json prints the same report as one JSON object on one line")
     write(cdir, TRAFFIC_LOG, f"20261106T000000Z {mail_id(nobody)} m1\n")
     out, status, _ = traffic(cdir, box)
-    ok(status == 0 and out.splitlines()[1:] == ["unread:", f"  member {mail_id(member)} 45m", "handled: 1 in TRAFFIC.log"],
+    ok(status == 0 and out.splitlines()[1:] == ["unread:", f"  member {mail_id(member)} 45m omlx to pipeline", "handled: 1 in TRAFFIC.log"],
        "traffic: a matter in TRAFFIC.log is left out, and counted under handled")
+    write(cdir, TRAFFIC_LOG, f"20261106T000000Z {mail_id(nobody)} m1\nsent the UNREAD for pipeline's mail\nmailed, see above\n")
+    out, status, err = traffic(cdir, box)
+    ok(status == 0 and "handled: 1 in TRAFFIC.log" in out
+       and err == "steward-signals: traffic: 2 lines of TRAFFIC.log name no message id and matter, so they leave nothing out\n",
+       "traffic: lines of TRAFFIC.log that name no matter are counted in one line on stderr")
     write(cdir, TRAFFIC_LOG, f"20261106T000000Z {mail_id(nobody)} m1\n20261106T000000Z {mail_id(member)} m3\n")
     out, status, _ = traffic(cdir, box)
     ok(status == 0 and out.splitlines()[1:] == ["unread: none", "handled: 2 in TRAFFIC.log"], "traffic: with every matter handled, unread says none")
@@ -4574,7 +4595,9 @@ def test_traffic_caps_each_list(d):
     cdir, box = traffic_scene(d, top=top)
     out, status, _ = traffic(cdir, box)
     lines = out.splitlines()
-    ok(status == 0 and lines[1] == "unread:" and len([line for line in lines if line.startswith("  no-record ")]) == TRAFFIC_LINES and lines[-2] == "  and 5 more",
+    listed = [line for line in lines if line.startswith("  no-record ")]
+    ok(status == 0 and lines[1] == "unread:" and len(listed) == TRAFFIC_LINES and lines[-2] == "  and 5 more"
+       and listed[0].endswith(" to nobody24") and listed[-1].endswith(" to nobody5"),
        f"traffic: the unread list stops at {TRAFFIC_LINES} lines, the oldest, and then says how many more")
     out, status, _ = traffic(cdir, box, "--json")
     ok(status == 0 and len(json.loads(out)["unread"]) == 25, "traffic: --json keeps every line")
@@ -5338,13 +5361,14 @@ def test_claude_md_invites_with_the_optional_write_target(d):
 
 # What section 8 of CLAUDE.md says of the traffic call (the send-log design's 5.8.1 and 5.8.5, step 1): the cap of one line a turn and once per matter, and what
 # goes into TRAFFIC.log, each pinned whole, so that neither the cap nor the record that keeps "once" across a reset can drift.
-TRAFFIC_CAP_SENTENCE = "Act on one line a turn, and on each once; the rest wait and stand in the digest."
-TRAFFIC_LOG_SENTENCE = ("Whether you mail or list it, append `<UTC> <id> <matter>` to `TRAFFIC.log`, after the `sent` line when you mail, `<matter>` being `m1` for no "
-                        "reader, `m2` for stopped or `m3` for not reading; add a Watch line only when you mail.")
+TRAFFIC_CAP_SENTENCE = ("Act on the oldest line that calls for mail or a listing, one a turn, and on each once; an `other` line takes no turn, and the rest wait "
+                        "and stand in the digest.")
+TRAFFIC_LOG_SENTENCE = ("Whether you mail or list it, append `<UTC> <id> <matter>` to `TRAFFIC.log`, in the Bash call that writes the UNREAD's `sent` line when you "
+                        "mail, `<matter>` being `m1` for no reader, `m2` for stopped or `m3` for not reading; add a Watch line only when you mail.")
 TRAFFIC_ROWS = ("| no reader | a `no-record` line | if the name is a member, mail the sender `UNREAD <id>: <to> has not read it since <time>`; otherwise list it in the digest |",
                 "| stopped | a `member` line whose recipient's class is gone | `UNREAD` to the sender, the reason \"stopped in agent-deck\" |",
-                "| not reading | a `member` line whose recipient's class is deaf, or that is a Pi or Codex member whose status is `waiting` | `UNREAD` to the sender, the "
-                "reason \"not reading its mail\"; a Pi or Codex recipient you list in the digest |",
+                "| not reading | a `member` line whose recipient's class is deaf, or whose recipient is a Pi or Codex member with status `waiting` | for a Claude "
+                "recipient, `UNREAD` to the sender, the reason \"not reading its mail\"; for a Pi or Codex recipient, mail nothing and list it in the digest |",
                 "| other | a `member` line, any other class | nothing yet |")
 
 
@@ -5356,15 +5380,20 @@ def test_claude_md_runs_traffic_and_keeps_its_matters(d):
     ok(len(templates) == 1 and "`UNREAD <id>: <to> has not read it since <time>` (section 8)" in templates[0],
        "docs: section 6 of CLAUDE.md lists the UNREAD template among the steward's other templates, with section 8")
     step = [line for line in claude_section(t, 4).splitlines() if line.startswith("4. ")]
-    ok(len(step) == 1 and 0 <= step[0].find("`steward-signals signals <channel> --dir <dir>`") < step[0].find("`steward-signals traffic <channel> --dir <dir>`"),
-       "docs: step 4 of section 4 of CLAUDE.md runs the traffic call after the signals call")
+    ok(len(step) == 1 and 0 <= step[0].find("`steward-signals signals <channel> --dir <dir>`") < step[0].find("`steward-signals traffic <channel> --dir <dir>`")
+       < step[0].find("the time checks"),
+       "docs: step 4 of section 4 of CLAUDE.md runs the traffic call after the signals call and before the time checks, whose deaf class reads it")
     eight = claude_section(t, 8)
+    said = [s for s in sentences(eight) if "run the call again with `--json`" in s or "`TRAFFIC.log` that name no matter" in s or "no `topic_since` that is a time" in s]
+    ok(len(said) == 3 and "and before the time checks" in eight,
+       "docs: section 8 of CLAUDE.md runs the traffic call before the time checks, and says to see every line with --json and what each of its stderr lines means")
     ok(0 <= eight.find("**The probe.**") < eight.find("**Traffic.**") < eight.find("**Nudges and offers.**"),
        "docs: section 8 of CLAUDE.md has its Traffic paragraph after the probe's and before the nudges'")
     block = next((part for fenced, part in fenced_parts(eight) if fenced and part.splitlines()[1].startswith("traffic +")), "")
     lines = block.splitlines()[1:-1]
     ok(len(lines) >= 3 and re.fullmatch(rf"traffic \+[a-z0-9.-]+ {TRAFFIC_HOURS}h to [0-9]{{8}}T[0-9]{{6}}Z: send log: not available \({re.escape(SEND_LOG_UNREAD)}\)", lines[0])
-       and all(re.fullmatch(r"  (?:no-record|member) [a-z0-9.-]+_[0-9]{8}T[0-9]{6}\.[0-9]{6}Z_from-[a-z0-9.-]+_[0-9a-f]{8} [0-9]+[mhd]", line) for line in lines[2:-1])
+       and all(re.fullmatch(r"  (?:no-record|member) (?P<to>[a-z0-9.-]+)_[0-9]{8}T[0-9]{6}\.[0-9]{6}Z_from-(?P<sender>[a-z0-9.-]+)_[0-9a-f]{8} [0-9]+[mhd] "
+                                r"(?P=sender) to (?P=to)", line) for line in lines[2:-1])
        and lines[1] == "unread:" and re.fullmatch(rf"handled: [0-9]+ in {re.escape(TRAFFIC_LOG)}", lines[-1]),
        f"docs: the sample in section 8 of CLAUDE.md has the form the traffic call prints (got {without_question_marks(repr(lines))})")
     said = [s for s in sentences(eight) if s.startswith("Each `unread:` line")]
@@ -5378,6 +5407,9 @@ def test_claude_md_runs_traffic_and_keeps_its_matters(d):
         found = re.findall(rf"(?:^|(?<=\. )){re.escape(pinned)}(?= |$)", eight, re.M)  # whole, from a sentence's start to its end: sentences() would cut it at its semicolon
         ok(len(found) == 1, f"docs: section 8 of CLAUDE.md says {what}, as pinned")
     ok(all(f"`{matter}`" in TRAFFIC_LOG_SENTENCE for matter in TRAFFIC_MATTERS), "docs: the pinned TRAFFIC.log sentence names every matter the helper reads there")
+    stamps = [s for s in sentences(claude_section(t, 11)) if s.startswith("Write each time of yours there as")]
+    ok(stamps == ["Write each time of yours there as `date -u +%Y%m%dT%H%M%SZ` prints it: the traffic call raises no matter until `topic_since` is one."],
+       "docs: section 11 of CLAUDE.md gives the form of the steward's times in steward-state.json, which topic_since must have for the traffic call")
     deaf = [line for line in eight.splitlines() if line.startswith("| deaf |")]
     ok(len(deaf) == 1 and "the traffic call's `member` line names mail to it while it is a Claude member whose status is `waiting`" in deaf[0],
        "docs: the deaf class of section 8 of CLAUDE.md takes any member's mail that the traffic call names, not only the steward's NUDGE")
@@ -5584,7 +5616,7 @@ def test_steward_readme_and_pointer(d):
     files = [s for s in sentences(r) if s.startswith("A steward keeps its own files in")]
     ok(len(files) == 1 and f"RECEIVED.log, {TRAFFIC_LOG}, steward-state.json" in files[0], "docs: steward/README.md lists TRAFFIC.log among the steward's files")
     row = [line for line in r.splitlines() if line.startswith("| 26. ")]
-    ok(len(row) == 1 and "steward-signals traffic steward-test" in row[0] and "`no-record <id> <age>`" in row[0] and f"`<UTC> <id> m1` to {TRAFFIC_LOG}" in row[0]
+    ok(len(row) == 1 and "steward-signals traffic steward-test" in row[0] and "`no-record <id> <age> steward-test-a to steward-test-nobody`" in row[0] and f"`<UTC> <id> m1` to {TRAFFIC_LOG}" in row[0]
        and "under `handled:`" in row[0] and "--to steward-test-nobody" in row[0],
        "docs: row 26 of the runbook plants mail for a name no session reads and expects the traffic call to list it, the steward to hold it in TRAFFIC.log, and the next call to count it handled")
     moved = [part for fenced, part in fenced_parts(r) if fenced and 'mkdir "$A" && mv -n' in part]
@@ -5965,15 +5997,25 @@ def test_docs_checks_catch_each_pinned_regression(d):
          "docs: item 3 of what the steward may run"),
         ("the UNREAD template left out of section 6", "`OFFER: <n> unclaimed items you can take` and `UNREAD <id>: <to> has not read it since <time>` (section 8),",
          "`OFFER: <n> unclaimed items you can take` (section 8),", "docs: section 6 of CLAUDE.md lists the UNREAD template"),
-        ("the traffic call dropped from the turn", ", then `steward-signals traffic <channel> --dir <dir>` once and its matters (section 8)", " (section 8)",
-         "docs: step 4 of section 4 of CLAUDE.md runs the traffic call"),
+        ("the traffic call dropped from the turn", ", then `steward-signals traffic <channel> --dir <dir>` once, then the time checks and the traffic matters",
+         ", then the time checks", "docs: step 4 of section 4 of CLAUDE.md runs the traffic call"),
+        ("the time checks before the traffic call", "run `steward-signals signals <channel> --dir <dir>` once, then `steward-signals traffic <channel> --dir <dir>` once, "
+         "then the time checks", "run `steward-signals signals <channel> --dir <dir>` once and the time checks, then `steward-signals traffic <channel> --dir <dir>` once, "
+         "then", "docs: step 4 of section 4 of CLAUDE.md runs the traffic call"),
+        ("the --json rerun dropped", "; to see them all, run the call again with `--json`.", ".", "docs: section 8 of CLAUDE.md runs the traffic call before the time checks"),
+        ("a Pi or Codex recipient mailed", "for a Pi or Codex recipient, mail nothing and list it in the digest", "for a Pi or Codex recipient, list it in the digest too",
+         "docs: section 8 of CLAUDE.md tells the traffic matters apart"),
+        ("the TRAFFIC.log line left for after the send", "in the Bash call that writes the UNREAD's `sent` line when you mail", "after the `sent` line when you mail",
+         "docs: section 8 of CLAUDE.md says what goes into TRAFFIC.log"),
+        ("topic_since's form left out", "Write each time of yours there as `date -u +%Y%m%dT%H%M%SZ` prints it: the traffic call raises no matter until `topic_since` is one. ",
+         "", "docs: section 11 of CLAUDE.md gives the form of the steward's times"),
         ("the Traffic paragraph's heading lost", "**Traffic.** Right after", "Right after", "docs: section 8 of CLAUDE.md has its Traffic paragraph"),
         ("the sample's reason dropped", "send log: not available (this helper reads file names only)", "send log: not available", "docs: the sample in section 8"),
         ("the traffic call's window doubled", "stamped in the last 24 hours", "stamped in the last 48 hours", "docs: section 8 of CLAUDE.md gives the traffic call's window"),
         ("an UNREAD for any name with no reader", "if the name is a member, mail the sender `UNREAD", "mail the sender `UNREAD",
          "docs: section 8 of CLAUDE.md tells the traffic matters apart"),
-        ("the traffic cap loosened", "Act on one line a turn, and on each once;", "Act on two lines a turn, and on each once;",
-         "docs: section 8 of CLAUDE.md says the cap of one line a turn"),
+        ("the traffic cap loosened", "one a turn, and on each once;", "two a turn, and on each once;", "docs: section 8 of CLAUDE.md says the cap of one line a turn"),
+        ("an other line made to take the turn", "; an `other` line takes no turn, and the rest wait", "; the rest wait", "docs: section 8 of CLAUDE.md says the cap of one line a turn"),
         ("a Watch line for every traffic matter", "add a Watch line only when you mail.", "add a Watch line for each.",
          "docs: section 8 of CLAUDE.md says what goes into TRAFFIC.log"),
         ("the deaf class narrowed to the NUDGE again", "; or the traffic call's `member` line names mail to it while it is a Claude member whose status is `waiting` |", " |",
