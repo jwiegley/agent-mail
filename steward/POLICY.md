@@ -12,7 +12,8 @@ The thresholds and self-caps a topic steward works by, one row for each key. The
 | nudge_gap_min | 30 | Least minutes between two NUDGEs about the same item |
 | nudges_per_item_day | 2 | Most NUDGEs about one item in a day; the second says it is the last |
 | busy_stuck_h | 2 | Hours a busy member's open item may go without an UPDATE before the steward sends one NUDGE |
-| deaf_min | 15 | Minutes a NUDGE may stay unread in the shared folder, with its member waiting, before the member is listed as deaf |
+| deaf_min | 15 | Minutes direct mail may stay unread in the shared folder before the steward reads it as unread: its own NUDGE, with its member waiting, lists the member as deaf, and a member's mail to a name with no reader, a stopped member or a member that is not reading draws one UNREAD to its sender |
+| answer_h | 4 | Hours a member's question by mail to a member may go read and without a reply carrying its id before the steward mails its recipient one UNANSWERED |
 | offer_items | 3 | Most unclaimed BACKLOG items named in one OFFER |
 | offer_every_h | 2 | Least hours between two OFFERs to the same member |
 | sends_per_turn | 6 | Most mails and posts the steward sends in one turn; more means a loop or a flood, so it stops and asks John |
