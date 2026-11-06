@@ -6158,6 +6158,7 @@ def section_mcp(t):
     got = json_lines(p.stdout)
     t.ok(p.returncode == 0 and got is not None and [m.get("id") for m in got] == [1, 2, 3], "the subprocess server writes only JSON lines and exits 0 at EOF")
     driver = ("import importlib.machinery, importlib.util, sys\n"
+              "sys.dont_write_bytecode = True\n"
               "loader = importlib.machinery.SourceFileLoader('am', sys.argv[1])\n"
               "m = importlib.util.module_from_spec(importlib.util.spec_from_loader('am', loader))\n"
               "loader.exec_module(m)\n"
@@ -6167,10 +6168,16 @@ def section_mcp(t):
               "    return real(self, msg)\n"
               "m.McpServer.handle = noisy\n"
               "sys.exit(m.main(['mcp', '--dir', sys.argv[2], '--name', 't']))\n")
-    noisy = subprocess.run([sys.executable, "-I", "-c", driver, SCRIPT, d], input=requests, capture_output=True, text=True, timeout=MCP_DEADLINE)
+    beside = os.path.join(t.root, "module-run")
+    os.mkdir(beside, 0o700)
+    copy = os.path.join(beside, "agent-mail")
+    with open(SCRIPT, "rb") as src, open(copy, "wb") as dst:
+        dst.write(src.read())
+    noisy = subprocess.run([sys.executable, "-I", "-c", driver, copy, d], input=requests, capture_output=True, text=True, timeout=MCP_DEADLINE)
     stray_print_in_stderr = "STRAY PRINT" in noisy.stderr
     t.ok(stray_print_in_stderr and json_lines(noisy.stdout) is not None and len(json_lines(noisy.stdout)) == 3,
          "a stray print reaches stderr, never the protocol stream")
+    t.ok(os.listdir(beside) == ["agent-mail"], "the child that loads the program as a module writes no bytecode beside it")
     loose = os.path.join(t.root, "loose-run")
     os.mkdir(loose)
     os.chmod(loose, 0o755)  # open to others, so making the reader lock fails at start
