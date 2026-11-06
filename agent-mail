@@ -210,11 +210,13 @@ def check_writable(d, name=None):
     """Raise mailbox_unwritable when this user cannot write in the mailbox D, where every send, claim and archive is written, or, with NAME,
     cannot read, write and search NAME's archive .NAME-read when it exists: found before anything is claimed, never after a batch has been
     shown, by every path that claims (the CLI's read and watch, and the MCP server's receive)."""
-    places = [(d, f"mailbox {d}")] + ([(os.path.join(d, f".{name}-read"), f"{name}'s archive {os.path.join(d, f'.{name}-read')}")] if name else [])
-    for path, what in places:
-        if os.path.lexists(path) and not os.access(path, (os.R_OK if path != d else 0) | os.W_OK | os.X_OK):
-            raise MailError("mailbox_unwritable", f"{what} cannot be written; agent-mail writes each send, claim and archived copy there, so check "
-                                                  "that you own it and that its mode lets you write in it (0700)")
+    if not os.access(d, os.W_OK | os.X_OK):
+        raise MailError("mailbox_unwritable", f"mailbox {d} cannot be written; agent-mail writes each send, claim and archived copy there, so check "
+                                              "that you own it and that its mode lets you write in it (0700)")
+    archive = os.path.join(d, f".{name}-read") if name else None
+    if archive and os.path.lexists(archive) and not os.access(archive, os.R_OK | os.W_OK | os.X_OK):
+        raise MailError("mailbox_unwritable", f"{name}'s archive {archive} cannot be read, written and searched; agent-mail keeps each copy it "
+                                              "delivers there, so check that you own it and that its mode lets you read, write and search it (0700)")
 
 
 def has_file(d, name):
@@ -7044,6 +7046,10 @@ def unreadable_root_checks(t):
         return (f"{what} cannot be written; agent-mail writes each send, claim and archived copy there, so check that you own it and that its mode "
                 "lets you write in it (0700)")
 
+    def unusable_archive(name, path):
+        return (f"{name}'s archive {path} cannot be read, written and searched; agent-mail keeps each copy it delivers there, so check that you own "
+                "it and that its mode lets you read, write and search it (0700)")
+
     commands = (["send", "--from", "pi", "--to", "nix", "--subject", "s", body], ["read", "nix"], ["pending", "nix"], ["channels"], ["channels", "pi"],
                 ["channel", "create", "ops", "--purpose", "p"], ["subscribe", "pi", "fleet"], ["unsubscribe", "pi", "fleet"], ["traffic"],
                 ["watch", "pi", "--max-polls", "1"], ["init"])
@@ -7141,7 +7147,7 @@ def unreadable_root_checks(t):
             doc = t.run(["--dir", archive, "doctor", "nix"])[0]
         finally:
             os.chmod(kept, 0o700)
-        said = unwritable(f"nix's archive {kept}")
+        said = unusable_archive("nix", kept)
         t.ok(tool["isError"] and said in tool["content"][0]["text"] and out == ("", 1, f"agent-mail: {said}\n") and f"finding: {said}" in doc.splitlines()
              and sorted(e for e in os.listdir(archive) if e.startswith("nix_")) == waiting,
              f"an archive at mode {mode:o} is refused by the receive tool and by read before anything is claimed or shown, so nothing is shown twice; "
@@ -7208,6 +7214,27 @@ def unreadable_root_checks(t):
         t.patch("receive", real_receive)
     t.ok(code == 1 and out == f"agent-mail: {unwritable(f'mailbox {locked_later}')}; the watcher for pi has stopped\n" and len(passes) == 1,
          "and one whose root turns unwritable stops the same way, with its reason")
+    shelved = t.box("unusable-archive-later")
+    t.direct(shelved, "pi", "nix", "FIRST-FOR-PI")
+    t.capture(cmd_read, "pi", shelved, MAX_BYTES)
+    shelf = os.path.join(shelved, ".pi-read")
+    passes.clear()
+
+    def shelving(*a, **k):
+        out = real_receive(*a, **k)
+        if not passes:
+            os.chmod(shelf, 0o300)
+        passes.append(1)
+        return out
+
+    t.patch("receive", shelving)
+    try:
+        out, code, _ = t.capture(cmd_watch, "pi", shelved, 0.01, False, MAX_BYTES, 3)
+    finally:
+        os.chmod(shelf, 0o700)
+        t.patch("receive", real_receive)
+    t.ok(code == 1 and out == f"agent-mail: {unusable_archive('pi', shelf)}; the watcher for pi has stopped\n" and len(passes) == 1,
+         "and one whose archive turns unreadable stops the same way, before claiming more")
 
     rung = t.box("unreadable-bell")
     real_bell = bell_pass
@@ -7296,7 +7323,8 @@ def unreadable_root_checks(t):
     finally:
         os.chmod(closed_send, 0o700)
     t.ok(direct is not None and direct.code == "mailbox_unreadable",
-         "cmd_send called on its own refuses an unreadable mailbox (its own check comes before the body is read; send's opening of the root would too)")
+         "cmd_send called on its own refuses an unreadable mailbox before it reads the body (dispatch's require_mailbox runs first in every use, "
+         "so this guards a direct call only)")
 
 
 def section_cli(t):
