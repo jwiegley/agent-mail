@@ -1322,7 +1322,7 @@ def read_send_log(run, box):
     printed a report of another contract version, or the log is off. RUN is the runner of deck_rows, which never raises."""
     try:
         out, code = run([AGENT_MAIL, "--dir", box, "traffic", "--format", "json", "--hours", str(LOG_HOURS)])
-    except Exception:
+    except Exception:  # deck_rows' runner never raises, but a log that cannot be read must never stop the call: its unread lines still come from names
         return None, "agent-mail did not run"
     try:
         report = json.loads(out)
@@ -1428,17 +1428,20 @@ def log_matters(rows, senders, members, steward, channel, waiting, handled, ledg
     of TOPIC.md), the steward's name STEWARD, the topic's CHANNEL, the ids still WAITING at the mailbox's top level, HANDLED (read_traffic_log's pairs),
     LEDGER (open_items), ANSWER_S (answer_h in seconds), SINCE (topic_since) and NOW. A dict of lists of dicts, each list oldest first:
       replied (U1): a member's QUESTION or REQUEST post on +CHANNEL that a row from a session other than its asker and the steward answers;
-      unanswered (U2): a member's question by mail to a member, read, sent after the recipient's recording_since, with no row from the recipient that
-        answers it, ANSWER_S or more ago;
+      unanswered (U2): a member's question by mail to a member, read, sent after the recipient began recording (see recording), with no row from the
+        recipient that answers it, whatever that row's host, ANSWER_S or more ago;
       duplicates (D1, D2): a request (a member's direct mail to another session than the steward, with no in_reply_to) that matches a CLAIM post on
         +CHANNEL from a third session, was stamped more than SIMULTANEOUS_S after it and does not start with the claim's own slug (mail about the
-        claimed item itself is M5's); and two requests from different members to different names that match each other, neither matching a claim nor
-        starting with a claim's slug, one line for the first of them;
-      elsewhere (M4): a member's post on another channel whose first word is one of POST_VERBS or that matches a claim on +CHANNEL;
+        claimed item itself is M5's), one line, for the newest such claim; and two requests from different members to different names that match each
+        other, neither matching any claim, whoever made it, nor starting with a claim's slug, one line for the first of them;
+      elsewhere (M4): a member's post on another channel whose first word is one of POST_VERBS or that matches an open claim on +CHANNEL (a CLAIM post
+        whose slug is an open item of LEDGER);
       misdirected (M5): a request whose slug names an open item of LEDGER owned by a member that is neither its sender nor its recipient.
-    The counts and every matter but U2 use the last TRAFFIC_HOURS hours, claims among them; U2 the whole report. No matter, and no reply, rests on a
-    host-mismatch row (see trusted), and no matter on a row stamped more than TOPIC_ALLOWANCE_S before SINCE; U2 rests on no recipient that is not
-    recording; a matter whose first id TRAFFIC.log names with its own matter is left out and counted, once, in the returned handled count."""
+    The counts and every matter but U2 use the last TRAFFIC_HOURS hours, claims among them; U2 the whole report. No matter rests on a host-mismatch row
+    (see trusted), nor on a row stamped more than TOPIC_ALLOWANCE_S before SINCE: such a row may keep the steward quiet, never move it to act. So a
+    reply on one marks no question post replied (which would spare its ROUTE), but a reply from a question's recipient spares U2 whatever its host, and
+    U2 rests on no recipient that is not recording by a row the helper trusts. A matter whose first id TRAFFIC.log names with its own matter is left
+    out and counted, once, in the returned handled count."""
     hosts = {m.name: m.host for m in members}
     names = set(hosts) | {steward}
     believed = trusted(rows, members)
@@ -1456,10 +1459,14 @@ def log_matters(rows, senders, members, steward, channel, waiting, handled, ledg
             return False
         return True
 
-    replies = collections.defaultdict(list)
+    replies, any_replies = collections.defaultdict(list), collections.defaultdict(list)
+    for r in rows:
+        if r.reply is not None:
+            any_replies[r.reply].append(r)
     for r in believed:
         if r.reply is not None:
             replies[r.reply].append(r)
+    recorders = recording(senders, rows, members)
     requests = [r for r in recent if r.sender in hosts and r.kind == "direct" and r.reply is None and r.to != steward]
     claims = [r for r in recent if r.to == f"+{channel}" and first_word(r.subject) == "CLAIM"]
 
@@ -1475,9 +1482,8 @@ def log_matters(rows, senders, members, steward, channel, waiting, handled, ledg
                 out["replied"].append({"post": r.id, "by": answer.sender, "reply": answer.id})
     for r in usable:
         if (r.sender in hosts and r.to in hosts and r.kind == "direct" and r.reply is None and is_question(r) and r.id not in waiting
-                and now - r.when >= answer_s and not any(a.sender == r.to for a in replies[r.id])):
-            since_to = (senders.get(r.to) or {}).get("recording_since")
-            started = stamp_time(since_to) if isinstance(since_to, str) else None
+                and now - r.when >= answer_s and not any(a.sender == r.to for a in any_replies[r.id])):
+            started = recorders.get(r.to)
             if started is not None and started <= r.when and keep("u2", r.id):
                 out["unanswered"].append({"mail": r.id, "age_s": whole_seconds(now - r.when), "from": r.sender, "to": r.to, "slug": slug_of(r.subject)})
     claimed = set()
@@ -1494,7 +1500,7 @@ def log_matters(rows, senders, members, steward, channel, waiting, handled, ledg
                 break
     for c in claims:
         for r in requests:
-            if c.sender not in (r.sender, r.to) and (matching(r, c, names) or about(r, c)):
+            if matching(r, c, names) or about(r, c):
                 claimed.add(r.id)
     for i, a in enumerate(requests):
         if a.id in claimed:
@@ -1508,10 +1514,11 @@ def log_matters(rows, senders, members, steward, channel, waiting, handled, ledg
                     out["duplicates"].append({"kind": "request-request", "first": a.id, "from": a.sender, "to": a.to, "second": b.id, "class": found[0],
                                               "words": found[1], "slug": slug_of(a.subject)})
                 break
+    open_claims = [c for c in usable if c.to == f"+{channel}" and first_word(c.subject) == "CLAIM" and slug_of(c.subject) in ledger]
     for r in recent:
         if r.sender in hosts and r.kind == "post" and r.to != f"+{channel}":
             verb = first_word(r.subject).lower()
-            found = next((m for m in (matching(r, c, names) for c in reversed(claims)) if m), None)
+            found = next((m for m in (matching(r, c, names) for c in reversed(open_claims)) if m), None)
             if (verb in POST_VERBS or found) and keep("m4", r.id):
                 out["elsewhere"].append({"kind": verb if verb in POST_VERBS else "match", "channel": r.to, "id": r.id, "from": r.sender,
                                          "class": found[0] if found else "-", "words": found[1] if found else []})
@@ -1563,9 +1570,25 @@ def last_heard(rows, members):
     return {m.name: compact_stamp(newest[m.name]) for m in members if m.name in newest}
 
 
-def not_recording(senders, members):
-    """The members, in roster order, that are not recording: no recording_since in the report's SENDERS (design 5.8.2), a member with no row included."""
-    return [m.name for m in members if not isinstance((senders.get(m.name) or {}).get("recording_since"), str)]
+def recording(senders, rows, members):
+    """{member: when it began recording, in epoch seconds} for the MEMBERS that are recording (design 5.8.2): the stamp of the earliest of its ROWS that came
+    through the MCP server, is stamped at or after its recording_since in the report's SENDERS, and whose host is its own in TOPIC.md. agent-mail's
+    recording_since counts every row, a host-mismatch one among them, so a member whose only such rows are ones the helper does not trust is not recording
+    here, and no absence of its replies is taken as evidence."""
+    believed = [r for r in trusted(rows, members) if r.via == "mcp"]
+    out = {}
+    for m in members:
+        since_to = (senders.get(m.name) or {}).get("recording_since")
+        started = stamp_time(since_to) if isinstance(since_to, str) else None
+        first = min((r.when for r in believed if r.sender == m.name and r.when >= started), default=None) if started is not None else None
+        if first is not None:
+            out[m.name] = first
+    return out
+
+
+def not_recording(recorders, members):
+    """The members, in roster order, that are not recording: none of RECORDERS (see recording), a member with no row included."""
+    return [m.name for m in members if m.name not in recorders]
 
 
 def log_lines(report):
@@ -1642,8 +1665,10 @@ def traffic_command(run, channel, directory, mailbox, as_json):
     """Print the traffic matters of the topic whose steward keeps its files in the conductor directory DIRECTORY and whose channel is CHANNEL, as text or, when
     AS_JSON, as one JSON object on one line with every list whole (see render_traffic_text and render_json), and return 0. The matters are the unread ones
     (see unread_matters), read from the names in the mailbox's top level, the member records' names and the conductor's TOPIC.md, POLICY.md (deaf_min),
-    TRAFFIC.log and steward-state.json (topic_since); the steward's name is conductor- and the name of DIRECTORY, and MAILBOX is the --mailbox (see
-    mailbox_of). The clock is read once, before the listing. Nothing is written, and no file in the mailbox is opened. With no topic_since that can be read,
+    TRAFFIC.log and steward-state.json (topic_since), and, when agent-mail's send log can be read through RUN (see read_send_log), the log's counts,
+    coverage and matters (see log_counts, recording and log_matters), with POLICY.md's answer_h and LEDGER.md's open items (see open_items); the
+    steward's name is conductor- and the name of DIRECTORY, and MAILBOX is the --mailbox (see mailbox_of). The clock is read once, before the listing.
+    Nothing is written, and no file in the mailbox is opened. With no topic_since that can be read,
     no matter is raised, and one line on stderr says so; another says how many lines of TRAFFIC.log name no matter, when any do. A refusal is one line on stderr, the status 2, nothing on stdout: a CHANNEL that is not an agent-mail
     name, a DIRECTORY that is not a directory or whose name makes no steward's name, a conductor file that cannot be read or that its reader refuses, a
     TOPIC.md that lists the steward itself, an agent-mail config file that agent-mail would refuse, and a mailbox or member record that cannot be read.
@@ -1683,7 +1708,7 @@ def traffic_command(run, channel, directory, mailbox, as_json):
     coverage = counts = fleet = matters = heard = None
     if log is not None:
         senders = {s["name"]: s for s in log.get("senders", []) if isinstance(s, dict) and isinstance(s.get("name"), str)} if isinstance(log.get("senders"), list) else {}
-        coverage = {"hosts": len(log["hosts"]) if isinstance(log.get("hosts"), list) else 0, "not_recording": not_recording(senders, members)}
+        coverage = {"hosts": len({r.host for r in rows}), "not_recording": not_recording(recording(senders, rows, members), members)}
         counts, fleet = log_counts(rows, members, steward, channel, now)
         heard = last_heard(rows, members)
         if since is not None:
@@ -5240,38 +5265,54 @@ def test_traffic_finds_each_log_matter(d):
     mismatch = dict(reply, host="hera")
     ok(log_matters_scene(d, [question, mismatch])[0]["replied"] == [], "traffic: a reply whose host is not its member sender's marks nothing replied")
     asked = log_row("kimi-linear", "glm-5.2", 5 * 3600, "glm53-fp8: which shards are done?")
-    report = log_matters_scene(d, [asked], senders={"kimi-linear": utc_stamp(time.time() - 6 * 3600)})[0]
+    began = log_row("+ingest", "kimi-linear", int(5.5 * 3600), "UPDATE kimi-q: started")  # the recipient's first record through its MCP server, on its host
+    report = log_matters_scene(d, [began, asked], senders={"kimi-linear": utc_stamp(time.time() - 6 * 3600)})[0]
     ok(report["unanswered"] == [{"mail": asked["id"], "age_s": report["unanswered"][0]["age_s"] if report["unanswered"] else None, "from": "glm-5.2", "to": "kimi-linear",
                                  "slug": "glm53-fp8"}]
        and 5 * 3600 <= report["unanswered"][0]["age_s"] < 5 * 3600 + 60,
        "traffic: U2, a member's question by mail to a member, read, with no reply from the recipient after answer_h, is an unanswered line")
     answered = log_row("glm-5.2", "kimi-linear", 4 * 3600, "re: shards", reply=asked["id"])
     by_another = log_row("glm-5.2", "muse-spark", 4 * 3600, "re: shards", reply=asked["id"])
-    report = log_matters_scene(d, [asked, by_another], senders={"kimi-linear": "20000101T000000.000000Z"})[0]
+    on_air = log_row("+ingest", "kimi-linear", 60 * 3600, "UPDATE kimi-q: started")  # recording, from long before every question below
+    report = log_matters_scene(d, [on_air, asked, by_another], senders={"kimi-linear": "20000101T000000.000000Z"})[0]
     ok([m["mail"] for m in report["unanswered"]] == [asked["id"]], "traffic: a reply from a session other than the recipient does not answer a question by mail")
     late_recorder, recording = {"kimi-linear": utc_stamp(time.time() - 4 * 3600)}, {"kimi-linear": "20000101T000000.000000Z"}
-    for what, rows, senders, top in (("answered by the recipient", [asked, answered], recording, ()), ("its recipient recording only after it", [asked], late_recorder, ()),
-                                     ("its recipient not recording", [asked], {"kimi-linear": None}, ()),
-                                     ("still waiting, so not read", [asked], recording, (asked["id"] + ".txt",)),
-                                     ("younger than answer_h", [log_row("kimi-linear", "glm-5.2", 3 * 3600, "which shards?")], recording, ()),
-                                     ("not a question", [log_row("kimi-linear", "glm-5.2", 5 * 3600, "glm53-fp8: shards are done")], recording, ()),
-                                     ("to a session that is no member", [log_row("nix", "glm-5.2", 5 * 3600, "which shards?")], {"nix": "20000101T000000.000000Z"}, ())):
+    for what, rows, senders, top in (("answered by the recipient", [on_air, asked, answered], recording, ()),
+                                     ("its recipient recording only after it", [on_air, log_row("+ingest", "kimi-linear", int(3.9 * 3600), "UPDATE kimi-q: on"), asked],
+                                      late_recorder, ()),
+                                     ("its recipient not recording", [on_air, asked], {"kimi-linear": None}, ()),
+                                     ("still waiting, so not read", [on_air, asked], recording, (asked["id"] + ".txt",)),
+                                     ("younger than answer_h", [on_air, log_row("kimi-linear", "glm-5.2", 3 * 3600, "which shards?")], recording, ()),
+                                     ("not a question", [on_air, log_row("kimi-linear", "glm-5.2", 5 * 3600, "glm53-fp8: shards are done")], recording, ()),
+                                     ("to a session that is no member", [log_row("+ingest", "nix", 60 * 3600, "UPDATE x: y"), log_row("nix", "glm-5.2", 5 * 3600, "which shards?")],
+                                      {"nix": "20000101T000000.000000Z"}, ()),
+                                     ("whose recipient answered from a host not its own", [on_air, asked, dict(answered, host="hera")], recording, ()),
+                                     ("whose recipient's only record is from a host not its own", [dict(on_air, host="hera"), asked], recording, ()),
+                                     ("whose recipient's only record came through the CLI", [dict(on_air, via="cli"), asked], recording, ())):
         report = log_matters_scene(d, rows, senders=senders, top=top)[0]
         ok(report["unanswered"] == [], f"traffic: no U2 for a question by mail {what}")
-    report = log_matters_scene(d, [asked, dict(answered, host="hera")], senders=recording)[0]
-    ok([m["mail"] for m in report["unanswered"]] == [asked["id"]], "traffic: a reply whose host is not its member sender's answers nothing, so U2 stands")
-    for subject in ("QUESTION t1: shards done", "REQUEST: the shard list", "QUESTION: which shards are done"):
+    cdir, box, fixture = log_scene(d, [dict(on_air, host="hera"), asked], senders=recording)
+    first = traffic_with(cdir, box, fixture)[0].splitlines()[0]
+    ok(first.endswith("not recording: lfm3, kimi-linear, muse-spark, pipeline"),
+       f"traffic: a member whose only record through its MCP server is from a host not its own is not recording, on the first line too (got {first!r})")
+    for subject in ("QUESTION t1: shards done", "REQUEST: the shard list", "QUESTION: which shards are done", "x" * 190 + " shards done? "):
         marked = log_row("kimi-linear", "glm-5.2", 5 * 3600, subject)
-        ok([m["mail"] for m in log_matters_scene(d, [marked], senders=recording)[0]["unanswered"]] == [marked["id"]],
-           f"traffic: a mail whose subject starts with QUESTION or REQUEST, with or without a colon, is a question by mail ({subject.split()[0]})")
+        ok([m["mail"] for m in log_matters_scene(d, [on_air, marked], senders=recording)[0]["unanswered"]] == [marked["id"]],
+           f"traffic: a mail whose subject starts with QUESTION or REQUEST, with or without a colon, or ends with a question mark before send's one final "
+           f"space, is a question by mail ({subject.split()[0][:12]})")
     older = log_row("kimi-linear", "glm-5.2", 30 * 3600, "which shards are done?")
-    ok([m["mail"] for m in log_matters_scene(d, [older], senders=recording)[0]["unanswered"]] == [older["id"]],
+    ok([m["mail"] for m in log_matters_scene(d, [on_air, older], senders=recording)[0]["unanswered"]] == [older["id"]],
        "traffic: U2 looks back past the 24 hours of the other matters, through the whole report")
     off = log_row("+fleet", "lfm3", 3600, "CLAIM glm53-fp8: evaluate glm-5.3 fp8")
     matched = log_row("+nix-config", "pipeline", 3000, "evaluate glm-5.3 fp8 bench")
     chatter = log_row("+fleet", "pipeline", 2000, "a note for the fleet")
     broadcast = log_row("all", "pipeline", 1900, "CLAIM glm53-fp8: evaluate glm-5.3 fp8")
-    report = log_matters_scene(d, [claim, off, matched, chatter, broadcast])[0]
+    open_ledger = ("## Items\n| slug | owner | what | writes | holds | state | first-seen | updated | waiting on | refs |\n|---|---|---|---|---|---|---|---|---|---|\n"
+                   "| glm53-fp8 | muse-spark | x | - | - | active | - | - | - | - |\n")
+    unopened = log_matters_scene(d, [claim, off, matched, chatter, broadcast])[0]
+    ok([(m["kind"], m["words"]) for m in unopened["elsewhere"]] == [("claim", [])],
+       f"traffic: M4 matches only an open claim here, one whose slug the ledger holds open; a post that only matches words of another is no line (got {unopened['elsewhere']})")
+    report = log_matters_scene(d, [claim, off, matched, chatter, broadcast], ledger=open_ledger)[0]
     ok(report["elsewhere"] == [{"kind": "claim", "channel": "+fleet", "id": off["id"], "from": "lfm3", "class": "evaluate", "words": ["fp8", "glm-5.3"]},
                                {"kind": "match", "channel": "+nix-config", "id": matched["id"], "from": "pipeline", "class": "evaluate", "words": ["fp8", "glm-5.3"]}],
        f"traffic: M4, a member's post on another channel that starts with a verb or matches a claim here, is an elsewhere line (got {report['elsewhere']})")
@@ -5342,7 +5383,7 @@ def test_traffic_prints_the_line_forms_claude_md_shows(d):
     question = log_row("+ingest", "kimi-linear", 5000, "QUESTION glm53-fp8: which org?")
     asked = log_row("kimi-linear", "glm-5.2", 5 * 3600, "glm53-fp8: which shards are done?")
     rows = [claim, question, asked, log_row("kimi-linear", "glm-5.2", 3600, "glm53-fp8: evaluate fp8 for glm-5.3"), log_row("lfm3", "pipeline", 3000, "convert glm-5.3"),
-            log_row("pipeline", "glm-5.2", 3100, "glm53-eval: evaluate fp8 for glm-5.3"),
+            log_row("pipeline", "glm-5.2", 3100, "glm53-eval: evaluate fp8 for glm-5.3"), log_row("+ingest", "kimi-linear", 60 * 3600, "UPDATE kimi-q: started"),
             log_row("pipeline", "muse-spark", 2900, "please convert glm-5.3"), log_row("kimi-linear", "glm-5.2", 4000, "re", reply=question["id"]),
             log_row("+fleet", "lfm3", 2000, "UPDATE glm53-fp8: half done")]
     ledger = ("## Items\n| slug | owner | what | writes | holds | state | first-seen | updated | waiting on | refs |\n|---|---|---|---|---|---|---|---|---|---|\n"
@@ -5372,7 +5413,8 @@ def test_traffic_leaves_out_log_matters_traffic_log_holds(d):
     ledger = ("## Items\n| slug | owner | what | writes | holds | state | first-seen | updated | waiting on | refs |\n|---|---|---|---|---|---|---|---|---|---|\n"
               "| glm53-fp8 | muse-spark | x | - | - | active | - | - | - | - |\n")
     for matter, key, rows, first in (("u1", "replied", [question, log_row("kimi-linear", "glm-5.2", 4000, "re", reply=question["id"])], question["id"]),
-                                     ("u2", "unanswered", [asked], asked["id"]), ("d2", "duplicates", [a, b], a["id"]), ("m4", "elsewhere", [off], off["id"]),
+                                     ("u2", "unanswered", [log_row("+ingest", "kimi-linear", 60 * 3600, "UPDATE kimi-q: started"), asked], asked["id"]),
+                                     ("d2", "duplicates", [a, b], a["id"]), ("m4", "elsewhere", [off], off["id"]),
                                      ("m5", "misdirected", [wrong], wrong["id"])):
         recording = {"kimi-linear": "20000101T000000.000000Z"}
         shown = log_matters_scene(d, rows, ledger=ledger, senders=recording)[0]
@@ -5431,10 +5473,46 @@ def test_traffic_unread_lines_carry_the_slug_from_the_log(d):
            f"traffic: an unread line carries the slug of its mail's subject when the log has a row for it whose host is its member sender's ({host})")
 
 
+def test_traffic_matter_rules(d):
+    """Each rule of the log's matters that a mutant could otherwise drop: what a claim is, one D1 for one request, D2's two parties, the three
+    words, M5's owner and state, U1's window, and rows stamped ahead."""
+    request = log_row("kimi-linear", "glm-5.2", 3600, "kimi-eval: evaluate fp8 for glm-5.3")
+    update = log_row("+ingest", "muse-spark", 7200, "UPDATE glm53-fp8: evaluate glm-5.3 fp8")
+    ok(log_matters_scene(d, [update, request])[0]["duplicates"] == [], "traffic: only a CLAIM post is a claim: an UPDATE that matches a request draws no D1")
+    older, newer = log_row("+ingest", "muse-spark", 9000, "CLAIM glm53-fp8: evaluate glm-5.3 fp8"), log_row("+ingest", "lfm3", 8000, "CLAIM glm53-b: evaluate glm-5.3 fp8")
+    found = [(m["first"], m["second"]) for m in log_matters_scene(d, [older, newer, request])[0]["duplicates"]]
+    ok(found == [(request["id"], newer["id"])], f"traffic: a request that matches two claims is one D1 line, after the newer claim (got {found})")
+    a = log_row("lfm3", "pipeline", 5000, "please convert glm-5.3 to fp8")
+    for what, b in (("one sender", log_row("kimi-linear", "pipeline", 4000, "convert glm-5.3 now")),
+                    ("one recipient", log_row("lfm3", "muse-spark", 4000, "convert glm-5.3 now"))):
+        ok(log_matters_scene(d, [a, b])[0]["duplicates"] == [], f"traffic: two matching requests with {what} are no D2")
+    party_claim = log_row("+ingest", "muse-spark", 7200, "CLAIM glm53-q4: convert glm-5.3 to q4")
+    to_claimant, from_claimant = log_row("muse-spark", "pipeline", 5000, "convert glm-5.3 for q4"), log_row("lfm3", "muse-spark", 4000, "convert glm-5.3 to q4 now")
+    ok(log_matters_scene(d, [party_claim, to_claimant, from_claimant])[0]["duplicates"] == [],
+       "traffic: no D2 for two requests that match a claim, even one whose claimant is a party to each (the design's \"neither matching a claim\")")
+    names = {"glm-5.2", "lfm3"}
+    row = lambda subject: Row(0.0, "hera", "lfm3", "pi", "pi_20261106T000000.000000Z_from-lfm3_00000000", subject, None, "mcp", "direct")
+    ok(matching(row("glm-5.3 fp8 docs"), row("notes on fp8 glm-5.3"), names) is None, "traffic: two shared distinctive words without a work class are no match")
+    wrong = log_row("kimi-linear", "glm-5.2", 3600, "glm53-fp8: shard 3 failed")
+    for what, owner, state in (("an owner that is no member", "outsider", "active"), ("a dropped item", "muse-spark", "dropped")):
+        ledger = ("## Items\n| slug | owner | what | writes | holds | state | first-seen | updated | waiting on | refs |\n|---|---|---|---|---|---|---|---|---|---|\n"
+                  f"| glm53-fp8 | {owner} | x | - | - | {state} | - | - | - | - |\n")
+        ok(log_matters_scene(d, [wrong], ledger=ledger)[0]["misdirected"] == [], f"traffic: no M5 for {what}")
+    question = log_row("+ingest", "kimi-linear", 30 * 3600, "QUESTION glm53-fp8: which HF org?")
+    late = log_row("kimi-linear", "glm-5.2", 29 * 3600, "re", reply=question["id"])
+    ok(log_matters_scene(d, [question, late])[0]["replied"] == [], "traffic: U1 reads the question posts of the last 24 hours")
+    claim = log_row("+ingest", "muse-spark", 7200, "CLAIM glm53-fp8: evaluate glm-5.3 fp8")
+    ahead = log_row("kimi-linear", "glm-5.2", -2 * 3600, "kimi-eval: evaluate fp8 for glm-5.3")
+    ok(log_matters_scene(d, [claim, ahead])[0]["duplicates"] == [], "traffic: a row stamped more than 10 minutes ahead raises no matter")
+    cdir, box, fixture = log_scene(d, [claim, request, log_row("pipeline", "nix", -2 * 3600, "ahead", host="vulcan")])
+    first = traffic_with(cdir, box, fixture)[0].splitlines()[0]
+    ok(": records from 2 hosts;" in first, f"traffic: the first line's hosts are those of the rows the helper reads, less rows stamped ahead (got {first!r})")
+
+
 def test_traffic_takes_answer_h_until_john_adds_it(d):
     lacking = read(os.path.join(REPO, "steward", "POLICY.md")).replace(ANSWER_H_ROW + "\n", "")
     asked = log_row("kimi-linear", "glm-5.2", 5 * 3600, "kimi-q: which shards are done?")
-    cdir, box, fixture = log_scene(d, [asked], senders={"kimi-linear": "20000101T000000.000000Z"})
+    cdir, box, fixture = log_scene(d, [log_row("+ingest", "kimi-linear", 60 * 3600, "UPDATE kimi-q: started"), asked], senders={"kimi-linear": "20000101T000000.000000Z"})
     write(cdir, "POLICY.md", lacking)
     out, status, err = traffic_with(cdir, box, fixture, "--json")
     ok(status == 0 and [m["mail"] for m in json.loads(out)["unanswered"]] == [asked["id"]]
@@ -5474,6 +5552,7 @@ def section_traffic(d):
         test_traffic_counts_and_coverage(d)
         test_traffic_unread_lines_carry_the_slug_from_the_log(d)
         test_traffic_takes_answer_h_until_john_adds_it(d)
+        test_traffic_matter_rules(d)
     ok([words[0] for words in started] == [AGENT_MAIL] and started[0][1] == "--dir" and started[0][3:] == ["traffic", "--format", "json", "--hours", str(LOG_HOURS)],
        f"traffic: no check started agent-deck, and the one that means to, without a fixture, tried agent-mail once, as read_send_log runs it (got {started!r})")
 
@@ -6935,6 +7014,14 @@ def test_docs_checks_catch_each_pinned_regression(d):
         ("the helper made optional for the send log", "; the send log you read only through the helper.", ".", "docs: item 2 of section 1 of CLAUDE.md"),
         ("the opening post silent on the send log", "that you also read the members' records in agent-mail's send log: who mailed whom, when, the subject and the reply "
          "link, never a body; ", "", "docs: the opening post and the invitation of section 3"),
+        ("the invitation silent on the send log", "; and that you read the members' records in agent-mail's send log: who mailed whom, when, the subject and the "
+         "reply link, never a body. ", ". ", "docs: the opening post and the invitation of section 3"),
+        ("a recorded reply left out of the REQUEST row", "| a Questions row, as for a QUESTION; a recorded reply (section 8) marks it replied |",
+         "| a Questions row, as for a QUESTION |", "docs: the QUESTION and REQUEST rows of section 5"),
+        ("two requests mailed", "| two requests | a `request-request` line | list it in the digest |", "| two requests | a `request-request` line | mail both senders |",
+         "docs: section 8 of CLAUDE.md tells the traffic matters apart"),
+        ("a wrong owner mailed", "| wrong owner | a `misdirected:` line: the request, the slug, its owner | list it in the digest |",
+         "| wrong owner | a `misdirected:` line: the request, the slug, its owner | mail the owner |", "docs: section 8 of CLAUDE.md tells the traffic matters apart"),
         ("a recorded reply left out of the QUESTION row", "| a Questions row, `protected: yes` noted; a recorded reply (section 8) marks it replied |",
          "| a Questions row, `protected: yes` noted |", "docs: the QUESTION and REQUEST rows of section 5"),
         ("a recorded reply closing the question", "its row stays open until an ANSWER post closes it; one that only John", "its row is closed; one that only John",

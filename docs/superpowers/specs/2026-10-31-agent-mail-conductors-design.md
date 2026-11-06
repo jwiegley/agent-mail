@@ -338,7 +338,7 @@ States: `unclaimed` (in BACKLOG), `active`, `blocked`, `waiting-john`, `done`, `
 | Check | Fires when | Action, once |
 |---|---|---|
 | Overlap | two open items with different owners write the same `host:path` (or one inside the other) or the same `repo@branch` with overlapping paths, or declare overlapping `holds:` | mail both owners: the facts, who was first, "settle it directly and post an UPDATE" |
-| Duplicate | a new claim shares the distinctive words (model, issue id, PR, test, commit) and kind of work (convert, evaluate, fix, upload, review) of an open or recently done item | mail the later claimant: the earlier item, "DROP or say how it differs", unclaimed backlog |
+| Duplicate | a new claim shares the distinctive words (model, issue id, PR, test, commit) and kind of work (convert, evaluate, fix, upload, review) of an open or recently done item *(amended 2026-11-06, the send-log design's D1, 5.8.3: and a request by mail, stamped more than 10 minutes after a third session's matching claim, found in the send log)* | mail the later claimant: the earlier item, "DROP or say how it differs", unclaimed backlog *(for D1, the request's sender)* |
 | Landed work | a claim matches a `done` item with refs | mail the claimant the refs, marked asserted |
 | Wait cycle | following `waiting on` returns to the start | mail every owner in the cycle with the smallest step that breaks it; after 30 minutes unresolved, open a question for John |
 | Decision conflict | a DECISION contradicts one in `DECISIONS.md` | mail both sides; if John's to make, open a question; never pick a side |
@@ -354,7 +354,7 @@ States: `unclaimed` (in BACKLOG), `active`, `blocked`, `waiting-john`, `done`, `
 | waiting on John | it posted BLOCKED on John; or its substate is an interactive menu; or, for one suspected local member only, the helper reports that its last response ends with `?` (text-mode `agent-deck session output <name> --max-tokens 200`, reduced to yes or no) | no nudge; `waiting-john since <time>`; in the digest. If the question shows in its pane, the director has paged John |
 | idle with an open item | `waiting` or `idle`, and its item has had no update for 45 minutes | NUDGE |
 | starved | no open item, and `waiting` or `idle` for 20 minutes | OFFER up to three BACKLOG items whose `needs:` it meets, at most every 2 h |
-| deaf | a NUDGE of the steward's (by id, from `SENT.log`) is still unread in the shared folder after 15 minutes while agent-deck shows the member waiting | Watch; in the digest ("have it join the mailbox from its pane"); a question for John only if another worker waits on it |
+| deaf | a NUDGE of the steward's (by id, from `SENT.log`) is still unread in the shared folder after 15 minutes while agent-deck shows the member waiting *(amended 2026-11-06, the send-log design's M3, 5.8.5: or any member's mail to it, by its file name, while it is a Claude member that agent-deck shows waiting)* | Watch; in the digest ("have it join the mailbox from its pane"); a question for John only if another worker waits on it |
 | gone | `stopped` or archived in a successful listing of its host | items `orphaned`; in the digest; a question for John only if an orphan blocks someone |
 | error | `error` | nothing: the director restarts it |
 | unknown | its host's listing failed (`--with-errors`), or its background work is shell-only under agent-deck 1.16.29 | rely on mail; never act on missing data; never mark gone |
