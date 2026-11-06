@@ -5,23 +5,25 @@ The build session for agent-mail 2.4 and the steward helper's `traffic` subcomma
 ## Refocus checkpoint
 
 - 2026-11-06 06:14 PST: goal, the brief's steps 1, 2 and 6 in that order; step 1's code, checks and texts done; no detours. Next: commits, a fresh review, the report. Next check by 07:14 PST.
-- 2026-11-06 09:14 PST: step 1 reported to mail-dev as ready to land (81d66ce); step 2 committed (be6fc82, af7f469); the fess audit of the branch next, then step 6. Next check by 10:14 PST.
-- 2026-11-06 09:11 PST, late (due 07:35; step 1's reviewer ran 2 h 51 min, and the check was missed while waiting on it): both reviews back and every finding fixed; step 1's fixes committed next (with this file), then step 2's commits and its fess audit. No detours. Next check by 10:11 PST.
 - 2026-11-06 06:35 PST: step 1 committed (a510f1e, f0585b6) and under a fresh review; step 2's program, checks and README written and passing, held uncommitted until step 1's review fixes are in, so that step 1's commits stay a prefix of the branch. No detours. Next: step 1's fixes, then step 2's commits, review and fess audit. Next check by 07:35 PST.
+- 2026-11-06 09:11 PST, late (due 07:35; step 1's reviewer ran 2 h 51 min, and the check was missed while waiting on it): both reviews back and every finding fixed; step 1's fixes committed next (with this file), then step 2's commits and its fess audit. No detours. Next check by 10:11 PST.
+- 2026-11-06 09:14 PST: step 1 reported to mail-dev as ready to land (81d66ce); step 2 committed (be6fc82, af7f469); the fess audit of the branch next, then step 6. Next check by 10:14 PST.
+- 2026-11-06 09:28 PST: step 1 landed as main 81d66ce (mail-dev, 09:1x); step 2's fess audit running on the committed branch; step 6 written in the working tree and passing (helper 1648 checks; 22 mutants killed), held uncommitted until the audit's fixes are in, so that step 6's commits come after step 2's. The checkpoints are now in time order, as mail-dev asked. Next check by 10:28 PST.
+- 2026-11-06 09:45 PST, after a compaction (re-read the brief's goal, mail-dev's two messages and this file): the fess audit of steps 1 and 2 came back, no blocker, ten findings; all fixed in the working tree, each with a check, 726 checks on three interpreters, every audit survivor killed. No detours. Next: commit the fixes (program and README, then this file), a fresh sentinel probe, a fess audit of the fixes, then the 2.4.0 report to mail-dev; then step 6's review findings and commits. Next check by 10:45 PST.
 
 ## State
 
 | Step | What | State |
 |---|---|---|
-| 1 | `steward-signals traffic` with M1 to M3 from file names, `UNREAD`, TRAFFIC.log, CLAUDE.md and steward README rows | committed a510f1e, f0585b6, and the review fixes after them; ready to land |
-| 2 | agent-mail 2.4.0: the record, `via`, retention, `agent-mail traffic` (human and JSON v1), doctor, README, version, self-test | committed be6fc82 (program), af7f469 (README); fresh review done, every finding fixed; fess audit next |
-| 6 | the helper's log reader, D1, D2, U1, U2, M4, M5, counts, the privacy bullet, WORKER.md, `answer_h` | not started |
+| 1 | `steward-signals traffic` with M1 to M3 from file names, `UNREAD`, TRAFFIC.log, CLAUDE.md and steward README rows | landed: main 81d66ce (mail-dev, 2026-11-06 09:1x PST), pushed to GitHub and the five checkouts |
+| 2 | agent-mail 2.4.0: the record, `via`, retention, `agent-mail traffic` (human and JSON v1), doctor, README, version, self-test | committed be6fc82 (program), af7f469 (README); fresh review done, every finding fixed; fess audit done, its ten findings fixed in f0e5ecf; a fess audit of those fixes next |
+| 6 | the helper's log reader, D1, D2, U1, U2, M4, M5, counts, the privacy bullet, WORKER.md, `answer_h` | written in the working tree and passing; uncommitted until step 2's audit fixes are in; review and fess audit to follow |
 
 ## Test counts
 
 - `python3 -I steward/steward-signals self-test`, hera's python3 3.14.8: 1465 at ba1bbb2; 1527 at a510f1e (the traffic section, 62); 1561 at f0585b6 (docs 459 to 493); 1570 with step 1's review fixes (traffic 63, docs 501). Six mutants of those fixes, all killed. The helper needs Python 3.12 or later and refuses 3.9 by design.
-- `python3 -I agent-mail self-test`: 604 at ba1bbb2 with VERSION moved; 704 with step 2's first build (hera's python3 3.14.8, `/usr/bin/python3` 3.9.6, athena's Python 3.13.15 from a copied file); 716 after step 2's review fixes (both macOS interpreters; Linux rerun at commit).
-- Hand mutants: 17 of the helper's traffic code, all killed (two first survived and led to two stronger checks); 30 of the program's send-log code (the design's list and more), all killed.
+- `python3 -I agent-mail self-test`: 603 at ba1bbb2 (as it is; its self-test pins 2.3.0, so VERSION is not moved alone; see Corrections); 704 with step 2's first build (hera's python3 3.14.8, `/usr/bin/python3` 3.9.6, athena's Python 3.13.15 from a copied file); 716 at be6fc82, after step 2's review fixes (+113 on ba1bbb2; both macOS interpreters, and athena's Python 3.13.15 on be6fc82's own blob, re-run at 09:46 PST since this file had recorded no result); 726 with the fess audit's fixes (+10), on hera's python3 3.14.8, `/usr/bin/python3` 3.9.6 and athena's Python 3.13.15 from a copied file, 2026-11-06 09:4x PST.
+- Hand mutants, recorded with their results in `~/Products/mailbox-rollout/scratch/agent-mail-2.4/mutants/`: of the helper's traffic code, 17 (two first survived and led to two stronger checks) and 6 of step 1's review fixes, all killed; of the program's send-log code, 30 (the design's list and more) and 13 of step 2's review fixes, all killed at be6fc82. Against the audit's fixes: the auditor's 74 and those 43 rerun, 110 killed, 1 survived (`escape` dropped from the human form's host list, equivalent through the reader, which takes only host names; now killed by a check of `traffic_text`'s own promise), 6 no longer applied (their code had changed); those 6 re-targeted with 4 more, all 11 killed.
 
 ## Decisions made in the build, and why
 
@@ -47,6 +49,7 @@ Step 2:
 15. **Coverage is the whole window's;** `--name` filters only the rows. `until` is the time of the call, and rows run to 24 hours past it.
 16. **doctor reports any hidden `.tmp` in the log's directory older than an hour,** not only `.<id>.json.tmp`: a stale Syncthing temporary there blocks the directory's deletion the same way.
 17. **A post's record whose `to` lacks its `+` is valid,** since the id alone cannot tell a post from mail to a session of the channel's name (design 5.1).
+18. **With `.agent-mail` itself unreadable, a send warns,** `this send was not recorded in the send log (.agent-mail cannot be opened, so whether the log is on cannot be told: <reason>); the message itself was sent`, as design 5.2's step 3 says for any OSError. Step 2's review had made it silent, as noise while the log is off; the fess audit showed that silence loses records unseen while the log is on, and coverage would not show it for direct mail, which it does not count. Such a mailbox is broken in any case (no session there can join). doctor keeps its information line, `send log: not checked (...)`, as design 5.6 allows findings only for a broken log directory and 2.3 reports nothing there.
 
 ## Reviews and audits
 
@@ -66,10 +69,23 @@ Step 2:
   - `+all` and `+root` passed as recipients; plurals; subjects quoted as JSON strings; `--since` read to the second; doctor's newest ignores stamps far ahead; README: decision 92 at the turn-on command, the refusals outside JSON, the prune's timing, the example's consistency, `recording_since` null, `not_regular` widened;
   - the four survivors (an MCP send without `to`, a record of exactly 4,096 bytes, coverage under `--name`, a non-regular marker in the prune) each have a check now; 13 mutants of the fixes, all killed.
   - Left as designed: doctor counts a record it could not open, since it reads names and lstat alone (design 5.6).
+- The fess audit of steps 1 and 2 (fess-auditor, read-only, on the committed objects ba1bbb2..8307284, dispatched 09:1x PST; its report is `reports/fess-audit-steps1-2.md` in the evidence folder, with the two reviews' reports beside it): the headline claims hold (every count reproduced from clean exports, six good signatures, step 1 leaves the program alone, decisions 92 to 99 applied); no blocker; ten findings, all fixed in f0e5ecf:
+  1. six new behaviours had no check: the warning for a log directory that cannot be opened, doctor's finding for it, the human form's `skipped:` line, coverage past a channel `open_channel` refuses, the human form raising the unforeseen, and doctor's guard against a second finding for a symlinked `.agent-mail`; each has one now;
+  2. `--since` read to the second had no check, though be6fc82 says each review fix has one; it has now;
+  3. the "opens no record" checks watched `os.open` only; the watcher now patches the built-in `open` and `io.open` too, and each check has a control showing it sees them;
+  4. FakeSync gives a copy a fresh mtime, so a prune by mtime passed; the two late-record checks now give the copy the writer's old mtime, as Syncthing does, and FakeSync's docstring says so;
+  5. the decoder-depth case ran only on Python 3.9; a check now makes the decoder give up on every interpreter;
+  6. with `.agent-mail` unreadable, a send went unrecorded in silence while the log may be on: decision 18;
+  7. the baseline was 603, not 604 (Corrections);
+  8. the record's bytes were not pinned: a check now compares them, with a non-ASCII subject, to compact JSON in UTF-8;
+  9. README section 9 left out the `skipped:` line; it names it now, and section 7 the warning of decision 18;
+  10. the checkpoints' order is fixed (mail-dev's note too); the unpinned CLAUDE.md sentences it names ("Never open the mail an id names." and the UNREAD bodies) are step 6's to pin.
+  - Its independence: it reported "not verified", since its brief did not say that the 06:4x probe of its agent type had passed; it saw no parent transcript. The next audit's brief says so, after a fresh probe.
 
 ## Corrections
 
 - 2026-11-06 09:1x PST: the 2.4.0 program was first committed as 0efcee6, with the README as 04a90bd, under a stale draft message (705 checks, thirty mutants, no review) after a failed edit of the message went unnoticed in the same shell call. Neither was reported or pushed. Both were rebuilt with `git commit-tree -S` on the same trees and the corrected message as be6fc82 and af7f469; `git diff 04a90bd af7f469` is empty.
+- 2026-11-06 09:4x PST: be6fc82's message and this file said 604 checks at ba1bbb2 "with VERSION moved" and +112; the fess audit measured 603, and so did I: ba1bbb2's self-test passes 603 as it is, and fails its own version check with VERSION alone moved. be6fc82 added 113. Recorded here and in the message of the commit with the audit's fixes, rather than rewriting be6fc82 a second time.
 
 ## For mail-dev to carry (not in this repository)
 
