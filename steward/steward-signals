@@ -65,6 +65,15 @@ the time of the call is written whole to steward-state.json as signals_last; the
 not a JSON object, or a signals_last that is not a stamp or is in the future, is kept as steward-state.json.bad and every post but the steward's own is
 counted, with one notice on stderr. That file is all the command writes. Ages are rounded down: 45m, 3h, 2d.
 
+The traffic command is the steward's second call on a tick, after signals. It reads TOPIC.md, POLICY.md (for deaf_min), TRAFFIC.log and steward-state.json
+(for topic_since) in the conductor directory, lists the names in the mailbox's top level and looks up the member records' names, and prints the members'
+direct mail still waiting, by file name: for each member and each name it has mailed, one line when some of that mail, stamped in the last 24 hours and not
+more than 10 minutes before topic_since, has waited deaf_min or more by its stamp. A line is no-record when no session has ever read mail as that name (it has
+no member record), and member when the name is a member that has one; mail to a name that is no member and reads its mail is ordinary traffic and not listed.
+TRAFFIC.log, `<UTC> <id> <matter>` on each line, is the steward's record of the matters it acted on or set aside: a line whose waiting mail it names is left
+out and counted. The first line says that agent-mail's send log is not available, since this build reads file names only; no subject and no body is read.
+The command writes nothing.
+
 Commands:
   self-test [SECTION ...]
       Run the built-in checks, each section in a fresh temporary home.
@@ -75,6 +84,9 @@ Commands:
   probe NAME --dir CONDUCTOR_DIR
       Print yes, no or unknown: whether the last response of the member NAME ends with a question. The member's host is read from the
       Members table of the TOPIC.md in CONDUCTOR_DIR. A TOPIC.md that cannot be read is refused: status 2, a reason on stderr, nothing on stdout.
+  traffic CHANNEL --dir CONDUCTOR_DIR [--mailbox DIR] [--json]
+      Print the topic's traffic matters: each member's direct mail still waiting for a name with no reader or for a member, from file names, less what
+      CONDUCTOR_DIR/TRAFFIC.log has handled. Nothing is written. A file or mailbox that cannot be read is refused: status 2, a reason on stderr, nothing on stdout.
   metrics --dir CONDUCTOR_DIR [--date YYYY-MM-DD] --set KEY=VALUE [--set KEY=VALUE ...]
       Merge counters into CONDUCTOR_DIR/metrics/DATE.json, DATE being today's UTC date unless --date gives one, and print the file's path. A value
       of at most 12 digits, with a minus sign or none, is stored as a whole number and any other value as text; a key with dots, interventions.nudge,
@@ -978,42 +990,43 @@ def short_host():
     return socket.gethostname().split(".")[0].lower()
 
 
-def agent_mail_config():
+def agent_mail_config(command="signals"):
     """The JSON object in agent-mail's config file, $AGENT_MAIL_CONFIG when that is set and not empty, else ~/.config/agent-mail/config.json, or {} when there
     is no such file. As agent-mail refuses a malformed one, a Refusal is raised for a file that cannot be read, that holds no JSON object (see
     read_json_object), or whose hosts or sessions, or one of their entries, is not an object. A key agent-mail does not know is left to agent-mail to
-    refuse, so that a key a later agent-mail knows does not stop the steward."""
+    refuse, so that a key a later agent-mail knows does not stop the steward. A refusal names COMMAND, the subcommand that read the file."""
     try:
         data, trouble = read_json_object(os.environ.get("AGENT_MAIL_CONFIG") or os.path.expanduser(CONFIG_PATH))
     except OSError as e:
-        raise Refusal(f"steward-signals: signals: the agent-mail config file cannot be read: {e.strerror or 'the system gave no reason'}") from None
+        raise Refusal(f"steward-signals: {command}: the agent-mail config file cannot be read: {e.strerror or 'the system gave no reason'}") from None
     if trouble == "damaged":
-        raise Refusal("steward-signals: signals: the agent-mail config file is not a JSON object")
+        raise Refusal(f"steward-signals: {command}: the agent-mail config file is not a JSON object")
     for group in ("hosts", "sessions"):
         entries = data.get(group, {})
         if not isinstance(entries, dict):
-            raise Refusal(f"steward-signals: signals: {group} in the agent-mail config file is not a JSON object")
+            raise Refusal(f"steward-signals: {command}: {group} in the agent-mail config file is not a JSON object")
         for name, entry in entries.items():
             if not isinstance(entry, dict):
-                raise Refusal(f"steward-signals: signals: {group}.{clipped(name)} in the agent-mail config file is not a JSON object")
+                raise Refusal(f"steward-signals: {command}: {group}.{clipped(name)} in the agent-mail config file is not a JSON object")
     return data
 
 
-def mailbox_of(given, steward):
+def mailbox_of(given, steward, command="signals"):
     """(the mailbox, what names it in a refusal), in agent-mail's order for its dir setting: GIVEN, the --mailbox, when it is given, even empty; else
     $AGENT_MAIL_DIR when it is set and not empty; else the dir of sessions.STEWARD, then of hosts.<short host>, then at the top level of agent-mail's
     config file (see agent_mail_config); else ~/Mailbox. A leading ~ is expanded in each, as agent-mail expands it. A dir in the config file that is not
-    a non-empty string raises Refusal, as agent-mail refuses it; so does a config file agent_mail_config refuses, when it is read."""
+    a non-empty string raises Refusal, as agent-mail refuses it; so does a config file agent_mail_config refuses, when it is read. A refusal names COMMAND,
+    the subcommand that looked for the mailbox."""
     if given is not None:
         return os.path.expanduser(given), "the mailbox that --mailbox names"
     if os.environ.get("AGENT_MAIL_DIR"):
         return os.path.expanduser(os.environ["AGENT_MAIL_DIR"]), "the mailbox that $AGENT_MAIL_DIR names"
-    config = agent_mail_config()
+    config = agent_mail_config(command)
     for where, layer in ((f"sessions.{steward}.", config.get("sessions", {}).get(steward, {})), (f"hosts.{short_host()}.", config.get("hosts", {}).get(short_host(), {})),
                          ("", config)):
         if "dir" in layer:
             if not (isinstance(layer["dir"], str) and layer["dir"]):
-                raise Refusal(f"steward-signals: signals: {clipped(where)}dir in the agent-mail config file is not a directory path")
+                raise Refusal(f"steward-signals: {command}: {clipped(where)}dir in the agent-mail config file is not a directory path")
             return os.path.expanduser(layer["dir"]), f"the mailbox that {clipped(where)}dir in the agent-mail config file names"
     return os.path.expanduser("~/Mailbox"), "~/Mailbox"
 
@@ -1084,7 +1097,7 @@ def render_text(report):
 
 
 def render_json(report):
-    """REPORT (see signals_report) as one JSON object on one line, in ASCII, with every question mark taken out of its strings; JSON's own syntax has none."""
+    """REPORT (see signals_report and traffic_report) as one JSON object on one line, in ASCII, with every question mark taken out of its strings; JSON's own syntax has none."""
     return without_question_marks(json.dumps(report, allow_nan=False)) + "\n"
 
 
@@ -1153,6 +1166,154 @@ def signals_command(run, channel, directory, mailbox, as_json, probe_name):
         said += [STATE_KEPT[trouble]] if trouble in STATE_KEPT else []
     if said:
         print(without_question_marks("steward-signals: signals: " + "; ".join(said)), file=sys.stderr)
+    return 0
+
+
+# ---- traffic ----
+
+TRAFFIC_LOG = "TRAFFIC.log"  # the steward's own record of the traffic matters it has acted on or set aside, one line each: <UTC> <id> <matter>
+TRAFFIC_HOURS = 24  # how far back, in hours, a traffic call looks for its matters
+TRAFFIC_LINES = 20  # the most lines of one list that the text form prints before it says how many more there are
+TOPIC_ALLOWANCE_S = 600  # how far before topic_since a matter's stamp may lie: the 10 minutes agent-mail allows a writer's clock, as CLAUDE.md allows a post
+UNREAD_MATTERS = ("m1", "m2", "m3")  # the matters an unread line can be: mail to a name with no reader, to a stopped member, to a member that is not reading
+TRAFFIC_MATTERS = UNREAD_MATTERS  # every matter a line of TRAFFIC.log may name
+SEND_LOG_UNREAD = "this helper reads file names only"  # why the send log is not available: this build of the helper does not read it
+Unread = collections.namedtuple("Unread", "kind id sender to age")  # kind is "no-record" or "member"; age is in seconds
+
+
+def read_traffic_log(path):
+    """The matters in the TRAFFIC.log at PATH, which the steward appends to, as a set of (id, matter) pairs from its lines `<UTC> <id> <matter>`: the id is a
+    message's id, its file's name without .txt (see parse_name), and the matter one of TRAFFIC_MATTERS. The time is the steward's own and is not read. A line of
+    any other shape is skipped, a damaged byte is replaced, and a missing file holds none."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            rows = [line.split() for line in f]
+    except FileNotFoundError:
+        return set()
+    return {(row[1], row[2]) for row in rows if len(row) == 3 and parse_name(f"{row[1]}.txt") is not None and row[2] in TRAFFIC_MATTERS}
+
+
+def topic_since_of(path):
+    """The time of topic_since in the steward-state.json at PATH, in epoch seconds: a stamp as the steward writes it, YYYYMMDDTHHMMSSZ (a fraction allowed), or
+    an ISO 8601 time with a zone. None when there is no such file, when it holds no JSON object, or when its topic_since is missing or not such a time. A file
+    that cannot be read raises OSError."""
+    state, trouble = read_json_object(path)
+    value = state.get("topic_since") if trouble is None else None
+    if not isinstance(value, str):
+        return None
+    when = stamp_time(value)
+    if when is None and utc_of(value) is not None:
+        when = datetime.datetime.fromisoformat(value).timestamp()
+    return when
+
+
+def unread_matters(entries, members, recorded, handled, deaf_s, since, now):
+    """(the unread lines, how many matters TRAFFIC.log left out) for a topic whose members are the Members MEMBERS, as of NOW in epoch seconds. ENTRIES are
+    the top-level entries of the mailbox (see scan_entries), the direct mail and broadcasts still waiting; RECORDED says by name whether a name has a member
+    record, as member_checked gives it; HANDLED is read_traffic_log's set of (id, matter). A matter is the mail that one member has sent to one name and that
+    still waits: a name with no member record, member or not, is a no-record matter (no session has ever read mail as that name), and a member with a record a
+    member matter, which the steward tells apart by the member's row in the signals table; mail to a name that is no member and has a record is ordinary
+    traffic, a broadcast is no direct mail, and the steward is no member. Only mail stamped no more than TOPIC_ALLOWANCE_S seconds before SINCE, the
+    topic's start, takes part. A matter is due when one of its mails, stamped in the last TRAFFIC_HOURS hours, has waited DEAF_S seconds or more by its stamp;
+    it is left out, and counted, when TRAFFIC.log names any of its waiting mail with one of UNREAD_MATTERS, so that one line stands for a sender and a name
+    until every mail the steward acted on has been read. A due matter's line gives its kind, the id and the age of its oldest due mail, the sender and the
+    name; the lines come oldest first. Only names and metadata are used: no file is opened."""
+    names = {m.name for m in members}
+    done = {ident for ident, matter in handled if matter in UNREAD_MATTERS}
+    pairs = {}  # (sender, name) -> [(the time of the stamp, the entry)]
+    for e in entries:
+        when = stamp_time(e.stamp)
+        if e.dir != "top" or e.sender not in names or e.to == "all" or when is None or when < since - TOPIC_ALLOWANCE_S:
+            continue
+        if recorded.get(e.to) is None or e.to in names:
+            pairs.setdefault((e.sender, e.to), []).append((when, e))
+    lines, left_out = [], 0
+    for (sender, to), waiting in pairs.items():
+        due = sorted((when, e.name, e) for when, e in waiting if now - when >= deaf_s and when >= now - TRAFFIC_HOURS * 3600)
+        if not due:
+            continue
+        if any(entry_id(e) in done for _, e in waiting):
+            left_out += 1
+            continue
+        when, _, oldest = due[0]
+        lines.append(Unread("no-record" if recorded.get(to) is None else "member", entry_id(oldest), sender, to, now - when))
+    return sorted(lines, key=lambda line: (line.id.split("_")[1], line.id)), left_out
+
+
+def compact_stamp(epoch):
+    """The time EPOCH, in epoch seconds, as a stamp to the second: YYYYMMDDTHHMMSSZ, in UTC."""
+    return datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def traffic_report(channel, lines, left_out, now):
+    """The report of a traffic call, a dict that JSON can hold: the channel, the hours looked back and the time of the call as a stamp to the second; the send
+    log's state, not available, with the reason; each unread line of LINES (see unread_matters) as {kind, id, from, to, age_s}, the age in whole seconds
+    rounded down; and LEFT_OUT, the matters that TRAFFIC.log left out."""
+    return {"channel": channel, "hours": TRAFFIC_HOURS, "until": compact_stamp(now), "send_log": {"available": False, "reason": SEND_LOG_UNREAD},
+            "unread": [{"kind": line.kind, "id": line.id, "from": line.sender, "to": line.to, "age_s": whole_seconds(line.age)} for line in lines],
+            "handled": left_out}
+
+
+def capped_list(heading, lines):
+    """The lines of one list of the traffic report's text form: HEADING and a colon, then each of LINES indented two columns, TRAFFIC_LINES of them at most
+    and then and N more; or HEADING: none when LINES is empty."""
+    if not lines:
+        return [f"{heading}: none"]
+    more = [f"  and {len(lines) - TRAFFIC_LINES} more"] if len(lines) > TRAFFIC_LINES else []
+    return [f"{heading}:", *(f"  {line}" for line in lines[:TRAFFIC_LINES]), *more]
+
+
+def render_traffic_text(report):
+    """REPORT (see traffic_report) as text: the first line, traffic +CHANNEL Nh to STAMP: send log: not available (REASON); then unread: and a line for each
+    unread matter, KIND ID AGE (see capped_list); then handled: N in TRAFFIC.log. Every line holds only names, ids, ages, counts and the helper's own words,
+    in lower case but for the T and Z of a stamp, and no line holds a question mark."""
+    log = report["send_log"]
+    lines = [f"traffic +{report['channel']} {report['hours']}h to {report['until']}: send log: not available ({log['reason']})",
+             *capped_list("unread", [f"{line['kind']} {line['id']} {compact_age(line['age_s'])}" for line in report["unread"]]),
+             f"handled: {report['handled']} in {TRAFFIC_LOG}"]
+    return without_question_marks("\n".join(lines) + "\n")
+
+
+def traffic_command(channel, directory, mailbox, as_json):
+    """Print the traffic matters of the topic whose steward keeps its files in the conductor directory DIRECTORY and whose channel is CHANNEL, as text or, when
+    AS_JSON, as one JSON object on one line with every list whole (see render_traffic_text and render_json), and return 0. The matters are the unread ones
+    (see unread_matters), read from the names in the mailbox's top level, the member records' names and the conductor's TOPIC.md, POLICY.md (deaf_min),
+    TRAFFIC.log and steward-state.json (topic_since); the steward's name is conductor- and the name of DIRECTORY, and MAILBOX is the --mailbox (see
+    mailbox_of). The clock is read once, before the listing. Nothing is written, and no file in the mailbox is opened. With no topic_since that can be read,
+    no matter is raised, and one line on stderr says so. A refusal is one line on stderr, the status 2, nothing on stdout: a CHANNEL that is not an agent-mail
+    name, a DIRECTORY that is not a directory or whose name makes no steward's name, a conductor file that cannot be read or that its reader refuses, a
+    TOPIC.md that lists the steward itself, an agent-mail config file that agent-mail would refuse, and a mailbox or member record that cannot be read."""
+    now = time.time()  # the one reading of the clock, before the listing
+    try:
+        if not grammatical(channel):
+            raise Refusal("steward-signals: traffic: CHANNEL is not an agent-mail name: lower-case letters, digits, dots and single hyphens, at most 64 characters, without the +")
+        if not os.path.isdir(directory):
+            raise Refusal("steward-signals: traffic: --dir is not a directory")
+        steward = "conductor-" + os.path.basename(os.path.abspath(directory))
+        if not grammatical(steward):
+            raise Refusal("steward-signals: traffic: the steward's name, conductor- and the name of --dir, is not an agent-mail name")
+        members = conductor_file(directory, "TOPIC.md", load_roster)
+        if any(m.name == steward for m in members):
+            raise Refusal(str(RosterError(steward, "the steward itself is listed as a member")))
+        policy = conductor_file(directory, "POLICY.md", load_policy)
+        handled = conductor_file(directory, TRAFFIC_LOG, read_traffic_log)
+        since = conductor_file(directory, STATE_FILE, topic_since_of)
+        box, which = mailbox_of(mailbox, steward, "traffic")
+        if not os.path.isdir(box):
+            raise Refusal(f"steward-signals: traffic: {which} is not a directory")
+        try:
+            entries = scan_entries("top", box)
+            recorded = member_checked(box, sorted({e.to for e in entries} | {m.name for m in members}))
+        except OSError as e:  # a mailbox gone since the check above included
+            raise Refusal(f"steward-signals: traffic: the mailbox cannot be read: {e.strerror or 'the system gave no reason'}") from None
+    except Refusal as e:
+        print(without_question_marks(str(e)), file=sys.stderr)
+        return 2
+    lines, left_out = ([], 0) if since is None else unread_matters(entries, members, recorded, handled, policy["deaf_min"] * 60, since, now)
+    report = traffic_report(channel, lines, left_out, now)
+    print(render_json(report) if as_json else render_traffic_text(report), end="", flush=True)
+    if since is None:
+        print(f"steward-signals: traffic: {STATE_FILE} holds no topic_since that is a time, so no matter is raised", file=sys.stderr)
     return 0
 
 
@@ -4244,6 +4405,305 @@ def section_signals(d):
     ok(started == [], "signals: no check started the real agent-deck")
 
 
+# ---- self-test section: traffic ----
+
+TRAFFIC_NOW = STAMP_BASE.timestamp() + 7200  # 2026-11-02T22:00:00Z: stamp(0) is two hours old then
+DEAF_S = 15 * 60  # POLICY.md's deaf_min, in seconds
+
+
+def mail_named(to, i, sender="lfm3", tail="aaaaaaaa"):
+    """The file name of a message from SENDER to TO stamped stamp(I), with the hex tail TAIL."""
+    return f"{to}_{stamp(i)}_from-{sender}_{tail}.txt"
+
+
+def unread_of(names, recorded=(), handled=(), since=None, now=TRAFFIC_NOW, deaf_s=DEAF_S):
+    """unread_matters for the files NAMES (a channel entry when a name is to ingest) and CENSUS_MEMBERS, as of NOW, with a member record for each name in
+    RECORDED and none for any other, the (id, matter) pairs HANDLED, and the topic started at SINCE (two days before STAMP_BASE when None)."""
+    entries = entries_named(*names, channel="ingest")
+    asked = {e.to for e in entries} | {m.name for m in CENSUS_MEMBERS}
+    return unread_matters(entries, CENSUS_MEMBERS, {name: 1.0 if name in recorded else None for name in asked}, set(handled), deaf_s,
+                          STAMP_BASE.timestamp() - 2 * 86400 if since is None else since, now)
+
+
+def mail_id(name):
+    """The id of the message file NAME: its name without .txt."""
+    return name.removesuffix(".txt")
+
+
+def test_traffic_log_lines(d):
+    a, b, c = (mail_id(mail_named("pipeline", i)) for i in range(3))
+    path = os.path.join(d, "TRAFFIC.log")
+    with open(path, "wb") as f:
+        f.write(f"20261102T200000Z {a} m1\n20261102T200000Z {b} m9\n{c} m2\n20261102T200000Z not_an-id m1\n20261102T200000Z {c} m3 more\n".encode()
+                + b"\xff\xfe " + f"{b} m2\n".encode() + f"   20261102T200000Z {c}   m3   \n".encode())
+    ok(read_traffic_log(path) == {(a, "m1"), (b, "m2"), (c, "m3")},
+       "traffic: TRAFFIC.log is read as <UTC> <id> <matter>, the id a message's and the matter m1, m2 or m3; any other shape is skipped, a damaged byte is "
+       "replaced, and the time is not read")
+    ok(read_traffic_log(os.path.join(d, "no-such-log")) == set(), "traffic: a missing TRAFFIC.log holds no matter")
+
+
+def test_traffic_reads_topic_since(d):
+    cases = (('{"topic_since": "20261102T200000Z"}', STAMP_BASE.timestamp()), ('{"topic_since": "20261102T200000.500000Z"}', STAMP_BASE.timestamp() + 0.5),
+             ('{"topic_since": "2026-11-02T12:00:00-08:00"}', STAMP_BASE.timestamp()), ('{"topic_since": "2026-11-02T20:00:00"}', None),
+             ('{"topic_since": 1762113600}', None), ('{"topic_since": "soon"}', None), ('{"last_turn": "20261102T200000Z"}', None), ("[1]", None), ("{", None))
+    for i, (text, want) in enumerate(cases):
+        ok(topic_since_of(write(d, f"state-{i}.json", text)) == want, f"traffic: topic_since in {text} reads as {want}")
+    ok(topic_since_of(os.path.join(d, "no-such-state")) is None, "traffic: a missing steward-state.json has no topic_since")
+    os.mkdir(os.path.join(d, "state-dir"))
+    ok(isinstance(raises(OSError, topic_since_of, os.path.join(d, "state-dir")), OSError), "traffic: a steward-state.json that cannot be read raises OSError")
+
+
+def test_traffic_unread_kinds(d):
+    nobody, member, unjoined = mail_named("nobody", 0), mail_named("pipeline", 1, tail="bbbbbbbb"), mail_named("muse-spark", 2, tail="cccccccc")
+    lines, left = unread_of([nobody, member, unjoined], recorded={"pipeline", "pi"})
+    ok(lines == [Unread("no-record", mail_id(nobody), "lfm3", "nobody", 7200), Unread("member", mail_id(member), "lfm3", "pipeline", 7199),
+                 Unread("no-record", mail_id(unjoined), "lfm3", "muse-spark", 7198)] and left == 0,
+       f"traffic: a member's waiting mail to a name with no member record is no-record (a member or not), and to a member with one is member (got {lines!r})")
+    ignored = (mail_named("pi", 3), mail_named("all", 4), mail_named("ingest", 5), mail_named("nobody", 6, sender="omlx"),
+               mail_named("nobody", 7, sender="conductor-ingest-steward"))
+    lines, left = unread_of(ignored, recorded={"pi"})
+    ok(lines == [] and left == 0,
+       "traffic: no line for mail to a name that reads and is no member, a broadcast, a post, mail from a name that is no member, or the steward's own mail")
+
+
+def test_traffic_unread_thresholds(d):
+    young, ripe = mail_named("nobody", 7200 - DEAF_S + 1), mail_named("nobody", 7200 - DEAF_S, sender="pipeline")
+    lines, _ = unread_of([young, ripe])
+    ok([line.id for line in lines] == [mail_id(ripe)], "traffic: mail is due once it has waited deaf_min by its stamp, and not a second before")
+    stale, edge = mail_named("nobody", 7200 - 86400 - 1), mail_named("nobody", 7200 - 86400, sender="pipeline")
+    lines, _ = unread_of([stale, edge])
+    ok([line.id for line in lines] == [mail_id(edge)], "traffic: mail stamped more than 24 hours ago draws no line, and mail stamped 24 hours ago does")
+    early, allowed = mail_named("nobody", 1000 - 601), mail_named("nobody", 1000 - 600, sender="pipeline")
+    lines, _ = unread_of([early, allowed], since=STAMP_BASE.timestamp() + 1000)
+    ok([line.id for line in lines] == [mail_id(allowed)],
+       "traffic: no matter from mail stamped more than 10 minutes before topic_since, and one from mail stamped 10 minutes before it")
+    ahead = mail_named("nobody", 7200 + 3600)
+    ok(unread_of([ahead])[0] == [], "traffic: mail stamped ahead of the clock has not waited, so it draws no line")
+
+
+def test_traffic_one_line_per_sender_and_name(d):
+    first, second, fresh = mail_named("nobody", 0), mail_named("nobody", 100, tail="bbbbbbbb"), mail_named("nobody", 7000, tail="cccccccc")
+    lines, left = unread_of([second, fresh, first])
+    ok(lines == [Unread("no-record", mail_id(first), "lfm3", "nobody", 7200)] and left == 0,
+       "traffic: one line for a sender and a name, with the id and the age of its oldest due mail")
+    later, earlier = mail_named("pipeline", 50, sender="glm-5.2"), mail_named("nobody", 10)
+    lines, _ = unread_of([later, earlier], recorded={"pipeline"})
+    ok([line.id for line in lines] == [mail_id(earlier), mail_id(later)], "traffic: the lines come oldest first, by the stamp of each one's id")
+
+
+def test_traffic_leaves_out_what_traffic_log_holds(d):
+    first, second = mail_named("nobody", 0), mail_named("nobody", 100, tail="bbbbbbbb")
+    for matter in UNREAD_MATTERS:
+        lines, left = unread_of([first, second], handled={(mail_id(second), matter)})
+        ok(lines == [] and left == 1, f"traffic: a matter whose waiting mail TRAFFIC.log names with {matter} is left out and counted")
+    gone = mail_id(mail_named("nobody", 50, tail="cccccccc"))
+    lines, left = unread_of([first, second], handled={(gone, "m1")})
+    ok([line.id for line in lines] == [mail_id(first)] and left == 0,
+       "traffic: a line in TRAFFIC.log for mail that no longer waits leaves the sender and the name a new matter")
+    aged = mail_named("nobody", 7200 - 86400 - 3600)
+    lines, left = unread_of([aged, second], handled={(mail_id(aged), "m1")})
+    ok(lines == [] and left == 1, "traffic: a handled matter stays left out while its first mail waits, after that mail falls out of the 24 hours")
+    lines, left = unread_of([first, second], handled={(mail_id(first), "d1"), (mail_id(second), "u2")})
+    ok([line.id for line in lines] == [mail_id(first)] and left == 0, "traffic: a line in TRAFFIC.log for a matter that is not m1, m2 or m3 leaves the unread matter in")
+    other = mail_named("pipeline", 0, sender="glm-5.2")
+    lines, left = unread_of([first, other], recorded={"pipeline"}, handled={(mail_id(first), "m1")})
+    ok([line.id for line in lines] == [mail_id(other)] and left == 1, "traffic: a line in TRAFFIC.log leaves out its own sender and name only")
+
+
+def traffic_scene(d, top=(), records=("pipeline",), state='{"topic_since": "20261101T000000Z"}\n', log=None, name="ingest-steward"):
+    """(the conductor directory, the mailbox) of a traffic call: TOPIC_WITH_TABLE's topic with the checkout's POLICY.md, the steward-state.json STATE (none
+    when None) and the TRAFFIC.log LOG (none when None); the mailbox holds a file for each name in TOP and a member record for each name in RECORDS."""
+    cdir = conductor_dir(d, name=name)
+    if state is not None:
+        write(cdir, STATE_FILE, state)
+    if log is not None:
+        write(cdir, TRAFFIC_LOG, log)
+    return cdir, mailbox(d, top=top, channel=("ingest", []), members_checked={record: time.time() for record in records})
+
+
+def traffic(cdir, box, *more):
+    """(stdout, status, stderr) of the traffic command for +ingest with the conductor directory CDIR and the mailbox BOX, and MORE."""
+    return capture(main, ["traffic", "ingest", "--dir", cdir, "--mailbox", box, *more])
+
+
+def ago(seconds, to, sender="glm-5.2", tail="aaaaaaaa"):
+    """The name of a message from SENDER to TO stamped SECONDS before now."""
+    return f"{to}_{utc_stamp(time.time() - seconds)}_from-{sender}_{tail}.txt"
+
+
+def without_stamps(text):
+    """TEXT less every stamp, YYYYMMDDTHHMMSSZ with or without a fraction, and less the name of TRAFFIC.log, the one word of the helper's own that has
+    capitals: what is left holds a capital letter only if one came from elsewhere."""
+    return re.sub(r"[0-9]{8}T[0-9]{6}(?:\.[0-9]{6})?Z", "", text).replace(TRAFFIC_LOG, "")
+
+
+def test_traffic_end_to_end(d):
+    nobody, member = ago(3 * 3600, "nobody"), ago(45 * 60, "pipeline", sender="omlx", tail="bbbbbbbb")
+    cdir, box = traffic_scene(d, top=[nobody, member, ago(60, "pipeline", tail="cccccccc")])
+    out, status, err = traffic(cdir, box)
+    lines = out.splitlines()
+    ok(status == 0 and err == "" and re.fullmatch(r"traffic \+ingest 24h to [0-9]{8}T[0-9]{6}Z: send log: not available \(this helper reads file names only\)", lines[0])
+       and lines[1:] == ["unread:", f"  no-record {mail_id(nobody)} 3h", f"  member {mail_id(member)} 45m", "handled: 0 in TRAFFIC.log"],
+       f"traffic: the text form gives the first line, saying the send log is not available, the unread lines and the handled count (got {lines!r})")
+    out, status, err = traffic(cdir, box, "--json")
+    report = json.loads(out)
+    ok(status == 0 and err == "" and out.count("\n") == 1 and report["send_log"] == {"available": False, "reason": SEND_LOG_UNREAD} and report["hours"] == 24
+       and report["channel"] == "ingest" and [(u["kind"], u["id"], u["from"], u["to"]) for u in report["unread"]] == [("no-record", mail_id(nobody), "glm-5.2", "nobody"),
+       ("member", mail_id(member), "omlx", "pipeline")] and 45 * 60 <= report["unread"][1]["age_s"] < 46 * 60 and report["handled"] == 0,
+       "traffic: --json prints the same report as one JSON object on one line")
+    write(cdir, TRAFFIC_LOG, f"20261106T000000Z {mail_id(nobody)} m1\n")
+    out, status, _ = traffic(cdir, box)
+    ok(status == 0 and out.splitlines()[1:] == ["unread:", f"  member {mail_id(member)} 45m", "handled: 1 in TRAFFIC.log"],
+       "traffic: a matter in TRAFFIC.log is left out, and counted under handled")
+    write(cdir, TRAFFIC_LOG, f"20261106T000000Z {mail_id(nobody)} m1\n20261106T000000Z {mail_id(member)} m3\n")
+    out, status, _ = traffic(cdir, box)
+    ok(status == 0 and out.splitlines()[1:] == ["unread: none", "handled: 2 in TRAFFIC.log"], "traffic: with every matter handled, unread says none")
+
+
+def test_traffic_prints_no_question_mark_and_no_capital(d):
+    top = [ago(3600, "nobody"), ago(3600, "pipeline", sender="omlx", tail="bbbbbbbb"), ago(7200, "pi", tail="cccccccc")]
+    cdir, box = traffic_scene(d, top=top, records=("pipeline", "pi"))
+    for form in ((), ("--json",)):
+        out, status, err = traffic(cdir, box, *form)
+        ok(status == 0 and "?" not in out + err and without_stamps(out).lower() == without_stamps(out) and "unread" in out,
+           f"traffic: no question mark and no capital letter but the T and Z of a stamp and the name of TRAFFIC.log, in the {'JSON' if form else 'text'} form")
+
+
+def test_traffic_caps_each_list(d):
+    top = [ago(3600 + i, f"nobody{i}") for i in range(25)]
+    cdir, box = traffic_scene(d, top=top)
+    out, status, _ = traffic(cdir, box)
+    lines = out.splitlines()
+    ok(status == 0 and lines[1] == "unread:" and len([line for line in lines if line.startswith("  no-record ")]) == TRAFFIC_LINES and lines[-2] == "  and 5 more",
+       f"traffic: the unread list stops at {TRAFFIC_LINES} lines, the oldest, and then says how many more")
+    out, status, _ = traffic(cdir, box, "--json")
+    ok(status == 0 and len(json.loads(out)["unread"]) == 25, "traffic: --json keeps every line")
+
+
+def test_traffic_writes_nothing_and_opens_no_mailbox_file(d):
+    for log in (None, ""):
+        cdir, box = traffic_scene(d, top=[ago(3600, "nobody"), ago(3600, "pipeline", sender="omlx")], log=log)
+        before = tree(d)
+        out, status, _ = traffic(cdir, box)
+        ok(status == 0 and "no-record" in out and tree(d) - before == set(),
+           f"traffic: writes nothing, in the conductor directory or the mailbox, with {'no' if log is None else 'an empty'} TRAFFIC.log")
+    with files_watched() as opened:
+        out, status, _ = traffic(cdir, box)
+    names = [os.path.realpath(p) for p in opened if isinstance(p, str)]
+    inside = [p for p in names if os.path.commonpath([p, os.path.realpath(box)]) == os.path.realpath(box)]
+    ok(inside == [], f"traffic: opens no file in the mailbox, a message or a member record (opened {inside!r})")
+    ok({os.path.basename(p) for p in names} >= {"TOPIC.md", "POLICY.md", TRAFFIC_LOG, STATE_FILE}, "traffic: the watch above saw the conductor's files opened, so it works")
+
+
+def test_traffic_without_topic_since_raises_nothing(d):
+    for state in (None, "{}", '{"topic_since": "later"}', "not json"):
+        cdir, box = traffic_scene(d, top=[ago(3600, "nobody")], state=state)
+        out, status, err = traffic(cdir, box)
+        ok(status == 0 and out.splitlines()[1:] == ["unread: none", "handled: 0 in TRAFFIC.log"]
+           and err == "steward-signals: traffic: steward-state.json holds no topic_since that is a time, so no matter is raised\n",
+           f"traffic: with no topic_since that is a time ({state!r}), no matter is raised and one line on stderr says so")
+
+
+def test_traffic_refuses_what_it_cannot_read(d):
+    def refused(args, cdir, box, starts, env=None):
+        saved = {k: os.environ.get(k) for k in (env or {})}
+        os.environ.update(env or {})
+        try:
+            out, status, err = capture(main, ["traffic", *args, "--dir", cdir, *([] if box is None else ["--mailbox", box])])
+        finally:
+            for k, v in saved.items():
+                os.environ.pop(k) if v is None else os.environ.update({k: v})
+        ok(out == "" and status == 2 and err.startswith(starts) and err.count("\n") == 1 and "?" not in err, f"traffic: refused, {starts} (got {err!r})")
+
+    cdir, box = traffic_scene(d)
+    refused(["Ingest"], cdir, box, "steward-signals: traffic: CHANNEL is not an agent-mail name")
+    refused(["ingest"], os.path.join(d, "no-such-dir"), box, "steward-signals: traffic: --dir is not a directory")
+    refused(["ingest"], conductor_dir(d, name="Bad"), box, "steward-signals: traffic: the steward's name")
+    os.remove(os.path.join(cdir, "TOPIC.md"))
+    refused(["ingest"], cdir, box, "steward-signals: TOPIC.md in --dir: ")
+    cdir, box = traffic_scene(d)
+    write(cdir, "TOPIC.md", TOPIC_WITH_TABLE.replace("| omlx | hera | pi |", "| conductor-ingest-steward | hera | claude |"))
+    refused(["ingest"], cdir, box, "steward-signals: TOPIC.md: conductor-ingest-steward: the steward itself is listed as a member")
+    cdir, box = traffic_scene(d)
+    write(cdir, "POLICY.md", read(os.path.join(REPO, "steward", "POLICY.md")).replace("| deaf_min | 15 |", "| deaf_min | soon |"))
+    refused(["ingest"], cdir, box, "steward-signals: POLICY.md: deaf_min: ")
+    cdir, box = traffic_scene(d)
+    os.mkdir(os.path.join(cdir, TRAFFIC_LOG))
+    refused(["ingest"], cdir, box, "steward-signals: TRAFFIC.log in --dir: ")
+    cdir, box = traffic_scene(d, state=None)
+    os.mkdir(os.path.join(cdir, STATE_FILE))
+    refused(["ingest"], cdir, box, "steward-signals: steward-state.json in --dir: ")
+    cdir, _ = traffic_scene(d)
+    refused(["ingest"], cdir, os.path.join(d, "no-such-mailbox"), "steward-signals: traffic: the mailbox that --mailbox names is not a directory")
+    refused(["ingest"], cdir, None, "steward-signals: traffic: the agent-mail config file is not a JSON object", env={"AGENT_MAIL_CONFIG": write(d, "config.json", "{")})
+    refused(["ingest"], cdir, None, "steward-signals: traffic: dir in the agent-mail config file is not a directory path",
+            env={"AGENT_MAIL_CONFIG": write(d, "config.json", '{"dir": ""}')})
+    cdir, box = traffic_scene(d)
+    with contextlib.ExitStack() as stack:
+        real_scandir = os.scandir
+        stack.callback(setattr, os, "scandir", real_scandir)
+
+        def scandir_refused(path):
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), path)
+
+        os.scandir = scandir_refused
+        refused(["ingest"], cdir, box, f"steward-signals: traffic: the mailbox cannot be read: {os.strerror(errno.EACCES)}")
+
+
+def test_traffic_finds_the_mailbox_as_signals_does(d):
+    cdir, box = traffic_scene(d, top=[ago(3600, "nobody")])
+    os.environ["AGENT_MAIL_DIR"] = box
+    try:
+        out, status, _ = capture(main, ["traffic", "ingest", "--dir", cdir])
+    finally:
+        del os.environ["AGENT_MAIL_DIR"]
+    ok(status == 0 and "  no-record nobody_" in out, "traffic: without --mailbox it finds the mailbox as agent-mail does, $AGENT_MAIL_DIR first")
+
+
+def test_traffic_options(d):
+    out, status, err = capture(main, ["traffic", "--help"])
+    own = " ".join(out.split())
+    ok(status == 0 and all(flag in out for flag in ("--dir", "--mailbox", "--json")) and "?" not in out + err and "TRAFFIC.log" in own and "deaf_min" in own
+       and "topic_since" in own and "Nothing is written" in own and "status 2" in own,
+       "traffic: its help names --dir, --mailbox and --json, says what it reads, that nothing is written and what is refused, and holds no question mark")
+    top = " ".join(capture(main, ["--help"])[0].split())
+    ok("traffic CHANNEL --dir CONDUCTOR_DIR [--mailbox DIR] [--json]" in top and "The traffic command is the steward's second call on a tick" in top and "?" not in top,
+       "traffic: the command is listed in the top-level help, which describes it")
+    out, status, err = capture(main, ["traffic", "ingest"])
+    ok(out == "" and status == 2 and "required: --dir" in err, "traffic: --dir is required")
+
+
+def test_traffic_leaves_signals_as_it_was(d):
+    cdir, box, fixture, _ = signals_scene(d)
+    first = signals(cdir, box, fixture)[0]
+    write(cdir, STATE_FILE, json.dumps({**state_of(cdir), "signals_last": utc_stamp(time.time() - 3600 * 5)}))
+    _, status, _ = traffic(cdir, box)
+    second = signals(cdir, box, fixture)[0]
+    ok(status == 0 and first.splitlines()[:-1] == second.splitlines()[:-1] and "transit-without-note=1" in second,
+       "traffic: a traffic call leaves the signals call's report as it was, its table, exceptions and census")
+
+
+@section("traffic")
+def section_traffic(d):
+    with agent_deck_refused() as started:  # traffic runs no agent-deck at all: a call that would is refused here, and fails
+        test_traffic_log_lines(d)
+        test_traffic_reads_topic_since(d)
+        test_traffic_unread_kinds(d)
+        test_traffic_unread_thresholds(d)
+        test_traffic_one_line_per_sender_and_name(d)
+        test_traffic_leaves_out_what_traffic_log_holds(d)
+        test_traffic_end_to_end(d)
+        test_traffic_prints_no_question_mark_and_no_capital(d)
+        test_traffic_caps_each_list(d)
+        test_traffic_writes_nothing_and_opens_no_mailbox_file(d)
+        test_traffic_without_topic_since_raises_nothing(d)
+        test_traffic_refuses_what_it_cannot_read(d)
+        test_traffic_finds_the_mailbox_as_signals_does(d)
+        test_traffic_options(d)
+        test_traffic_leaves_signals_as_it_was(d)
+    ok(started == [], "traffic: no check started agent-deck")
+
+
 # ---- self-test section: docs ----
 
 CLAUDE_HEADINGS = ("# Topic steward", "## 1. Your standing", "## 2. Precedence", "## 3. Starting a topic", "## 4. Every turn", "## 5. Each delivered item",
@@ -5824,6 +6284,20 @@ def build_parser():
     pr.add_argument("name", metavar="NAME")
     pr.add_argument("--dir", required=True, metavar="CONDUCTOR_DIR", help="the conductor directory, which holds TOPIC.md")
     pr.add_argument("--run-fixture", metavar="FILE", help=argparse.SUPPRESS)  # for the self-test: a JSON object of the answers that fake_run gives
+    tr = sub.add_parser("traffic", help="print a topic's traffic matters",
+                        description="Print the traffic matters of the topic whose steward keeps its files in CONDUCTOR_DIR, from file names alone: for each member "
+                                    f"of its TOPIC.md and each name the member has mailed, one line when some of that direct mail still waits in the mailbox's top "
+                                    f"level, stamped in the last {TRAFFIC_HOURS} hours and not more than {TOPIC_ALLOWANCE_S // 60} minutes before topic_since in "
+                                    "CONDUCTOR_DIR/steward-state.json, and has waited deaf_min or more by its stamp: no-record when no session has ever read mail as "
+                                    "that name, member when the name is a member with a member record. A matter that CONDUCTOR_DIR/TRAFFIC.log names is left out and "
+                                    f"counted; each list stops at {TRAFFIC_LINES} lines and then says how many more. The first line says that the send log is not "
+                                    "available, since this build reads file names only. Nothing is written and no file in the mailbox is opened. A conductor file, "
+                                    "mailbox or member record that cannot be read, a CHANNEL that is not a name, and a TOPIC.md that lists the steward are refused: "
+                                    "status 2, a reason on stderr, nothing on stdout.")
+    tr.add_argument("channel", metavar="CHANNEL", help="the topic's channel, its name without the +")
+    tr.add_argument("--dir", required=True, metavar="CONDUCTOR_DIR", help="the conductor directory, which holds TOPIC.md, POLICY.md, TRAFFIC.log and steward-state.json")
+    tr.add_argument("--mailbox", metavar="DIR", help="the mailbox; else $AGENT_MAIL_DIR, then the dir in agent-mail's config file, then ~/Mailbox, as agent-mail finds it")
+    tr.add_argument("--json", action="store_true", help="print the report as one JSON object, with every list whole")
     me = sub.add_parser("metrics", help="merge counters into the day's metrics file",
                         description="Merge counters into the metrics file of a UTC day, CONDUCTOR_DIR/metrics/DATE.json, and print its path. Each --set is KEY=VALUE: "
                                     "a value of at most 12 digits, with a minus sign or none, is stored as a whole number and any other value as text, and a key "
@@ -5854,6 +6328,8 @@ def main(argv):
         if a.cmd == "signals":
             return signals_command(run, a.channel, a.dir, a.mailbox, a.json, a.probe)
         return probe_command(run, a.name, a.dir)
+    if a.cmd == "traffic":
+        return traffic_command(a.channel, a.dir, a.mailbox, a.json)
     if a.cmd == "metrics":
         return metrics_command(a.dir, a.date, a.settings)
 
