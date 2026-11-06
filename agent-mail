@@ -207,11 +207,12 @@ def check_readable(d):
 
 
 def check_writable(d, name=None):
-    """Raise mailbox_unwritable when this user cannot write in the mailbox D, where every send, claim and archive is written, or, with NAME, in
-    NAME's archive .NAME-read when it exists: found before anything is claimed, never after a batch has been shown."""
+    """Raise mailbox_unwritable when this user cannot write in the mailbox D, where every send, claim and archive is written, or, with NAME,
+    cannot read, write and search NAME's archive .NAME-read when it exists: found before anything is claimed, never after a batch has been
+    shown, by every path that claims (the CLI's read and watch, and the MCP server's receive)."""
     places = [(d, f"mailbox {d}")] + ([(os.path.join(d, f".{name}-read"), f"{name}'s archive {os.path.join(d, f'.{name}-read')}")] if name else [])
     for path, what in places:
-        if os.path.lexists(path) and not os.access(path, os.W_OK | os.X_OK):
+        if os.path.lexists(path) and not os.access(path, (os.R_OK if path != d else 0) | os.W_OK | os.X_OK):
             raise MailError("mailbox_unwritable", f"{what} cannot be written; agent-mail writes each send, claim and archived copy there, so check "
                                                   "that you own it and that its mode lets you write in it (0700)")
 
@@ -3398,6 +3399,7 @@ class McpServer:
         d = self.ready(write=True)
         name = self.identity.name
         check_me(args["me"], name)
+        check_writable(d, name)  # its archive too, before anything is claimed: a batch whose archive copy fails would be shown again
         self.reader()
         now = clock()
         state = load_state(d, name)
@@ -3420,7 +3422,7 @@ class McpServer:
         return self.head() + pending_line(d, self.identity.name, self.settings, "human").removeprefix("agent-mail: "), None, None
 
     def tool_subscribe(self, args, mid):
-        d = self.ready(write=True)
+        d = self.ready()
         self.reader()
         name, ch, now = self.identity.name, bare(args["channel"]), clock()
         state = load_state(d, name)
@@ -3429,7 +3431,7 @@ class McpServer:
         return self.head() + subscription_text(d, name, ch, sub), None, None
 
     def tool_unsubscribe(self, args, mid):
-        d = self.ready(write=True)
+        d = self.ready()
         self.reader()
         name, ch, now = self.identity.name, bare(args["channel"]), clock()
         state = load_state(d, name)
@@ -3808,6 +3810,7 @@ def cmd_watch(name, d, interval, forever, max_bytes, max_polls=None, parent=None
                 return 1
             try:
                 check_readable(d)
+                check_writable(d, name)
             except MailError as e:
                 emit(write, f"agent-mail: {f'mailbox {d} is missing' if e.code == 'mailbox_missing' else e.message}; the watcher for {name} has stopped\n")
                 return 1
@@ -4149,7 +4152,7 @@ def dispatch(a):
         raise MailError("bad_argument", "watch needs a NAME, except with --doorbell")
     name = check_name(a.name)
     s = cli_settings(a, name)
-    d = require_mailbox(s.dir, write=True)
+    d = require_mailbox(s.dir, write=a.cmd in ("read", "watch"))  # subscribe and unsubscribe write host-local state and a member record at best
     if a.cmd == "read":
         return cmd_read(name, d, s.max_bytes, settings=s)
     if a.cmd == "subscribe":
@@ -7103,38 +7106,46 @@ def unreadable_root_checks(t):
     os.chmod(shut, 0o500)
     try:
         writers = [t.run(["--dir", shut, *argv]) for argv in (["send", "--from", "pi", "--to", "nix", "--subject", "s", body], ["read", "nix"],
-                                                              ["channel", "create", "ops", "--purpose", "p"], ["subscribe", "nix", "fleet"],
-                                                              ["unsubscribe", "nix", "fleet"], ["watch", "nix", "--max-polls", "1"], ["init"])]
-        readers = [t.run(["--dir", shut, *argv]) for argv in (["pending", "nix"], ["channels"], ["traffic"])]
+                                                              ["channel", "create", "ops", "--purpose", "p"], ["watch", "nix", "--max-polls", "1"], ["init"])]
+        readers = [t.run(["--dir", shut, *argv]) for argv in (["pending", "nix"], ["channels"], ["traffic"], ["subscribe", "pi", "fleet"],
+                                                              ["unsubscribe", "pi", "fleet"])]
         doc = t.run(["--dir", shut, "doctor", "nix"])
         writing_tools = [t.tool(srv, "receive", me="nix"), t.tool(srv, "send", to="pi", subject="s", body="b")]
-        reading_tool = t.tool(srv, "pending")
+        other_tools = [t.tool(srv, "pending"), t.tool(srv, "subscribe", channel="fleet"), t.tool(srv, "unsubscribe", channel="fleet")]
+        direct_send = t.raises(cmd_send, "pi", "nix", "s", None, body, shut)
     finally:
         os.chmod(shut, 0o700)
     said = unwritable(f"mailbox {shut}")
-    t.ok(all(r == ("", 1, f"agent-mail: {said}\n") for r in writers) and all(r[1] == 0 and r[2] == "" for r in readers)
-         and all(r["isError"] and "mailbox_unwritable" in r["content"][0]["text"] for r in writing_tools) and not reading_tool["isError"],
-         f"a root that cannot be written is refused as mailbox_unwritable by each command and tool that writes, and read by those that only read "
-         f"(got {[r for r in writers if r != ('', 1, 'agent-mail: ' + said + chr(10))][:1]})")
+    t.ok(all(r == ("", 1, f"agent-mail: {said}\n") for r in writers) and all(r[1] == 0 for r in readers)
+         and all(r["isError"] and "mailbox_unwritable" in r["content"][0]["text"] for r in writing_tools) and not any(r["isError"] for r in other_tools)
+         and direct_send is not None and direct_send.code == "send_failed",
+         f"a root that cannot be written is refused as mailbox_unwritable by each command and tool that claims, sends or creates there, while pending, "
+         f"channels, traffic, subscribe and unsubscribe, which write only host-local state and a member record at best, still work "
+         f"(got {[r for r in writers if r != ('', 1, 'agent-mail: ' + said + chr(10))][:1]}, {[r[:2] for r in readers if r[1] != 0][:1]})")
     t.ok(f"finding: {said}" in doc[0].splitlines() and every_file(shut) == before,
          "doctor finds it, and nothing was claimed: the waiting mail is still waiting")
 
-    archive = t.box("unwritable-archive")
-    t.direct(archive, "nix", "pi", "FIRST")
-    t.capture(cmd_read, "nix", archive, MAX_BYTES)
-    t.direct(archive, "nix", "pi", "SECOND")
-    waiting = sorted(e for e in os.listdir(archive) if e.startswith("nix_"))
-    kept = os.path.join(archive, ".nix-read")
-    os.chmod(kept, 0o500)
-    try:
-        out = t.run(["--dir", archive, "read", "nix"])
-        doc = t.run(["--dir", archive, "doctor", "nix"])[0]
-    finally:
-        os.chmod(kept, 0o700)
-    said = unwritable(f"nix's archive {kept}")
-    t.ok(out == ("", 1, f"agent-mail: {said}\n") and f"finding: {said}" in doc.splitlines()
-         and sorted(e for e in os.listdir(archive) if e.startswith("nix_")) == waiting,
-         "an archive that cannot be written is refused before anything is claimed or shown, so nothing is shown twice; doctor finds it")
+    for mode in (0o500, 0o300, 0o600, 0o000):
+        archive = t.box(f"unwritable-archive-{mode:o}")
+        t.direct(archive, "nix", "pi", "FIRST")
+        t.capture(cmd_read, "nix", archive, MAX_BYTES)
+        t.direct(archive, "nix", "pi", "SECOND")
+        waiting = sorted(e for e in os.listdir(archive) if e.startswith("nix_"))
+        kept = os.path.join(archive, ".nix-read")
+        srv = t.server(archive, "nix")
+        os.chmod(kept, mode)
+        try:
+            tool = t.tool(srv, "receive", me="nix")
+            srv.close()
+            out = t.run(["--dir", archive, "read", "nix"])
+            doc = t.run(["--dir", archive, "doctor", "nix"])[0]
+        finally:
+            os.chmod(kept, 0o700)
+        said = unwritable(f"nix's archive {kept}")
+        t.ok(tool["isError"] and said in tool["content"][0]["text"] and out == ("", 1, f"agent-mail: {said}\n") and f"finding: {said}" in doc.splitlines()
+             and sorted(e for e in os.listdir(archive) if e.startswith("nix_")) == waiting,
+             f"an archive at mode {mode:o} is refused by the receive tool and by read before anything is claimed or shown, so nothing is shown twice; "
+             "doctor finds it")
 
     nest = os.path.join(t.root, "unwritable-parent")
     os.mkdir(nest, 0o700)
@@ -7179,6 +7190,24 @@ def unreadable_root_checks(t):
         t.patch("receive", real_receive)
     t.ok(code == 1 and out == f"agent-mail: {unreadable(watched)}; the watcher for pi has stopped\n" and len(passes) == 1,
          "a watch checks the mailbox at each pass: one whose root turns unsearchable stops at the next pass with the reason, not a traceback")
+    locked_later = t.box("unwritable-later")
+    passes.clear()
+
+    def locking(*a, **k):
+        out = real_receive(*a, **k)
+        if not passes:
+            os.chmod(locked_later, 0o500)
+        passes.append(1)
+        return out
+
+    t.patch("receive", locking)
+    try:
+        out, code, _ = t.capture(cmd_watch, "pi", locked_later, 0.01, False, MAX_BYTES, 3)
+    finally:
+        os.chmod(locked_later, 0o700)
+        t.patch("receive", real_receive)
+    t.ok(code == 1 and out == f"agent-mail: {unwritable(f'mailbox {locked_later}')}; the watcher for pi has stopped\n" and len(passes) == 1,
+         "and one whose root turns unwritable stops the same way, with its reason")
 
     rung = t.box("unreadable-bell")
     real_bell = bell_pass
@@ -7253,8 +7282,21 @@ def unreadable_root_checks(t):
          and missing_or_unreadable(shut, PermissionError(errno.EACCES, eacces)).code == "mailbox_unreadable",
          "an error reaching, listing or opening the root is mailbox_missing when the root is gone or is a file, and mailbox_unreadable otherwise")
     io_error = unreadable_mailbox(shut, OSError(errno.EIO, os.strerror(errno.EIO)))
-    t.ok(io_error.code == "mailbox_unreadable" and io_error.message == f"mailbox {shut} cannot be read ({os.strerror(errno.EIO)})",
-         "only a permission error comes with the advice on owner and mode; another error gives its reason alone")
+    perm_error = unreadable_mailbox(shut, PermissionError(errno.EPERM, os.strerror(errno.EPERM)))
+    t.ok(io_error.code == "mailbox_unreadable" and io_error.message == f"mailbox {shut} cannot be read ({os.strerror(errno.EIO)})"
+         and perm_error.message.startswith(f"mailbox {shut} cannot be read ({os.strerror(errno.EPERM)}); agent-mail lists and opens"),
+         "only a permission error, EACCES or EPERM, comes with the advice on owner and mode; another error gives its reason alone")
+    t.ok(t.run(["--dir", flat, "read", "nix"]) == ("", 1, f"agent-mail: mailbox {flat} does not exist\n"),
+         "a --dir that is a file is a mailbox that does not exist")
+    closed_send = os.path.join(t.root, "closed-send")
+    t.run(["--dir", closed_send, "init"])
+    os.chmod(closed_send, 0o300)
+    try:
+        direct = t.raises(cmd_send, "pi", "nix", "s", None, body, closed_send)
+    finally:
+        os.chmod(closed_send, 0o700)
+    t.ok(direct is not None and direct.code == "mailbox_unreadable",
+         "cmd_send called on its own refuses an unreadable mailbox (its own check comes before the body is read; send's opening of the root would too)")
 
 
 def section_cli(t):
