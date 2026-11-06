@@ -1261,8 +1261,9 @@ def traffic_on(fd):
 
 def record_send(d, stamp, ident, sender, to, subject, in_reply_to, via):
     """Write the send log's record of the message IDENT that send has just put in place, when the log is on,
-    and return the warnings: none, or one saying that this send was not recorded and why (none when
-    .agent-mail itself cannot be opened, so that whether the log is on cannot be told). The record is one
+    and return the warnings: none, or one saying that this send was not recorded and why (design 5.2,
+    step 3: any OSError, .agent-mail's own among them, since a log that may be on is never skipped in
+    silence). The record is one
     JSON line of RECORD_KEYS, never the body, written by write_new under a hidden temporary name (which
     Syncthing never carries) and renamed into place, refusing an existing record. Nothing here fails the
     send: the message is already in place, so failing now would invite a second copy."""
@@ -1274,9 +1275,10 @@ def record_send(d, stamp, ident, sender, to, subject, in_reply_to, via):
     except MailError:
         return unrecorded(f"{TRAFFIC_DIR} or a directory above it is a symlink or not a directory")
     except OSError as e:
-        if e.filename != os.path.basename(TRAFFIC_DIR):  # .agent-mail cannot be opened: whether the log is on cannot be told, and the member records say nothing either
-            return []
-        return unrecorded(e.strerror or type(e).__name__)
+        why = e.strerror or type(e).__name__
+        if e.filename == os.path.dirname(TRAFFIC_DIR):
+            why = f".agent-mail cannot be opened, so whether the log is on cannot be told: {why}"
+        return unrecorded(why)
     if fd is None:
         return []
     try:
@@ -7103,7 +7105,8 @@ class FakeSync:
     """Test only: N replicas of one Syncthing folder. step() delivers what the previous step
     found (new or changed files, and deletions) to every other online replica, so changes
     arrive one step late; ignored names never cross. on(i) acts as replica i's host, with
-    its own HOST, HOSTTAG and clock offset."""
+    its own HOST, HOSTTAG and clock offset. Unlike Syncthing, it gives a delivered copy a
+    new mtime; a check that rests on the writer's mtime sets it on the copy."""
 
     def __init__(self, root, n, ignore=IGNORE):
         self.dirs = [os.path.join(root, f"replica-{i}") for i in range(n)]
@@ -7352,18 +7355,22 @@ def every_file(root):
 
 @contextlib.contextmanager
 def os_opens():
-    """Within the block, os.open records each path it is given (a name relative to a dir_fd as it is), and opens it."""
-    opened, real = [], os.open
+    """Within the block, os.open, the built-in open and io.open each record the path they are given (a name
+    relative to a dir_fd as it is, a descriptor as its number), then open it."""
+    import builtins
+    opened, real = [], (os.open, builtins.open, io.open)
 
-    def watching(path, *a, **k):
-        opened.append(os.fspath(path))
-        return real(path, *a, **k)
+    def watch(fn):
+        def watching(path, *a, **k):
+            opened.append(path if isinstance(path, int) else os.fspath(path))
+            return fn(path, *a, **k)
+        return watching
 
-    os.open = watching
+    os.open, builtins.open, io.open = (watch(fn) for fn in real)
     try:
         yield opened
     finally:
-        os.open = real
+        os.open, builtins.open, io.open = real
 
 
 def traffic_send_checks(t):
@@ -7412,6 +7419,14 @@ def traffic_send_checks(t):
                                                         "subject": subject, "in_reply_to": answer, "via": "cli"}
              for ident, (sender, to, subject, answer) in want.items()),
          "a record holds exactly v, utc, host, from, to with its + or all, id, the cleaned subject, in_reply_to and via, in that order, equal to the message's")
+    t.at(T0 + 4)
+    accented = send(d, "pi", "nix", "café ☕ naïve", "a body with accents", s)
+    t.ok(all(record_bytes(d, ident) == record_text({"v": 1, "utc": ident.split("_")[1], "host": HOST, "from": sender, "to": to, "id": ident,
+                                                     "subject": subject, "in_reply_to": answer, "via": "cli"}).encode("utf-8")
+             for ident, (sender, to, subject, answer) in dict(want, **{accented.id: ("pi", "nix", "café ☕ naïve", None)}).items())
+         and "café ☕".encode("utf-8") in record_bytes(d, accented.id),
+         "a record's bytes are design 5.1's: compact JSON (no space after a comma or colon), its text as UTF-8, never escaped, and one newline")
+    made.append(f"{accented.id}.json")
     everything = b"".join(record_bytes(d, f[:-5]) for f in made)
     t.ok(marker.encode() not in everything and b"second line" not in everything and b"which no record" not in everything
          and hashlib.sha256(body.encode()).hexdigest()[:16].encode() not in everything,
@@ -7461,6 +7476,14 @@ def traffic_send_checks(t):
     t.ok(os.path.exists(r.path) and record_files(d) == before
          and r.warnings == [f"this send was not recorded in the send log ({os.strerror(errno.EACCES)}); the message itself was sent"],
          "a record that cannot be written leaves the message in place and the send successful, with one warning")
+    os.chmod(where, 0o000)
+    try:
+        r = send(d, "pi", "nix", "into a closed log", "body-11b", s)
+    finally:
+        os.chmod(where, 0o700)
+    t.ok(os.path.exists(r.path) and record_files(d) == before
+         and r.warnings == [f"this send was not recorded in the send log ({os.strerror(errno.EACCES)}); the message itself was sent"],
+         "a log directory that cannot be opened leaves the message in place and the send successful, with one warning")
     first = record_send(d, r.id.split("_")[1], r.id, "pi", "nix", "unrecorded", None, "cli")
     second = record_send(d, r.id.split("_")[1], r.id, "pi", "nix", "changed", None, "cli")
     t.ok(first == [] and len(second) == 1 and "already exists" in second[0] and json.loads(record_bytes(d, r.id))["subject"] == "unrecorded",
@@ -7586,6 +7609,12 @@ def section_traffic(t):
          and [row["id"] for row in traffic_json(t, d, "--since", utc(T0 - 31 * 3600))[0]["rows"]][0] == ids[4]
          and [row["id"] for row in traffic_json(t, d, "--since", utc(T0 - 4 * 3600, micro=True))[0]["rows"]] == sorted(ids[1:4], key=lambda i: (i.split("_")[1], i)),
          "--hours and --since, in either standard form, set where the rows start")
+    whole = math.floor(T0 - 8 * 3600)
+    inside = planted(d, "nix", "pi", whole + 0.3)
+    floored = traffic_json(t, d, "--since", utc(whole + 0.5, micro=True))[0]
+    t.ok(floored["since"] == utc(whole) and [row["id"] for row in floored["rows"]][0] == inside,
+         "--since is read to the second, as the report shows it: a record stamped earlier in that second is in the window")
+    os.unlink(os.path.join(where, f"{inside}.json"))
     t.ok([row["id"] for row in traffic_json(t, d, "--name", "omlx")[0]["rows"]] == [ids[2]]
          and sorted(row["id"] for row in traffic_json(t, d, "--name", "nix", "--name", "all")[0]["rows"]) == sorted([ids[0], ids[1], ids[3]])
          and [row["id"] for row in traffic_json(t, d, "--name", "+fleet")[0]["rows"]] == [ids[1]],
@@ -7645,15 +7674,39 @@ def section_traffic(t):
          f"or directory, and each stamped more than 24 hours ahead, and keeps the good ones (got {report['skipped']})")
     t.ok(all(os.path.exists(os.path.join(where, f"{ident}.json")) for ident in (oversized, future, linked)) and len(os.listdir(where)) == len(malformed) + 9,
          "and it deletes, moves and changes none of them")
+    human = t.run(["--dir", bad, "traffic"])[0].splitlines()
+    t.ok(f"skipped: {len(malformed)} malformed, 4 not a regular file of yours that can be opened, 1 over 4,096 bytes, 1 stamped more than 24 hours ahead" in human
+         and not any(line.startswith("skipped:") for line in t.run(["--dir", d, "traffic"])[0].splitlines()),
+         "the human form counts the records it skipped, by kind, and has no skipped line when it skipped none")
+    good_text, real_loads = record_bytes(bad, good).decode("utf-8"), json.loads
+
+    def too_deep(text, *args, **kwargs):
+        if text == good_text:
+            raise RecursionError("maximum recursion depth exceeded while decoding a JSON object")
+        return real_loads(text, *args, **kwargs)
+
+    json.loads = too_deep
+    try:
+        deep = traffic_report(bad, T0 - 86400, T0)
+    except RecursionError:
+        deep = None
+    finally:
+        json.loads = real_loads
+    t.ok(deep is not None and good not in [row["id"] for row in deep["rows"]] and deep["skipped"]["malformed"] == len(malformed) + 1,
+         "a record the decoder gives up on as nested too deeply (Python 3.9's does on the nested one above; later ones parse it) "
+         "is malformed, and the reader goes on")
 
     with os_opens() as opened:
         traffic_json(t, bad)
-    t.ok(not any(isinstance(p, str) and p == f"{future}.json" for p in opened) and any(p == f"{good}.json" for p in opened),
-         "a record stamped more than 24 hours ahead is never opened")
+    names = [os.path.basename(p) for p in opened if isinstance(p, str)]
+    t.ok(f"{future}.json" not in names and f"{good}.json" in names, "a record stamped more than 24 hours ahead is never opened")
     stale = planted(bad, "nix", "pi", T0 - 3 * 86400)
     with os_opens() as opened:
         traffic_json(t, bad)
-    t.ok(f"{stale}.json" not in opened, "a record stamped before the window is never opened")
+        record_bytes(bad, good)  # a control: the watcher sees the built-in open as well as os.open
+    names = [os.path.basename(p) for p in opened if isinstance(p, str)]
+    t.ok(f"{stale}.json" not in names and names.count(f"{good}.json") == 2 and opened[-1] == os.path.join(bad, TRAFFIC_DIR, f"{good}.json"),
+         "a record stamped before the window is never opened, by os.open or by the built-in open")
 
     cov = t.box("traffic-coverage")
     log_on(cov)
@@ -7690,6 +7743,13 @@ def section_traffic(t):
          and os.path.exists(unrecorded_old) and os.path.exists(young) and os.path.exists(p1),
          "traffic gives, for each sender, its posts and broadcasts in the window without a record (after the oldest record, and over two minutes old), "
          "the newest's stamp, and its first mcp row after that, never a cli row")
+    os.symlink(os.path.join(cov, "+fleet"), os.path.join(cov, "+linked"))
+    os.mkdir(os.path.join(cov, "+Not-A-Name"), 0o700)
+    again = traffic_json(t, cov)
+    os.unlink(os.path.join(cov, "+linked"))
+    os.rmdir(os.path.join(cov, "+Not-A-Name"))
+    t.ok(again[1] == 0 and again[0]["senders"] == report["senders"],
+         "a channel that open_channel refuses, a symlink or a name no channel may have, holds no posts for coverage, and traffic goes on")
     arrive = t.box("traffic-arrival")
     log_on(arrive)
     create_channel(arrive, "fleet", "fleet-wide notices")
@@ -7773,6 +7833,15 @@ def section_traffic(t):
     t.patch("traffic_report", real)
     t.ok(json.loads(out) == {"v": 1, "agent_mail": VERSION, "error": "internal_error", "problem": "ZeroDivisionError"} and code == 1 and err == "",
          "anything unforeseen is internal_error, naming only the exception's type, with nothing on stderr")
+    t.patch("traffic_report", lambda *a: 1 / 0)
+    try:
+        t.run(["--dir", cov, "traffic"])
+        raised = False
+    except ZeroDivisionError:
+        raised = True
+    finally:
+        t.patch("traffic_report", real)
+    t.ok(raised, "in the human form, anything unforeseen is raised as for any other command, never printed as JSON")
 
     off = t.box("traffic-off")
     for state in ("no directory", "no marker", "a marker that is a directory"):
@@ -7862,6 +7931,11 @@ def section_traffic(t):
     t.ok(len(report["silent_hosts"]) == 30 and all(HOST_NAME_RE.fullmatch(h) for h in report["silent_hosts"]) and "retired-host" not in report["silent_hosts"]
          and len(out.encode()) <= 1000 and "more" in out.splitlines()[1] and "system-reminder" not in out and "\u202e" not in out,
          "the silent hosts are only host names from member records checked in the window, and the human form's header is cut to fit --max-bytes")
+    odd = traffic_report(cov, C - 86400, C)
+    odd = dict(odd, hosts=[dict(odd["hosts"][0], host="h\x1b[31mred")], silent_hosts=["s\x1b[2Jclear"])
+    shown = traffic_text(odd, 12000)
+    t.ok("\x1b" not in shown and escape("h\x1b[31mred") in shown and escape("s\x1b[2Jclear") in shown,
+         "the human form escapes the hosts it lists and the silent hosts, though the reader takes only host names (traffic_text's own promise)")
 
     out, code, _ = t.run(["traffic", "--help"])
     flat = " ".join(out.split())
@@ -7887,8 +7961,11 @@ def traffic_doctor_checks(t):
     b = planted(d, "nix", "pi", T0 - 50)
     with os_opens() as opened:
         text, n = doctor(d, None, s)
+        by_doctor = len(opened)
+        record_bytes(d, a)  # a control: the watcher sees the built-in open as well as os.open
     t.ok(f"send log: on, 2 records, newest {b.split('_')[1]}" in text.splitlines() and n == base_n
-         and not any(isinstance(p, str) and record_name(os.path.basename(p)) for p in opened),
+         and not any(isinstance(p, str) and record_name(os.path.basename(p)) for p in opened[:by_doctor])
+         and opened[by_doctor:] == [os.path.join(where, f"{a}.json")],
          "doctor reports the log on with its records and newest stamp, as information, from names and lstat, opening no record; "
          "with records present and nothing wrong, its findings are those of the same mailbox without them")
     os.unlink(os.path.join(where, TRAFFIC_MARKER))
@@ -7937,8 +8014,18 @@ def traffic_doctor_checks(t):
         t.at(T0)
         found = [line for line in text.splitlines() if line.startswith("finding: ") and said in line]
         t.ok(len(found) == 1 and n >= 1, f"doctor finds {what} in the send log (got {text.splitlines()[1:]})")
+    plain_n = doctor(t.box("traffic-doctor-empty"), None, s)[1]
+    shut = t.box("traffic-doctor-shut")
+    here = log_on(shut)
+    os.chmod(here, 0o000)
+    try:
+        text, n = doctor(shut, None, s)
+    finally:
+        os.chmod(here, 0o700)
+    t.ok(f"finding: {TRAFFIC_DIR}, the send log, cannot be read: {os.strerror(errno.EACCES)}" in text.splitlines() and n == plain_n + 1,
+         "doctor finds a log directory that cannot be opened")
     closed = t.box("traffic-doctor-closed")
-    os.mkdir(os.path.join(closed, ".agent-mail"), 0o700)
+    log_on(closed)
     touch_member(closed, "nix", [], clock())
     os.chmod(os.path.join(closed, ".agent-mail"), 0o000)
     try:
@@ -7946,8 +8033,18 @@ def traffic_doctor_checks(t):
         text, n = doctor(closed, None, s)
     finally:
         os.chmod(os.path.join(closed, ".agent-mail"), 0o700)
-    t.ok(not any("send log" in w for w in r.warnings) and n == 0 and any(line.startswith("send log: not checked (.agent-mail cannot be opened") for line in text.splitlines()),
-         "with .agent-mail unreadable and no log, a send adds no send-log warning and doctor adds no finding, only a line that it could not check")
+    t.ok(os.path.exists(r.path) and record_files(closed) == []
+         and r.warnings == [f"this send was not recorded in the send log (.agent-mail cannot be opened, so whether the log is on cannot be told: "
+                            f"{os.strerror(errno.EACCES)}); the message itself was sent"]
+         and n == plain_n and f"send log: not checked (.agent-mail cannot be opened: {os.strerror(errno.EACCES)})" in text.splitlines(),
+         "with .agent-mail unreadable, whether the log is on cannot be told: a send warns that it was not recorded (design 5.2, step 3), "
+         "and doctor adds no finding, only a line that it could not check, as 2.3 reports nothing there")
+    away = t.box("traffic-doctor-away")
+    os.mkdir(os.path.join(t.root, "agent-mail-elsewhere"), 0o700)
+    os.symlink(os.path.join(t.root, "agent-mail-elsewhere"), os.path.join(away, ".agent-mail"))
+    said = f"{os.path.join(away, '.agent-mail')} is a symlink"
+    t.ok(sum(said in line for line in doctor(away, None, s)[0].splitlines() if line.startswith("finding: ")) == 1,
+         "a symlinked .agent-mail, which mailbox_problems already reports, is one finding, not a second for the send log")
     ahead = t.box("traffic-doctor-ahead")
     log_on(ahead)
     near = planted(ahead, "nix", "pi", T0 - 10)
@@ -8017,6 +8114,8 @@ def traffic_sync_checks(t):
     t.ok(arrived and off_everywhere and not any(f"{after.id}.json" in record_files(fs.replica(i)) for i in range(3))
          and all(not traffic_report(fs.replica(i), 0, fs.now)["on"] for i in range(3)),
          "back online, that replica records no more, its late record reaches the others without the marker, and the log stays off on every replica")
+    old = time.time() - 2 * TRAFFIC_OFF_KEEP
+    os.utime(os.path.join(fs.replica(0), TRAFFIC_DIR, f"{late.id}.json"), (old, old))  # Syncthing keeps the writer's mtime
     ctime = os.lstat(os.path.join(fs.replica(0), TRAFFIC_DIR, f"{late.id}.json")).st_ctime
     kept = prune_traffic(fs.replica(0), ctime + 600) == 0
     pruned = prune_traffic(fs.replica(0), ctime + TRAFFIC_OFF_KEEP + 60)
@@ -8033,6 +8132,8 @@ def traffic_sync_checks(t):
     sync()
     landed = os.path.join(fs.replica(2), TRAFFIC_DIR, f"{early.id}.json")
     before_marker = os.path.exists(landed) and not os.path.exists(os.path.join(fs.replica(2), TRAFFIC_DIR, TRAFFIC_MARKER))
+    old = time.time() - 2 * TRAFFIC_OFF_KEEP
+    os.utime(landed, (old, old))  # Syncthing keeps the writer's mtime, which a host catching up receives hours late
     with fs.on(2) as r2:
         survived = before_marker and prune_traffic(r2, os.lstat(landed).st_ctime + 600) == 0 and os.path.exists(landed)
     t.ok(before_marker and survived, "a record that reaches a replica before the marker survives that replica's prune")
