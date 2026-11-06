@@ -1263,10 +1263,10 @@ def record_send(d, stamp, ident, sender, to, subject, in_reply_to, via):
     """Write the send log's record of the message IDENT that send has just put in place, when the log is on,
     and return the warnings: none, or one saying that this send was not recorded and why (design 5.2,
     step 3: any OSError, .agent-mail's own among them, since a log that may be on is never skipped in
-    silence). The record is one
-    JSON line of RECORD_KEYS, never the body, written by write_new under a hidden temporary name (which
-    Syncthing never carries) and renamed into place, refusing an existing record. Nothing here fails the
-    send: the message is already in place, so failing now would invite a second copy."""
+    silence). The record is one JSON line of RECORD_KEYS, never the body, written by write_new under a
+    hidden temporary name (which Syncthing never carries) and renamed into place, refusing an existing
+    record. Nothing here fails the send: the message is already in place, so failing now would invite a
+    second copy."""
     def unrecorded(why):
         return [f"this send was not recorded in the send log ({why}); the message itself was sent"]
 
@@ -3597,13 +3597,15 @@ def doctor(d, name, settings):
 
 def traffic_doctor(d, now, lines, finding, findings):
     """doctor's part on the send log, from names and lstat alone, opening no record: one line of
-    information, send log: off, off with the records left for the prune, or on with its records and
-    the newest stamp; and a finding (through FINDING, unless FINDINGS already holds the same text) for
-    a log directory that is a symlink or not a directory on the way, a marker that is not a regular
-    file of ours, an entry that is not a hidden name and is not named as a record, is not a regular
-    file of ours, is hard-linked or is over RECORD_MAX bytes, a Syncthing conflict copy, and a hidden
-    temporary file more than STALE_TMP seconds old, which keeps Syncthing from deleting the directory
-    on this host. None of it is in mailbox_problems, so a broken log never stops a receive."""
+    information, send log: off, off with the records left for the prune, on with its records and the
+    newest stamp, or not checked when .agent-mail itself cannot be opened; and a finding (through
+    FINDING, unless FINDINGS already holds the same text) for .agent-mail that cannot be opened (no
+    member record can then be published or read here, and whether the log is on cannot be told), a log
+    directory that is a symlink or not a directory on the way or that cannot be read, a marker that is
+    not a regular file of ours, an entry that is not a hidden name and is not named as a record, is not
+    a regular file of ours, is hard-linked or is over RECORD_MAX bytes, a Syncthing conflict copy, and a
+    hidden temporary file more than STALE_TMP seconds old, which keeps Syncthing from deleting the
+    directory on this host. None of it is in mailbox_problems, so a broken log never stops a receive."""
     try:
         fd = open_meta(d, TRAFFIC_DIR)
     except MailError as e:
@@ -3612,10 +3614,12 @@ def traffic_doctor(d, now, lines, finding, findings):
             finding(text)
         return
     except OSError as e:
-        if e.filename != os.path.basename(TRAFFIC_DIR):  # .agent-mail itself cannot be opened, which 2.3's doctor reports nothing for either
-            lines.append(f"send log: not checked (.agent-mail cannot be opened: {e.strerror or type(e).__name__})")
+        why = e.strerror or type(e).__name__
+        if e.filename == os.path.dirname(TRAFFIC_DIR):  # the same test as record_send's
+            finding(f".agent-mail cannot be opened ({why}): no member record can be published or read here, and whether the send log is on cannot be told")
+            lines.append(f"send log: not checked (.agent-mail cannot be opened: {why})")
             return
-        finding(f"{TRAFFIC_DIR}, the send log, cannot be read: {e.strerror or type(e).__name__}")
+        finding(f"{TRAFFIC_DIR}, the send log, cannot be read: {why}")
         return
     if fd is None:
         lines.append("send log: off")
@@ -7362,10 +7366,10 @@ def every_file(root):
 
 @contextlib.contextmanager
 def os_opens():
-    """Within the block, os.open, the built-in open and io.open each record the path they are given (a name
-    relative to a dir_fd as it is, a descriptor as its number), then open it."""
+    """Within the block, os.open, the built-in open, io.open and io.FileIO each record the path they are
+    given (a name relative to a dir_fd as it is, a descriptor as its number), then open it."""
     import builtins
-    opened, real = [], (os.open, builtins.open, io.open)
+    opened, real, file_io = [], (os.open, builtins.open, io.open), io.FileIO
 
     def watch(fn):
         def watching(path, *a, **k):
@@ -7373,11 +7377,18 @@ def os_opens():
             return fn(path, *a, **k)
         return watching
 
+    class WatchedFileIO(file_io):
+        def __init__(self, path, *a, **k):
+            opened.append(path if isinstance(path, int) else os.fspath(path))
+            super().__init__(path, *a, **k)
+
     os.open, builtins.open, io.open = (watch(fn) for fn in real)
+    io.FileIO = WatchedFileIO
     try:
         yield opened
     finally:
         os.open, builtins.open, io.open = real
+        io.FileIO = file_io
 
 
 def traffic_send_checks(t):
@@ -7617,8 +7628,8 @@ def section_traffic(t):
          and [row["id"] for row in traffic_json(t, d, "--since", utc(T0 - 4 * 3600, micro=True))[0]["rows"]] == sorted(ids[1:4], key=lambda i: (i.split("_")[1], i)),
          "--hours and --since, in either standard form, set where the rows start")
     whole = math.floor(T0 - 8 * 3600)
-    inside = planted(d, "nix", "pi", whole + 0.3)
-    floored = traffic_json(t, d, "--since", utc(whole + 0.5, micro=True))[0]
+    inside = planted(d, "nix", "pi", whole + 0.2)
+    floored = traffic_json(t, d, "--since", utc(whole + 0.7, micro=True))[0]
     t.ok(floored["since"] == utc(whole) and [row["id"] for row in floored["rows"]][0] == inside,
          "--since is read to the second, as the report shows it: a record stamped earlier in that second is in the window")
     os.unlink(os.path.join(where, f"{inside}.json"))
@@ -7700,7 +7711,7 @@ def section_traffic(t):
     finally:
         json.loads = real_loads
     t.ok(deep is not None and good not in [row["id"] for row in deep["rows"]] and deep["skipped"]["malformed"] == len(malformed) + 1,
-         "a record the decoder gives up on as nested too deeply (Python 3.9's does on the nested one above; later ones parse it) "
+         "a record the decoder gives up on as nested too deeply (Python 3.11 and older do on the nested one above; 3.12 and later parse it) "
          "is malformed, and the reader goes on")
 
     with os_opens() as opened:
@@ -8043,9 +8054,11 @@ def traffic_doctor_checks(t):
     t.ok(os.path.exists(r.path) and record_files(closed) == []
          and r.warnings == [f"this send was not recorded in the send log (.agent-mail cannot be opened, so whether the log is on cannot be told: "
                             f"{os.strerror(errno.EACCES)}); the message itself was sent"]
-         and n == plain_n and f"send log: not checked (.agent-mail cannot be opened: {os.strerror(errno.EACCES)})" in text.splitlines(),
+         and n == plain_n + 1 and f"send log: not checked (.agent-mail cannot be opened: {os.strerror(errno.EACCES)})" in text.splitlines()
+         and f"finding: .agent-mail cannot be opened ({os.strerror(errno.EACCES)}): no member record can be published or read here, and whether the send log "
+             "is on cannot be told" in text.splitlines(),
          "with .agent-mail unreadable, whether the log is on cannot be told: a send warns that it was not recorded (design 5.2, step 3), "
-         "and doctor adds no finding, only a line that it could not check, as 2.3 reports nothing there")
+         "and doctor finds .agent-mail unreadable, which leaves member records unpublished, and says it could not check the log")
     away = t.box("traffic-doctor-away")
     os.mkdir(os.path.join(t.root, "agent-mail-elsewhere"), 0o700)
     os.symlink(os.path.join(t.root, "agent-mail-elsewhere"), os.path.join(away, ".agent-mail"))
