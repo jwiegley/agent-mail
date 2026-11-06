@@ -4719,7 +4719,7 @@ LEDGER_STATES = "unclaimed active blocked waiting-john done dropped orphaned"
 SUBJECT_TEMPLATES = ("OVERLAP <a> / <b>: both write <place>", "DUPLICATE <new> looks like <old> (<owner>, claimed <time>)", "ALREADY-DONE <slug>: <refs>",
                      "NUDGE <slug>: no update since <time>", "OFFER: <n> unclaimed items you can take", "ROUTE <slug>: <asker> asked the topic <one line> (post <id>)",
                      "NEEDS-JOHN <slug>: <action> needs John in your own session", "DECISION <q-id>: <letter>, <option text>", "DEFAULT <q-id>: <hold|wait|skip>",
-                     "DISPUTE <id>: not sent by me", "STEWARD back after <duration>")
+                     "DISPUTE <id>: not sent by me", "STEWARD back after <duration>", "UNREAD <id>: <to> has not read it since <time>")
 # The commands the steward never runs (spec 4, 5.3, 6.5 and 6.6), which an instruction file names only in a sentence that says never, so that no sentence can be
 # read as telling the steward to run one.
 NEVER_COMMANDS = ("agent-deck session send", "agent-deck launch", "agent-deck session stop", "agent-deck session restart", "agent-deck session set-parent",
@@ -5336,6 +5336,61 @@ def test_claude_md_invites_with_the_optional_write_target(d):
        f"WORKER.md's rule to name +<channel> on every post stands, as pinned (got {without_question_marks(repr(found))})")
 
 
+# What section 8 of CLAUDE.md says of the traffic call (the send-log design's 5.8.1 and 5.8.5, step 1): the cap of one line a turn and once per matter, and what
+# goes into TRAFFIC.log, each pinned whole, so that neither the cap nor the record that keeps "once" across a reset can drift.
+TRAFFIC_CAP_SENTENCE = "Act on one line a turn, and on each once; the rest wait and stand in the digest."
+TRAFFIC_LOG_SENTENCE = ("Whether you mail or list it, append `<UTC> <id> <matter>` to `TRAFFIC.log`, after the `sent` line when you mail, `<matter>` being `m1` for no "
+                        "reader, `m2` for stopped or `m3` for not reading; add a Watch line only when you mail.")
+TRAFFIC_ROWS = ("| no reader | a `no-record` line | if the name is a member, mail the sender `UNREAD <id>: <to> has not read it since <time>`; otherwise list it in the digest |",
+                "| stopped | a `member` line whose recipient's class is gone | `UNREAD` to the sender, the reason \"stopped in agent-deck\" |",
+                "| not reading | a `member` line whose recipient's class is deaf, or that is a Pi or Codex member whose status is `waiting` | `UNREAD` to the sender, the "
+                "reason \"not reading its mail\"; a Pi or Codex recipient you list in the digest |",
+                "| other | a `member` line, any other class | nothing yet |")
+
+
+def test_claude_md_runs_traffic_and_keeps_its_matters(d):
+    t = claude_md()
+    may = [line for line in claude_section(t, 1).splitlines() if line.startswith("3. ")]
+    ok(len(may) == 1 and "`steward-signals traffic`" in may[0], "docs: item 3 of what the steward may run, in section 1 of CLAUDE.md, names steward-signals traffic")
+    templates = [s for s in sentences(claude_section(t, 6)) if s.startswith("Your other templates:")]
+    ok(len(templates) == 1 and "`UNREAD <id>: <to> has not read it since <time>` (section 8)" in templates[0],
+       "docs: section 6 of CLAUDE.md lists the UNREAD template among the steward's other templates, with section 8")
+    step = [line for line in claude_section(t, 4).splitlines() if line.startswith("4. ")]
+    ok(len(step) == 1 and 0 <= step[0].find("`steward-signals signals <channel> --dir <dir>`") < step[0].find("`steward-signals traffic <channel> --dir <dir>`"),
+       "docs: step 4 of section 4 of CLAUDE.md runs the traffic call after the signals call")
+    eight = claude_section(t, 8)
+    ok(0 <= eight.find("**The probe.**") < eight.find("**Traffic.**") < eight.find("**Nudges and offers.**"),
+       "docs: section 8 of CLAUDE.md has its Traffic paragraph after the probe's and before the nudges'")
+    block = next((part for fenced, part in fenced_parts(eight) if fenced and part.splitlines()[1].startswith("traffic +")), "")
+    lines = block.splitlines()[1:-1]
+    ok(len(lines) >= 3 and re.fullmatch(rf"traffic \+[a-z0-9.-]+ {TRAFFIC_HOURS}h to [0-9]{{8}}T[0-9]{{6}}Z: send log: not available \({re.escape(SEND_LOG_UNREAD)}\)", lines[0])
+       and all(re.fullmatch(r"  (?:no-record|member) [a-z0-9.-]+_[0-9]{8}T[0-9]{6}\.[0-9]{6}Z_from-[a-z0-9.-]+_[0-9a-f]{8} [0-9]+[mhd]", line) for line in lines[2:-1])
+       and lines[1] == "unread:" and re.fullmatch(rf"handled: [0-9]+ in {re.escape(TRAFFIC_LOG)}", lines[-1]),
+       f"docs: the sample in section 8 of CLAUDE.md has the form the traffic call prints (got {without_question_marks(repr(lines))})")
+    said = [s for s in sentences(eight) if s.startswith("Each `unread:` line")]
+    ok(len(said) == 1 and f"in the last {TRAFFIC_HOURS} hours" in said[0] and f"no more than {TOPIC_ALLOWANCE_S // 60} minutes before `topic_since`" in said[0]
+       and "`deaf_min`" in said[0] and f"The lines stop at {TRAFFIC_LINES}, then `and N more`" in eight,
+       f"docs: section 8 of CLAUDE.md gives the traffic call's window, its allowance before topic_since and its cap as the helper has them: {TRAFFIC_HOURS} hours, "
+       f"{TOPIC_ALLOWANCE_S // 60} minutes, {TRAFFIC_LINES} lines")
+    rows = [line for line in eight.splitlines() if line.startswith(("| no reader |", "| stopped |", "| not reading |", "| other |"))]
+    ok(tuple(rows) == TRAFFIC_ROWS, f"docs: section 8 of CLAUDE.md tells the traffic matters apart, and what to do for each, as pinned (got {without_question_marks(repr(rows))})")
+    for what, pinned in (("the cap of one line a turn and once per matter", TRAFFIC_CAP_SENTENCE), ("what goes into TRAFFIC.log", TRAFFIC_LOG_SENTENCE)):
+        found = re.findall(rf"(?:^|(?<=\. )){re.escape(pinned)}(?= |$)", eight, re.M)  # whole, from a sentence's start to its end: sentences() would cut it at its semicolon
+        ok(len(found) == 1, f"docs: section 8 of CLAUDE.md says {what}, as pinned")
+    ok(all(f"`{matter}`" in TRAFFIC_LOG_SENTENCE for matter in TRAFFIC_MATTERS), "docs: the pinned TRAFFIC.log sentence names every matter the helper reads there")
+    deaf = [line for line in eight.splitlines() if line.startswith("| deaf |")]
+    ok(len(deaf) == 1 and "the traffic call's `member` line names mail to it while it is a Claude member whose status is `waiting`" in deaf[0],
+       "docs: the deaf class of section 8 of CLAUDE.md takes any member's mail that the traffic call names, not only the steward's NUDGE")
+    eleven = claude_section(t, 11)
+    ok(any(line.startswith(f"| `{TRAFFIC_LOG}` |") and "append-only" in line for line in eleven.splitlines()) and "`traffic.unread`" in eleven
+       and re.search(r"\| `interventions\.<template>` \|[^\n]*`unread` \|", eleven),
+       "docs: section 11 of CLAUDE.md lists TRAFFIC.log as append-only, the traffic.unread metric and unread among the interventions")
+    twelve = claude_section(t, 12)
+    digest = next((part for fenced, part in fenced_parts(twelve) if fenced and "DIGEST +<channel>" in part), "")
+    ok("\nUnread: <member> to <name> (<no reader, stopped or not reading>), ..., or none\n" in digest and "`unread <n>`" in twelve,
+       "docs: section 12 of CLAUDE.md puts the Unread line in the digest and the unread count in the summary")
+
+
 def test_shared_and_heartbeat(d):
     s = read(os.path.join(REPO, "steward", "SHARED.md")); h = read(os.path.join(REPO, "steward", "HEARTBEAT_RULES.md"))
     ok("own CLAUDE.md governs" in s and "auto-respond" in s and "never" in s.lower(), "docs: SHARED.md defers and forbids")
@@ -5524,6 +5579,16 @@ def test_steward_readme_and_pointer(d):
         ok(flagged == [1, 1], f"docs: each of the two setup commands passes {flag} once (got the counts {flagged})")
     ok("POLICY-test.md" in r and "steward-test-a" in r and "| check | how | expected |" in r, "docs: the day-zero runbook table")
     for check in ("doorbell", "steward-tick", "07:30", "session context", "DISPUTE", "session stop", "bridge.py", "Q&A", "--max-tokens 200"): ok(check in r, f"docs: day-zero check {check}")
+    helper = [line for line in r.splitlines() if line.startswith("| `steward-signals` |")]
+    ok(len(helper) == 1 and "`traffic` lists" in helper[0] and TRAFFIC_LOG in helper[0], "docs: steward/README.md's row of the helper names its traffic command and TRAFFIC.log")
+    files = [s for s in sentences(r) if s.startswith("A steward keeps its own files in")]
+    ok(len(files) == 1 and f"RECEIVED.log, {TRAFFIC_LOG}, steward-state.json" in files[0], "docs: steward/README.md lists TRAFFIC.log among the steward's files")
+    row = [line for line in r.splitlines() if line.startswith("| 26. ")]
+    ok(len(row) == 1 and "steward-signals traffic steward-test" in row[0] and "`no-record <id> <age>`" in row[0] and f"`<UTC> <id> m1` to {TRAFFIC_LOG}" in row[0]
+       and "under `handled:`" in row[0] and "--to steward-test-nobody" in row[0],
+       "docs: row 26 of the runbook plants mail for a name no session reads and expects the traffic call to list it, the steward to hold it in TRAFFIC.log, and the next call to count it handled")
+    moved = [part for fenced, part in fenced_parts(r) if fenced and 'mkdir "$A" && mv -n' in part]
+    ok(len(moved) == 1 and f'"$D/{TRAFFIC_LOG}"' in moved[0], "docs: the clean-up after day zero moves TRAFFIC.log into the dated directory with the other files")
     top = read(os.path.join(REPO, "README.md"))
     ok("steward/WORKER.md" in top and top.count("steward") >= 2, "docs: top-level README points at the worker section")
     ok("cannot authorize" in top, "docs: the README's rules are unchanged")
@@ -5567,7 +5632,7 @@ DOCS_CHECKS = (test_claude_md, test_claude_md_headings_are_in_order, test_claude
                test_claude_md_takes_other_channels_as_notices, test_claude_md_times_only_posts_on_the_channel, test_claude_md_names_to_on_every_send,
                test_claude_md_keeps_its_channel_across_a_re_join, test_claude_md_takes_a_backlog_within_its_topic_and_files_each_post_once,
                test_claude_md_invites_with_the_optional_write_target, test_claude_md_compares_posts_since_last_with_its_own_channel,
-               test_claude_md_leaves_the_join_its_own_subscriptions,
+               test_claude_md_leaves_the_join_its_own_subscriptions, test_claude_md_runs_traffic_and_keeps_its_matters,
                test_shared_and_heartbeat,
                test_shared_and_heartbeat_forbid_what_spec_6_4_lists_and_grant_nothing, test_shared_and_heartbeat_hold_exactly_their_pinned_sentences,
                test_worker_md, test_worker_md_matches_what_claude_md_files_and_sends, test_worker_md_keeps_its_checks_and_safety_sentences_as_pinned,
@@ -5894,7 +5959,29 @@ def test_docs_checks_catch_each_pinned_regression(d):
         ("the notice delay timed from any post's stamp", "seconds from the stamp of a post on the channel to the turn that filed it",
          "seconds from a post's stamp to the turn that filed it", "docs: section 11 of CLAUDE.md times the notice delay"),
         ("a delay logged for any filed post", "for a filed post on the channel, its delay", "for a filed post, its delay",
-         "docs: section 11 of CLAUDE.md logs a delay only for a filed post on the channel"))
+         "docs: section 11 of CLAUDE.md logs a delay only for a filed post on the channel"),
+        # the send-log design's step 1: the traffic call and the matters M1 to M3
+        ("the traffic call left out of what the steward may run", "`steward-signals signals`, `steward-signals traffic`, ", "`steward-signals signals`, ",
+         "docs: item 3 of what the steward may run"),
+        ("the UNREAD template left out of section 6", "`OFFER: <n> unclaimed items you can take` and `UNREAD <id>: <to> has not read it since <time>` (section 8),",
+         "`OFFER: <n> unclaimed items you can take` (section 8),", "docs: section 6 of CLAUDE.md lists the UNREAD template"),
+        ("the traffic call dropped from the turn", ", then `steward-signals traffic <channel> --dir <dir>` once and its matters (section 8)", " (section 8)",
+         "docs: step 4 of section 4 of CLAUDE.md runs the traffic call"),
+        ("the Traffic paragraph's heading lost", "**Traffic.** Right after", "Right after", "docs: section 8 of CLAUDE.md has its Traffic paragraph"),
+        ("the sample's reason dropped", "send log: not available (this helper reads file names only)", "send log: not available", "docs: the sample in section 8"),
+        ("the traffic call's window doubled", "stamped in the last 24 hours", "stamped in the last 48 hours", "docs: section 8 of CLAUDE.md gives the traffic call's window"),
+        ("an UNREAD for any name with no reader", "if the name is a member, mail the sender `UNREAD", "mail the sender `UNREAD",
+         "docs: section 8 of CLAUDE.md tells the traffic matters apart"),
+        ("the traffic cap loosened", "Act on one line a turn, and on each once;", "Act on two lines a turn, and on each once;",
+         "docs: section 8 of CLAUDE.md says the cap of one line a turn"),
+        ("a Watch line for every traffic matter", "add a Watch line only when you mail.", "add a Watch line for each.",
+         "docs: section 8 of CLAUDE.md says what goes into TRAFFIC.log"),
+        ("the deaf class narrowed to the NUDGE again", "; or the traffic call's `member` line names mail to it while it is a Claude member whose status is `waiting` |", " |",
+         "docs: the deaf class of section 8 of CLAUDE.md takes any member's mail"),
+        ("TRAFFIC.log left out of the files", "| `TRAFFIC.log` | one line for each traffic matter you mailed about or set aside (section 8) | append-only |\n", "",
+         "docs: section 11 of CLAUDE.md lists TRAFFIC.log"),
+        ("the digest's Unread line dropped", "Unread: <member> to <name> (<no reader, stopped or not reading>), ..., or none\n", "",
+         "docs: section 12 of CLAUDE.md puts the Unread line"))
     for i, (what, old, new, failure) in enumerate(regressions):
         failures = docs_checks(checkout_with(d, f"regression-{i}", "CLAUDE.md", old, new))
         ok(old in good and any(f.startswith(failure) for f in failures), f"docs: docs_checks catches {what} (got {without_question_marks(repr(failures))})")
@@ -6083,7 +6170,14 @@ def test_docs_checks_catch_each_regression_in_the_readme(d):
          "docs: steward/README.md's row 6 finds the steward on no channel's list"),
         # fix round 2 of the third cycle (ruling R16): row 5's size of CLAUDE.md is computed from the file
         ("row 5's size of CLAUDE.md put back to about 47 KB", size_said, "CLAUDE.md is about 47 KB.", 1,
-         "docs: steward/README.md's row 5 gives CLAUDE.md's size"))
+         "docs: steward/README.md's row 5 gives CLAUDE.md's size"),
+        # the send-log design's step 1: the traffic command, TRAFFIC.log and runbook row 26
+        ("the helper's row without its traffic command", "`traffic` lists, by file name, each member's direct mail still waiting for a name with no reader or for a "
+         "member, less the matters TRAFFIC.log holds; ", "", 1, "docs: steward/README.md's row of the helper names its traffic command"),
+        ("TRAFFIC.log left out of the steward's files", "RECEIVED.log, TRAFFIC.log, steward-state.json", "RECEIVED.log, steward-state.json", 1,
+         "docs: steward/README.md lists TRAFFIC.log among the steward's files"),
+        ("row 26 expecting no handled count", " and counts it under `handled:`", "", 1, "docs: row 26 of the runbook plants mail"),
+        ("TRAFFIC.log left behind after day zero", ' "$D/TRAFFIC.log"', "", 1, "docs: the clean-up after day zero moves TRAFFIC.log"))
     for i, (what, old, new, count, failure) in enumerate(regressions):
         failures = docs_checks(checkout_with(d, f"readme-regression-{i}", name, old, new, count))
         ok(old in readme and any(f.startswith(failure) for f in failures),
