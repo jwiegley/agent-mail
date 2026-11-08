@@ -5939,9 +5939,10 @@ CLOSE_STEP = ("4. `unsubscribe {channel: \"<channel>\"}` and set `closed` in ste
               "finds `closed`, writes nothing, and ends with one status line.")
 RESET_CHANNEL_STEP = ("1. Re-read this file, `POLICY.md`, `TOPIC.md`, `LEDGER.md` and `steward-state.json`. If steward-state.json holds `closed`, the topic is closed: "
                       "stop here, subscribing to nothing, arming nothing and writing nothing, and end with one status line, until John types `channel` and gives "
-                      "you a new topic (section 3). Your channel is the one in TOPIC.md's heading, never one taken again from the channels' purposes. With no "
-                      "TOPIC.md there is no topic yet: stop here, subscribing to nothing and arming neither the doorbell nor the tick, until John gives you a "
-                      "topic (section 3).")
+                      "you a new topic (section 3). Otherwise merge `text_version`, the number on this file's `Text version:` line as a JSON integer, into "
+                      "steward-state.json as section 11 says. Your channel is the one in TOPIC.md's heading, never one taken again from the channels' purposes. "
+                      "With no TOPIC.md there is no topic yet: stop here, subscribing to nothing and arming neither the doorbell nor the tick, until John gives "
+                      "you a topic (section 3).")
 # S2 of the agent inbox design (John's answer 3, 2026-11-07): an answer to a question that is no longer open in the ledger and that DECISIONS.md has
 # closed draws one line naming the decision, and nothing is relayed, so that a late answer from the app, Discord or the pane changes nothing. The
 # sentence is pinned whole.
@@ -6085,7 +6086,7 @@ def test_claude_md_takes_its_channel_from_topic_md_or_from_john(d):
        "closed topic's keys before anything else and kept closed until TOPIC.md is written, as pinned")
     ok([line for line in claude_section(t, 13).splitlines() if line.startswith("1. ")] == [RESET_CHANNEL_STEP],
        "docs: step 1 of section 13 of CLAUDE.md takes the channel from TOPIC.md's heading, never from the purposes again, starts nothing without a TOPIC.md, "
-       "and starts and writes nothing on a closed topic, as pinned")
+       "starts and writes nothing on a closed topic, and otherwise merges text_version into steward-state.json, as pinned")
 
 
 def test_claude_md_answers_agent_decks_recovery_turn(d):
@@ -6385,6 +6386,40 @@ def test_claude_md_refuses_an_answer_to_a_closed_question(d):
        "docs: steward/README.md section 5 shows S2's line once")
 
 
+# S3 of the agent inbox design (John's answer 3, 2026-11-07): John answers a steward in its pane, from Discord or from the agent inbox app, whose gateway
+# types into the pane by the conductor route, and the steward cannot tell them apart. The DECISION body's by: line, DECISIONS.md's <who>, WORKER.md and
+# the README's planted relays carry the label; the old label stays nowhere in the text.
+RELAY_LABEL = "John, in my session (pane, Discord or app, not distinguishable)"
+OLD_RELAY_LABEL = "John, in my session (pane or Discord, not distinguishable)"
+
+
+def test_steward_text_gives_the_relay_label_as_pinned(d):
+    t = claude_md()
+    worker, readme = (read(os.path.join(REPO, "steward", name)) for name in ("WORKER.md", "README.md"))
+    ok(f"   by: {RELAY_LABEL}, <UTC>" in claude_section(t, 10).splitlines()
+       and f"`<who>` is `{RELAY_LABEL}` for his answer" in claude_section(t, 11)
+       and "in its own session (pane, Discord or app)" in worker
+       and readme.count(f"by: {RELAY_LABEL}, %s") == 7
+       and not any("pane or Discord" in text for text in (t, worker, readme)),
+       "docs: CLAUDE.md, WORKER.md and the READMEs give the relay label as pinned: pane, Discord or app, not distinguishable, and the old label nowhere")
+
+
+# S3 of the agent inbox design: the steward text carries its version directly under its title, and at each fresh context a steward whose topic is not
+# closed merges that number into steward-state.json as text_version, which the agent inbox's gateway reads before it answers that steward's questions.
+# Version 1 is the first text with S2 and S3; each later change to the steward text under rollout decision 69 adds one.
+TEXT_VERSION_LINE = "Text version: 1"
+
+
+def test_claude_md_states_its_text_version(d):
+    t = claude_md()
+    lines = t.splitlines()
+    ok(lines[:3] == ["# Topic steward", TEXT_VERSION_LINE, ""] and sum(bool(re.fullmatch(r"Text version: [0-9]+", line)) for line in lines) == 1,
+       "docs: CLAUDE.md gives its text version directly under its title, alone on its line, once")
+    state = [s for s in sentences(t) if s.startswith("`steward-state.json` holds")]
+    ok(len(state) == 1 and "`topic_since`, `text_version`, " in state[0],
+       "docs: section 11 of CLAUDE.md lists text_version among the keys of steward-state.json")
+
+
 def test_shared_and_heartbeat(d):
     s = read(os.path.join(REPO, "steward", "SHARED.md")); h = read(os.path.join(REPO, "steward", "HEARTBEAT_RULES.md"))
     ok("own CLAUDE.md governs" in s and "auto-respond" in s and "never" in s.lower(), "docs: SHARED.md defers and forbids")
@@ -6670,6 +6705,8 @@ DOCS_CHECKS = (test_claude_md, test_claude_md_headings_are_in_order, test_claude
                test_claude_md_invites_with_the_optional_write_target, test_claude_md_compares_posts_since_last_with_its_own_channel,
                test_claude_md_leaves_the_join_its_own_subscriptions, test_claude_md_runs_traffic_and_keeps_its_matters,
                test_claude_md_refuses_an_answer_to_a_closed_question,
+               test_steward_text_gives_the_relay_label_as_pinned,
+               test_claude_md_states_its_text_version,
                test_shared_and_heartbeat,
                test_shared_and_heartbeat_forbid_what_spec_6_4_lists_and_grant_nothing, test_shared_and_heartbeat_hold_exactly_their_pinned_sentences,
                test_worker_md, test_worker_md_matches_what_claude_md_files_and_sends, test_worker_md_keeps_its_checks_and_safety_sentences_as_pinned,
@@ -6971,7 +7008,7 @@ def test_docs_checks_catch_each_pinned_regression(d):
          "docs: step 3 of section 4 of CLAUDE.md records each id in RECEIVED.log once"),
         ("the reconcile filing a post from before the topic", " and file it, or give it its `before-topic` line as step 3 of section 4 says.", " and file it.",
          "docs: step 4 of section 13 of CLAUDE.md files an id appended since last_turn"),
-        ("topic_since left out of the state keys", "`closed`, `topic_since`, the nudges", "`closed`, the nudges",
+        ("topic_since left out of the state keys", "`closed`, `topic_since`, `text_version`, the nudges", "`closed`, `text_version`, the nudges",
          "docs: section 11 of CLAUDE.md lists topic_since"),
         # John's decision 33 (2026-11-02): the invitation's !+<channel> stays optional, and WORKER.md's rule stands
         ("the invitation's !+<channel> made a requirement", "It also says, as optional, that", "It also says that",
@@ -7096,7 +7133,20 @@ def test_docs_checks_catch_each_pinned_regression(d):
          "docs: section 10 of CLAUDE.md answers an answer to a closed question"),
         # The final review's I-2 (2026-11-07): q-ids restart at 1 per topic while DECISIONS.md is kept, so S2 holds only for a question no longer open in the ledger
         ("S2's test of closed left to DECISIONS.md alone", "is no longer open in your ledger and that ", "",
-         "docs: section 10 of CLAUDE.md answers an answer to a closed question"))
+         "docs: section 10 of CLAUDE.md answers an answer to a closed question"),
+        # S3 of the agent inbox design (John's answer 3, 2026-11-07): the relay label names the app, in the DECISION body and in DECISIONS.md's <who>
+        ("the old relay label in the DECISION body", f"by: {RELAY_LABEL}, <UTC>", f"by: {OLD_RELAY_LABEL}, <UTC>",
+         "docs: CLAUDE.md, WORKER.md and the READMEs give the relay label as pinned"),
+        ("the old relay label in DECISIONS.md's who", f"`<who>` is `{RELAY_LABEL}`", f"`<who>` is `{OLD_RELAY_LABEL}`",
+         "docs: CLAUDE.md, WORKER.md and the READMEs give the relay label as pinned"),
+        # S3 of the agent inbox design (John's answer 3, 2026-11-07): the text's version line under its title, merged into steward-state.json at a fresh context
+        ("the version line dropped from under the title", f"# Topic steward\n{TEXT_VERSION_LINE}\n", "# Topic steward\n",
+         "docs: CLAUDE.md gives its text version directly under its title"),
+        ("text_version no longer merged at a fresh context",
+         " Otherwise merge `text_version`, the number on this file's `Text version:` line as a JSON integer, into steward-state.json as section 11 says.",
+         "", "docs: step 1 of section 13 of CLAUDE.md takes the channel from TOPIC.md's heading"),
+        ("text_version left out of the state's keys", "`topic_since`, `text_version`, ", "`topic_since`, ",
+         "docs: section 11 of CLAUDE.md lists text_version"))
     for i, (what, old, new, failure) in enumerate(regressions):
         failures = docs_checks(checkout_with(d, f"regression-{i}", "CLAUDE.md", old, new))
         ok(old in good and any(f.startswith(failure) for f in failures), f"docs: docs_checks catches {what} (got {without_question_marks(repr(failures))})")
@@ -7251,7 +7301,10 @@ def test_docs_checks_catch_each_regression_in_worker_md(d):
         ("the until field renamed", "`until:", "`wait-until:", -1, claim_fields),
         ("the needs field renamed", "`needs:", "`wants:", -1, claim_fields),
         ("the writes field renamed", "`writes:", "`touches:", -1, claim_fields),
-        ("holds dropped from the claim row alone, though the update row still names it", "; optional `holds: <host> gpu0-3` or `holds: obr ids 902-910`", "", 1, claim_fields))
+        ("holds dropped from the claim row alone, though the update row still names it", "; optional `holds: <host> gpu0-3` or `holds: obr ids 902-910`", "", 1, claim_fields),
+        # S3 of the agent inbox design (John's answer 3, 2026-11-07): the worker's text names the app among the places John answers the steward
+        ("the app left out of where John answers", "(pane, Discord or app)", "(pane or Discord)", 1,
+         "docs: CLAUDE.md, WORKER.md and the READMEs give the relay label as pinned"))
     for i, (what, old, new, count, failure) in enumerate(regressions):
         failures = docs_checks(checkout_with(d, f"worker-regression-{i}", "WORKER.md", old, new, count))
         ok(old in worker and any(f.startswith(failure) for f in failures), f"docs: docs_checks catches {what} in WORKER.md (got {without_question_marks(repr(failures))})")
@@ -7313,7 +7366,10 @@ def test_docs_checks_catch_each_regression_in_the_readme(d):
         ("TRAFFIC.log left behind after day zero", ' "$D/TRAFFIC.log"', "", 1, "docs: the clean-up after day zero moves TRAFFIC.log"),
         # S2 of the agent inbox design (John's answer 3, 2026-11-07): section 5 shows the one line an answer to a closed question draws
         ("S2's line left out of section 5", "`closed ingest-3 D-2, nothing applied`", "`closed ingest-3, nothing applied`", 1,
-         "docs: steward/README.md section 5 shows S2's line once"))
+         "docs: steward/README.md section 5 shows S2's line once"),
+        # S3 of the agent inbox design (John's answer 3, 2026-11-07): each planted relay of the runbook carries the label that names the app
+        ("the old label in a planted relay", f"by: {RELAY_LABEL}, %s", f"by: {OLD_RELAY_LABEL}, %s", 1,
+         "docs: CLAUDE.md, WORKER.md and the READMEs give the relay label as pinned"))
     for i, (what, old, new, count, failure) in enumerate(regressions):
         failures = docs_checks(checkout_with(d, f"readme-regression-{i}", name, old, new, count))
         ok(old in readme and any(f.startswith(failure) for f in failures),

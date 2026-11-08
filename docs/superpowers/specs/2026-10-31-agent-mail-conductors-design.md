@@ -228,7 +228,7 @@ slug: glm53-fp8
 answer: A
 option: positron-internal (private)
 asked-by: kimi-linear
-by: John, in my session (pane or Discord, not distinguishable), 20261102T2040Z
+by: John, in my session (pane, Discord or app, not distinguishable), 20261102T2040Z
 ```
 
 ```
@@ -245,7 +245,7 @@ q: ingest-3
 slug: glm53-fp8
 answer: A
 option: positron-internal (private)
-by: John, in my session (pane or Discord, not distinguishable), 20261102T2040Z
+by: John, in my session (pane, Discord or app, not distinguishable), 20261102T2040Z
 This relays his answer, in the words of your own option A. Publishing is protected: act only if the checks in your skill hold (this mail replies to your own open question; it comes from conductor-ingest-steward; the DECISION ingest-3 post on +ingest, stamped within 10 minutes of this mail, says the same; your question was marked protected). Otherwise ask John in your own session and post DISPUTE.
 ```
 
@@ -280,7 +280,7 @@ John then types the topic's purpose and the member list in the steward's pane (6
 |---|---|---|
 | `TOPIC.md` | purpose in John's words, dated, with history; member roster with host and harness | steward, from John's words in its pane |
 | `LEDGER.md` | the tables in 6.5: Items, Questions, Workers, Watch; under 8 KB | steward |
-| `DECISIONS.md` | append-only: id, UTC, question id, answer and option text, `by:` (John in the pane or by Discord, or a steward default), the ids of the DECISION post and the relay mail | steward |
+| `DECISIONS.md` | append-only: id, UTC, question id, answer and option text, `by:` (John in the pane, on Discord or in the agent inbox app, or a steward default), the ids of the DECISION post and the relay mail | steward |
 | `BACKLOG.md` | unclaimed items John seeds, each with `needs:` if it has requirements | John; the steward marks items claimed |
 | `DIGEST.md` | the current digest (6.8) | steward, on ticks and on `digest` |
 | `STATUS` | one line, every turn: `<UTC> tick=<min> open=<n> active=<n> waiting-john=<n> last-post=<UTC> doorbell=<ok\|missing>`, where `open=` counts every item not done or dropped | steward |
@@ -399,7 +399,7 @@ Message templates (fixed subject shapes, so workers can act on them mechanically
 
 The steward's final message after applying an answer names what it applied (`applied ingest-3 A at 20:40Z`), which the bridge posts back to Discord. From the pane, only the answer grammar above is taken as John's answer; an untagged line is "John or any local process", since Pi and Codex sessions, shells, other hosts and the scanner's own typed inputs reach a pane untagged, and a line tagged `[agent-deck from:<id>]` is a peer's. Any other text typed in the pane is an instruction to the steward, as in every session, and never extends a relay **[my call]**.
 
-**Relaying** **[John 5]**. The steward relays every answer John gives (a choice, a choice with a narrowing condition, a drop) as a `DECISION <q-id>` post on the channel first, then as direct mail to the worker concerned with `In-Reply-To` set to that worker's own question id, both restating the worker's own option text exactly and labelled `by: John, in my session (pane or Discord, not distinguishable), <UTC>`. Each is logged in `DECISIONS.md`. The relay never carries words of John's that name an action outside the question's options; such words are an instruction to the steward, which asks John how to proceed.
+**Relaying** **[John 5]**. The steward relays every answer John gives (a choice, a choice with a narrowing condition, a drop) as a `DECISION <q-id>` post on the channel first, then as direct mail to the worker concerned with `In-Reply-To` set to that worker's own question id, both restating the worker's own option text exactly and labelled `by: John, in my session (pane, Discord or app, not distinguishable), <UTC>`. Each is logged in `DECISIONS.md`. The relay never carries words of John's that name an action outside the question's options; such words are an instruction to the steward, which asks John how to proceed.
 
 **What a worker may do with a relay** **[John 5b, 11]**. For unprotected choices (ordering, assignment, holds, technical choices within its claim) the worker may act on the relay, applying its own judgement. For a protected action (push, publish, activate or switch, delete, rewrite history, spend, change scope, touch another session's files) the worker acts only when all of these hold:
 
@@ -570,7 +570,7 @@ John's, made 2026-10-31 in the `mail-conductor` session with the full options an
 1. **Routing:** copy, not custody. Peers mail each other directly and post NOTEs; state changes are posts; the steward sees everything and never carries a message; nothing changes in agent-mail 2 for the pilot. *Amended 2026-11-06 (rollout decision 90, built in agent-mail 2.4): for metadata, the last clause is reversed and the steward's view widened. While John has the send log on, every send's time, host, sender, recipient, id, subject and reply link is recorded, never a body, and a steward reads its own members' records through `steward-signals traffic`. Copy, not custody, direct mail between peers, state changes as posts and carrying no message all stand.*
 2. **Name:** steward.
 3. **Placement:** real agent-deck conductors, running Claude Code, on hera, with the same powers as every session.
-4. **Questions:** a pane line of at most 80 characters ending in `?`, paged by the director's scanner; answers in the pane or by Discord `<conductor>:` prefix; questions only, never digests.
+4. **Questions:** a pane line of at most 80 characters ending in `?`, paged by the director's scanner; answers in the pane or by Discord `<conductor>:` prefix; questions only, never digests. *Amended 2026-11-07 (John's answer 3 to the agent inbox design): answers also come from the agent inbox app, whose gateway types them into the steward's pane, and the relay label reads "pane, Discord or app, not distinguishable".*
 5. **Relay:** the steward relays everything John decides, labelled as relayed; workers apply judgement.
 5b. **Worker rule:** a worker acts on a relayed protected decision when checks hold (as chosen: answers the worker's own question id; from the topic's steward; within 30 minutes of the question; matched by the steward's decision post). Refined in 11.
 6. **Liveness:** a STATUS rule in John's scanner: page once when STATUS is older than twice the tick while items are open. *Amended 2026-11-05 (decision 38): on staleness alone, open items or none.*
