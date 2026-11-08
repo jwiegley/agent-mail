@@ -175,7 +175,7 @@ John answers a steward in its pane, or from Discord. In Discord the answer is a 
 ingest-steward: ingest-3 A
 ```
 
-The bridge takes off the prefix, types the rest into the steward's pane with `agent-deck session send --wait`, and posts the steward's reply back, tagged `[ingest-steward]`. After applying an answer, the reply names what it applied: `applied ingest-3 A at 20:40Z`. An answer sent while the steward is in the middle of a turn waits in its pane and is applied at its next turn. The steward cannot tell the pane from Discord, so every relay says `by: John, in my session (pane or Discord, not distinguishable)`. Only this grammar is taken as an answer; any other text is an instruction to the steward:
+The bridge takes off the prefix, types the rest into the steward's pane with `agent-deck session send --wait`, and posts the steward's reply back, tagged `[ingest-steward]`. After applying an answer, the reply names what it applied: `applied ingest-3 A at 20:40Z`. An answer to a question already decided draws one line instead, `closed ingest-3 D-2, nothing applied`, and nothing is relayed. An answer sent while the steward is in the middle of a turn waits in its pane and is applied at its next turn. The steward cannot tell the pane from Discord, so every relay says `by: John, in my session (pane or Discord, not distinguishable)`. Only this grammar is taken as an answer; any other text is an instruction to the steward:
 
 | Typed | Meaning |
 |---|---|

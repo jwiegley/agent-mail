@@ -5942,6 +5942,13 @@ RESET_CHANNEL_STEP = ("1. Re-read this file, `POLICY.md`, `TOPIC.md`, `LEDGER.md
                       "you a new topic (section 3). Your channel is the one in TOPIC.md's heading, never one taken again from the channels' purposes. With no "
                       "TOPIC.md there is no topic yet: stop here, subscribing to nothing and arming neither the doorbell nor the tick, until John gives you a "
                       "topic (section 3).")
+# S2 of the agent inbox design (John's answer 3, 2026-11-07): an answer to a question that is no longer open in the ledger and that DECISIONS.md has
+# closed draws one line naming the decision, and nothing is relayed, so that a late answer from the app, Discord or the pane changes nothing. The
+# sentence is pinned whole.
+CLOSED_ANSWER_SENTENCE = ("An answer to a question that is no longer open in your ledger and that `DECISIONS.md` has closed, by an answer of John's, a drop or "
+                          "its default, is neither applied nor relayed: send no post and no mail for it, write no line in `DECISIONS.md`, and in place of "
+                          "your status line print this one line, alone on its line, `closed <q-id> D-<n>, nothing applied`, `D-<n>` being the newest line "
+                          "that closed it.")
 # What the steward does with the message agent-deck types into a conductor's pane at each start or restart, from the same review (Important 2): that message asks
 # for agent-deck inbox drain and ./state.json, which section 1 and the rest of section 2 forbid, so section 2 names it among the shared parts that do not apply.
 RECOVERY_PART = ("- **agent-deck's recovery turn:** at each start or restart, agent-deck types a message that begins `[CONDUCTOR RECOVERY]` into your pane, asking "
@@ -6368,6 +6375,16 @@ def test_claude_md_runs_traffic_and_keeps_its_matters(d):
        "docs: section 12 of CLAUDE.md puts the Traffic and Unread lines in the digest, and the unread and unanswered counts in the summary")
 
 
+def test_claude_md_refuses_an_answer_to_a_closed_question(d):
+    t = claude_md()
+    found = [s for s in sentences(claude_section(t, 10)) if "nothing applied" in s]
+    ok(found == [CLOSED_ANSWER_SENTENCE] and t.count("`closed <q-id> D-<n>, nothing applied`") == 1,
+       "docs: section 10 of CLAUDE.md answers an answer to a closed question with one line naming its decision and relays nothing, as pinned "
+       f"(got {without_question_marks(repr(found))})")
+    ok(read(os.path.join(REPO, "steward", "README.md")).count("`closed ingest-3 D-2, nothing applied`") == 1,
+       "docs: steward/README.md section 5 shows S2's line once")
+
+
 def test_shared_and_heartbeat(d):
     s = read(os.path.join(REPO, "steward", "SHARED.md")); h = read(os.path.join(REPO, "steward", "HEARTBEAT_RULES.md"))
     ok("own CLAUDE.md governs" in s and "auto-respond" in s and "never" in s.lower(), "docs: SHARED.md defers and forbids")
@@ -6652,6 +6669,7 @@ DOCS_CHECKS = (test_claude_md, test_claude_md_headings_are_in_order, test_claude
                test_claude_md_keeps_its_channel_across_a_re_join, test_claude_md_takes_a_backlog_within_its_topic_and_files_each_post_once,
                test_claude_md_invites_with_the_optional_write_target, test_claude_md_compares_posts_since_last_with_its_own_channel,
                test_claude_md_leaves_the_join_its_own_subscriptions, test_claude_md_runs_traffic_and_keeps_its_matters,
+               test_claude_md_refuses_an_answer_to_a_closed_question,
                test_shared_and_heartbeat,
                test_shared_and_heartbeat_forbid_what_spec_6_4_lists_and_grant_nothing, test_shared_and_heartbeat_hold_exactly_their_pinned_sentences,
                test_worker_md, test_worker_md_matches_what_claude_md_files_and_sends, test_worker_md_keeps_its_checks_and_safety_sentences_as_pinned,
@@ -7070,7 +7088,15 @@ def test_docs_checks_catch_each_pinned_regression(d):
         ("the digest's Traffic line dropped", "Traffic (24h, send log; not recording: <members>): ", "Traffic: ", "docs: section 12 of CLAUDE.md puts the Traffic and Unread lines"),
         ("a traffic metric dropped", "| `traffic.fleet_sends`, `traffic.hosts_recording` |", "| `traffic.fleet_sends` |", "docs: section 11 of CLAUDE.md lists TRAFFIC.log"),
         ("last heard left to the mail alone", "; `heard:` gives each member's newest record, which is its `last heard` in the Workers table when it is later than the last mail "
-         "you filed from it.", ".", "docs: section 8 of CLAUDE.md takes a member's last heard"))
+         "you filed from it.", ".", "docs: section 8 of CLAUDE.md takes a member's last heard"),
+        # S2 of the agent inbox design (John's answer 3, 2026-11-07): an answer to a closed question draws one line naming its decision and relays nothing
+        ("an answer to a closed question relayed after all", "is neither applied nor relayed:", "is relayed as usual:",
+         "docs: section 10 of CLAUDE.md answers an answer to a closed question"),
+        ("S2's line without its decision", "`closed <q-id> D-<n>, nothing applied`", "`closed <q-id>, nothing applied`",
+         "docs: section 10 of CLAUDE.md answers an answer to a closed question"),
+        # The final review's I-2 (2026-11-07): q-ids restart at 1 per topic while DECISIONS.md is kept, so S2 holds only for a question no longer open in the ledger
+        ("S2's test of closed left to DECISIONS.md alone", "is no longer open in your ledger and that ", "",
+         "docs: section 10 of CLAUDE.md answers an answer to a closed question"))
     for i, (what, old, new, failure) in enumerate(regressions):
         failures = docs_checks(checkout_with(d, f"regression-{i}", "CLAUDE.md", old, new))
         ok(old in good and any(f.startswith(failure) for f in failures), f"docs: docs_checks catches {what} (got {without_question_marks(repr(failures))})")
@@ -7284,7 +7310,10 @@ def test_docs_checks_catch_each_regression_in_the_readme(d):
         ("TRAFFIC.log left out of the steward's files", "RECEIVED.log, TRAFFIC.log, steward-state.json", "RECEIVED.log, steward-state.json", 1,
          "docs: steward/README.md lists TRAFFIC.log among the steward's files"),
         ("row 26 expecting no handled count", " and counts it under `handled:`", "", 1, "docs: row 26 of the runbook plants mail"),
-        ("TRAFFIC.log left behind after day zero", ' "$D/TRAFFIC.log"', "", 1, "docs: the clean-up after day zero moves TRAFFIC.log"))
+        ("TRAFFIC.log left behind after day zero", ' "$D/TRAFFIC.log"', "", 1, "docs: the clean-up after day zero moves TRAFFIC.log"),
+        # S2 of the agent inbox design (John's answer 3, 2026-11-07): section 5 shows the one line an answer to a closed question draws
+        ("S2's line left out of section 5", "`closed ingest-3 D-2, nothing applied`", "`closed ingest-3, nothing applied`", 1,
+         "docs: steward/README.md section 5 shows S2's line once"))
     for i, (what, old, new, count, failure) in enumerate(regressions):
         failures = docs_checks(checkout_with(d, f"readme-regression-{i}", name, old, new, count))
         ok(old in readme and any(f.startswith(failure) for f in failures),
